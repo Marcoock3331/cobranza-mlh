@@ -1,0 +1,430 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/usuarios/$(request.auth.uid);
+    }
+
+    function userExists() {
+      return isAuthenticated() && exists(userPath());
+    }
+
+    function userData() {
+      return get(userPath()).data;
+    }
+
+    function isStaff() {
+      return userExists()
+        && userData().activo == true
+        && userData().rol in ['SU', 'ADMIN'];
+    }
+
+    function isSU() {
+      return isStaff() && userData().rol == 'SU';
+    }
+
+    function isADMIN() {
+      return isStaff() && userData().rol == 'ADMIN';
+    }
+
+    function actorValido() {
+      return isAuthenticated()
+        && request.resource.data.actor_uid is string
+        && request.resource.data.actor_uid == request.auth.uid;
+    }
+
+    match /usuarios/{userId} {
+      allow read: if (
+        isAuthenticated() && request.auth.uid == userId
+      ) || isSU();
+
+      allow create: if isSU()
+        && userId != request.auth.uid
+        && request.resource.data.nombre is string
+        && request.resource.data.correo is string
+        && request.resource.data.rol == 'ADMIN'
+        && request.resource.data.activo is bool
+        && request.resource.data.activo == true;
+
+      allow update: if isSU()
+        && userId != request.auth.uid
+        && resource.data.rol == 'ADMIN'
+        && request.resource.data.rol == resource.data.rol
+        && request.resource.data.activo is bool
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'activo',
+            'fecha_actualizacion',
+            'updatedAt'
+          ]);
+
+      allow delete: if false;
+    }
+
+    match /clientes/{clienteId} {
+      allow read: if isStaff();
+
+      allow create: if isSU()
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.limite_credito is number
+        && request.resource.data.limite_credito >= 0
+        && request.resource.data.credito_disponible
+          == request.resource.data.limite_credito
+        && request.resource.data.deuda_actual is number
+        && request.resource.data.deuda_actual == 0
+        && request.resource.data.activo == true
+        && request.resource.data.estatus == 'Activo';
+
+      allow create: if isADMIN()
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.limite_credito is number
+        && request.resource.data.limite_credito == 0
+        && request.resource.data.credito_disponible is number
+        && request.resource.data.credito_disponible == 0
+        && request.resource.data.deuda_actual is number
+        && request.resource.data.deuda_actual == 0
+        && request.resource.data.activo == true
+        && request.resource.data.estatus == 'Activo';
+
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'nombre',
+            'numero_cliente',
+            'rfc',
+            'telefono',
+            'correo',
+            'direccion',
+            'grupo',
+            'segmentacion',
+            'dias_mensaje',
+            'pagare_monto',
+            'pagare_fecha',
+            'notas_internas',
+            'updatedAt'
+          ]);
+
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'deuda_actual',
+            'credito_disponible',
+            'monto_ultimo_pago',
+            'fecha_ultimo_pago',
+            'metodo_ultimo_pago',
+            'ultimo_deposito_monto',
+            'ultimo_deposito_fecha',
+            'ultimo_deposito_metodo',
+            'updatedAt'
+          ])
+        && request.resource.data.limite_credito
+          == resource.data.limite_credito
+        && request.resource.data.activo
+          == resource.data.activo
+        && request.resource.data.deuda_actual is number
+        && request.resource.data.deuda_actual >= 0
+        && request.resource.data.credito_disponible is number
+        && request.resource.data.credito_disponible >= 0
+        && request.resource.data.credito_disponible
+          <= request.resource.data.limite_credito;
+
+      allow update: if isSU()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'limite_credito',
+            'credito_disponible',
+            'updatedAt'
+          ])
+        && request.resource.data.limite_credito is number
+        && request.resource.data.limite_credito >= 0
+        && request.resource.data.credito_disponible is number
+        && request.resource.data.credito_disponible >= 0
+        && request.resource.data.credito_disponible
+          <= request.resource.data.limite_credito
+        && request.resource.data.deuda_actual
+          == resource.data.deuda_actual
+        && request.resource.data.activo
+          == resource.data.activo;
+
+      allow update: if isSU()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'activo',
+            'estatus',
+            'updatedAt'
+          ])
+        && request.resource.data.activo == false
+        && request.resource.data.estatus == 'Inactivo';
+
+      allow delete: if false;
+    }
+
+    match /facturas/{facturaId} {
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && request.resource.data.id == facturaId
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente is string
+        && request.resource.data.folio is string
+        && request.resource.data.monto_total is number
+        && request.resource.data.monto_total > 0
+        && request.resource.data.monto_pagado is number
+        && request.resource.data.monto_pagado == 0
+        && request.resource.data.saldo_pendiente is number
+        && request.resource.data.saldo_pendiente
+          == request.resource.data.monto_total
+        && request.resource.data.estatus == 'Pendiente'
+        && request.resource.data.abonos is list
+        && request.resource.data.abonos.size() == 0
+        && request.resource.data.emision is timestamp
+        && request.resource.data.vencimiento is timestamp
+        && request.resource.data.createdAt is timestamp;
+
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'saldo_pendiente',
+            'monto_pagado',
+            'estatus',
+            'abonos',
+            'ultima_accion',
+            'updatedAt'
+          ])
+        && request.resource.data.monto_total
+          == resource.data.monto_total
+        && request.resource.data.cliente_id
+          == resource.data.cliente_id
+        && request.resource.data.saldo_pendiente is number
+        && request.resource.data.saldo_pendiente >= 0
+        && request.resource.data.saldo_pendiente
+          <= resource.data.monto_total
+        && request.resource.data.monto_pagado is number
+        && request.resource.data.monto_pagado >= 0
+        && request.resource.data.monto_pagado
+          <= resource.data.monto_total
+        && request.resource.data.abonos is list
+        && request.resource.data.estatus in [
+          'Pendiente',
+          'Vencida',
+          'Reprogramado',
+          'Pagada',
+          'Cancelada'
+        ]
+        && (
+          (
+            request.resource.data.saldo_pendiente == 0
+            && request.resource.data.estatus == 'Pagada'
+          ) || (
+            request.resource.data.saldo_pendiente > 0
+            && request.resource.data.estatus != 'Pagada'
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /solicitudes/{solicitudId} {
+      allow read: if isStaff();
+
+      allow create: if isADMIN()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'cliente_id',
+          'cliente',
+          'monto_incremento',
+          'limite_anterior',
+          'nuevo_limite_propuesto',
+          'motivo',
+          'estatus',
+          'solicitado_por_uid',
+          'solicitado_por_nombre',
+          'createdAt'
+        ])
+        && request.resource.data.id == solicitudId
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente is string
+        && request.resource.data.monto_incremento is number
+        && request.resource.data.monto_incremento > 0
+        && request.resource.data.limite_anterior is number
+        && request.resource.data.limite_anterior >= 0
+        && request.resource.data.nuevo_limite_propuesto is number
+        && request.resource.data.nuevo_limite_propuesto
+          == request.resource.data.limite_anterior
+            + request.resource.data.monto_incremento
+        && request.resource.data.estatus == 'Pendiente'
+        && request.resource.data.solicitado_por_uid
+          == request.auth.uid
+        && request.resource.data.solicitado_por_nombre is string
+        && request.resource.data.createdAt is timestamp;
+
+      allow update: if isSU()
+        && resource.data.estatus == 'Pendiente'
+        && request.resource.data.estatus in [
+          'Autorizado',
+          'Rechazado'
+        ]
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'estatus',
+            'resolvedAt',
+            'resolvedBy',
+            'resolvedByUid'
+          ])
+        && request.resource.data.resolvedAt is timestamp
+        && request.resource.data.resolvedBy is string
+        && request.resource.data.resolvedByUid
+          == request.auth.uid;
+
+      allow delete: if false;
+    }
+
+    match /compromisos/{compromisoId} {
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && request.resource.data.keys().hasAll([
+          'cliente_id',
+          'cliente_nombre',
+          'tipo_evento',
+          'motivo',
+          'monto',
+          'fecha_compromiso',
+          'mes_anio',
+          'estatus',
+          'ultima_accion',
+          'historial_acciones',
+          'creado_por',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente_nombre is string
+        && request.resource.data.tipo_evento in [
+          'Recordatorio',
+          'Seguimiento',
+          'Promesa'
+        ]
+        && request.resource.data.motivo is string
+        && request.resource.data.monto is number
+        && request.resource.data.monto >= 0
+        && request.resource.data.fecha_compromiso is timestamp
+        && request.resource.data.mes_anio is string
+        && request.resource.data.estatus == 'Pendiente'
+        && request.resource.data.ultima_accion is map
+        && request.resource.data.historial_acciones is list
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'fecha_compromiso',
+            'mes_anio',
+            'estatus',
+            'ultima_accion',
+            'historial_acciones',
+            'updatedAt'
+          ])
+        && request.resource.data.estatus in [
+          'Pendiente',
+          'Completado',
+          'Reprogramado',
+          'Cancelado'
+        ]
+        && request.resource.data.ultima_accion is map
+        && request.resource.data.historial_acciones is list
+        && request.resource.data.updatedAt is timestamp;
+
+      allow delete: if isSU();
+    }
+
+    match /actividad/{actividadId} {
+      allow read: if isSU();
+
+      allow create: if isStaff()
+        && actorValido()
+        && request.resource.data.usuario is string
+        && request.resource.data.modulo is string
+        && request.resource.data.tipo is string
+        && request.resource.data.detalle is string
+        && request.resource.data.serverTime is timestamp;
+
+      allow update, delete: if false;
+    }
+
+    match /metricas_globales/{documentoId} {
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && documentoId == 'stats_actuales'
+        && request.resource.data.keys().hasOnly([
+          'cartera_total',
+          'cartera_vencida',
+          'ingresos_mes',
+          'ingresos_semana',
+          'clientes_activos',
+          'facturas_vencidas',
+          'facturas_pendientes',
+          'facturas_pagadas',
+          'facturas_total',
+          'total_facturado',
+          'total_liquidado',
+          'cobrado_historico',
+          'abonos_registrados',
+          'updatedAt',
+          'ultima_actualizacion'
+        ]);
+
+      allow update: if isStaff()
+        && documentoId == 'stats_actuales'
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'cartera_total',
+            'cartera_vencida',
+            'ingresos_mes',
+            'ingresos_semana',
+            'clientes_activos',
+            'facturas_vencidas',
+            'facturas_pendientes',
+            'facturas_pagadas',
+            'facturas_total',
+            'total_facturado',
+            'total_liquidado',
+            'cobrado_historico',
+            'abonos_registrados',
+            'updatedAt',
+            'ultima_actualizacion'
+          ]);
+
+      allow delete: if false;
+    }
+  }
+}
