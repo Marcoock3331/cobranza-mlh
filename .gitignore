@@ -10,15 +10,20 @@ lerna-debug.log*
 # Dependencias
 node_modules/
 
-# Compilación
+# Compilacion
 dist/
 dist-ssr/
 build/
 
-# Variables de entorno
+# Variables de entorno y credenciales
 .env
 .env.*
 !.env.example
+serviceAccount.json
+service-account.json
+firebase-admin-key.json
+*.pem
+*.key
 
 # Archivos locales
 *.local
@@ -30,9 +35,17 @@ firestore-debug.log
 ui-debug.log
 emulator-data/
 
+# Bases de datos y exportaciones reales
+*.sql
+*.sqlite
+exportaciones/
+backups/
+copias/
+
 # Repomix y revisiones temporales
 repomix-output.xml
 revision-*.md
+bloque-*.md
 
 # Editor directories and files
 .vscode/*
