@@ -89,46 +89,63 @@ export const compromisosService = {
     }
   },
 
-  completarCompromiso: async (id, clienteNombre, userName, actor_uid) => {
-    if (!actor_uid) {
-      return { success: false, error: "No se identificó al usuario responsable de la acción." };
-    }
+completarCompromiso: async (
+  id,
+  clienteNombre,
+  userName,
+  actor_uid,
+) => {
+  if (!actor_uid) {
+    return {
+      success: false,
+      error: "No se identificó al usuario responsable de la acción.",
+    };
+  }
 
-    try {
-      const batch = writeBatch(db);
-      const accion = {
-        responsable: userName || "Admin",
-        fecha: Timestamp.now(),
-        accion: "Completar",
-        detalle: "Marcado como completado"
-      };
+  try {
+    const batch = writeBatch(db);
 
-      const compRef = doc(db, 'compromisos', id);
-      batch.update(compRef, {
-        estatus: "Completado",
-        fecha_completado: serverTimestamp(),
-        completado_por: userName || "Admin",
-        updatedAt: serverTimestamp(),
-        ultima_accion: accion,
-        historial_acciones: arrayUnion(accion)
-      });
+    const accion = {
+      responsable: userName || "Admin",
+      fecha: Timestamp.now(),
+      accion: "Completar",
+      detalle: "Marcado como completado",
+    };
 
-      const actRef = doc(collection(db, 'actividad'));
-      batch.set(actRef, {
-        actor_uid,
-        usuario: userName || 'Admin',
-        modulo: 'Calendario',
-        tipo: 'Actualización',
-        cliente: clienteNombre || "N/A",
-        detalle: `El compromiso de seguimiento fue marcado como completado.`,
-        serverTime: serverTimestamp()
-      });
+    const compRef = doc(db, "compromisos", id);
 
-      await batch.commit();
-      return { success: true };
-    } catch (error) {
-      console.error("Error completando compromiso:", error);
-      return { success: false, error: error.message };
+    batch.update(compRef, {
+      estatus: "Completado",
+      fecha_completado: serverTimestamp(),
+      completado_por: userName || "Admin",
+      completado_por_uid: actor_uid,
+      updatedAt: serverTimestamp(),
+      ultima_accion: accion,
+      historial_acciones: arrayUnion(accion),
+    });
+
+    const actRef = doc(collection(db, "actividad"));
+
+    batch.set(actRef, {
+      actor_uid,
+      usuario: userName || "Admin",
+      modulo: "Calendario",
+      tipo: "Actualización",
+      cliente: clienteNombre || "N/A",
+      detalle:
+        "El compromiso de seguimiento fue marcado como completado.",
+      serverTime: serverTimestamp(),
+    });
+
+    await batch.commit();
+
+    return { success: true };
+  } catch (error) {
+    console.error("Error completando compromiso:", error);
+
+    return {
+      success: false,
+      error: error.message, };
     }
   },
 
