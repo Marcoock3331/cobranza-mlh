@@ -423,6 +423,13 @@ export default function Calendario() {
 
     if (nuevoEstatus === evento.estatus_evento) return;
 
+    if (["Completado", "Cancelado"].includes(evento.estatus_evento)) {
+      alert(
+        "Este compromiso ya fue cerrado y no puede cambiar nuevamente de estado.",
+      );
+      return;
+    }
+
     if (nuevoEstatus === "Completado") {
       const res = await compromisosService.completarCompromiso(
         evento.id,
@@ -687,7 +694,23 @@ export default function Calendario() {
                                 onChange={(e) =>
                                   handleActualizarEstado(ev, e.target.value)
                                 }
-                                className={`text-[9px] font-black uppercase border rounded px-1.5 py-0.5 outline-none cursor-pointer transition-colors ${coloresSelector[ev.estatus_evento]}`}
+                                disabled={["Completado", "Cancelado"].includes(
+                                  ev.estatus_evento,
+                                )}
+                                title={
+                                  ["Completado", "Cancelado"].includes(
+                                    ev.estatus_evento,
+                                  )
+                                    ? "Estado final: no admite más cambios"
+                                    : "Cambiar estado del compromiso"
+                                }
+                                className={`text-[9px] font-black uppercase border rounded px-1.5 py-0.5 outline-none transition-colors ${
+                                  ["Completado", "Cancelado"].includes(
+                                    ev.estatus_evento,
+                                  )
+                                    ? "cursor-not-allowed opacity-70"
+                                    : "cursor-pointer"
+                                } ${coloresSelector[ev.estatus_evento]}`}
                               >
                                 <option value="Pendiente">Pendiente</option>
                                 <option value="Completado">Completado</option>

@@ -39,6 +39,62 @@ service cloud.firestore {
         && request.resource.data.actor_uid == request.auth.uid;
     }
 
+    function auditoriaEdicionFacturaValida(facturaId) {
+      let auditId = request.resource.data.ultima_edicion_audit_id;
+      let auditPath = /databases/$(database)/documents/actividad/$(auditId);
+
+      return auditId is string
+        && auditId != ''
+        && request.resource.data.ultima_edicion_actor_uid
+          == request.auth.uid
+        && request.resource.data.ultima_edicion_at is timestamp
+        && existsAfter(auditPath)
+        && getAfter(auditPath).data.actor_uid == request.auth.uid
+        && getAfter(auditPath).data.modulo == 'Facturación'
+        && getAfter(auditPath).data.tipo == 'Edición de Factura'
+        && getAfter(auditPath).data.factura_id == facturaId;
+    }
+
+    function clientesEdicionFacturaValidos() {
+      let clienteAnteriorId = resource.data.cliente_id;
+      let clienteNuevoId = request.resource.data.cliente_id;
+      let clienteAnteriorPath = /databases/$(database)/documents/clientes/$(clienteAnteriorId);
+      let clienteNuevoPath = /databases/$(database)/documents/clientes/$(clienteNuevoId);
+      let saldoAnterior = resource.data.saldo_pendiente;
+      let saldoNuevo = request.resource.data.saldo_pendiente;
+
+      return exists(clienteAnteriorPath)
+        && exists(clienteNuevoPath)
+        && get(clienteNuevoPath).data.activo == true
+        && (
+          (
+            clienteAnteriorId == clienteNuevoId
+            && getAfter(clienteAnteriorPath).data.deuda_actual
+              == get(clienteAnteriorPath).data.deuda_actual
+                + saldoNuevo - saldoAnterior
+            && getAfter(clienteAnteriorPath).data.credito_disponible
+              == get(clienteAnteriorPath).data.credito_disponible
+                - saldoNuevo + saldoAnterior
+          )
+          ||
+          (
+            clienteAnteriorId != clienteNuevoId
+            && getAfter(clienteAnteriorPath).data.deuda_actual
+              == get(clienteAnteriorPath).data.deuda_actual
+                - saldoAnterior
+            && getAfter(clienteAnteriorPath).data.credito_disponible
+              == get(clienteAnteriorPath).data.credito_disponible
+                + saldoAnterior
+            && getAfter(clienteNuevoPath).data.deuda_actual
+              == get(clienteNuevoPath).data.deuda_actual
+                + saldoNuevo
+            && getAfter(clienteNuevoPath).data.credito_disponible
+              == get(clienteNuevoPath).data.credito_disponible
+                - saldoNuevo
+          )
+        );
+    }
+
     match /usuarios/{userId} {
       allow read: if (
         isAuthenticated() && request.auth.uid == userId
@@ -196,8 +252,11 @@ service cloud.firestore {
         && request.resource.data.abonos.size() == 0
         && request.resource.data.emision is timestamp
         && request.resource.data.vencimiento is timestamp
+        && request.resource.data.vencimiento
+          >= request.resource.data.emision
         && request.resource.data.createdAt is timestamp;
 
+      // Actualizaciones financieras provocadas por abonos o reversión de abonos.
       allow update: if isStaff()
         && request.resource.data
           .diff(resource.data)
@@ -210,6 +269,8 @@ service cloud.firestore {
             'ultima_accion',
             'updatedAt'
           ])
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.monto_total
           == resource.data.monto_total
         && request.resource.data.cliente_id
@@ -222,13 +283,15 @@ service cloud.firestore {
         && request.resource.data.monto_pagado >= 0
         && request.resource.data.monto_pagado
           <= resource.data.monto_total
+        && request.resource.data.saldo_pendiente
+          + request.resource.data.monto_pagado
+          == resource.data.monto_total
         && request.resource.data.abonos is list
         && request.resource.data.estatus in [
           'Pendiente',
           'Vencida',
           'Reprogramado',
-          'Pagada',
-          'Cancelada'
+          'Pagada'
         ]
         && (
           (
@@ -239,6 +302,72 @@ service cloud.firestore {
             && request.resource.data.estatus != 'Pagada'
           )
         );
+
+      // Edición general disponible para ADMIN y SU, siempre acompañada
+      // por la actualización financiera de clientes y una auditoría inmutable.
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'cliente_id',
+            'cliente',
+            'grupo',
+            'folio',
+            'monto_total',
+            'moneda',
+            'emision',
+            'vencimiento',
+            'observaciones',
+            'monto_pagado',
+            'saldo_pendiente',
+            'estatus',
+            'ultima_edicion_audit_id',
+            'ultima_edicion_actor_uid',
+            'ultima_edicion_at',
+            'updatedAt'
+          ])
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.abonos == resource.data.abonos
+        && request.resource.data.monto_pagado
+          == resource.data.monto_pagado
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente
+          == get(
+            /databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)
+          ).data.nombre
+        && request.resource.data.folio is string
+        && request.resource.data.folio != ''
+        && request.resource.data.monto_total is number
+        && request.resource.data.monto_total > 0
+        && request.resource.data.monto_total
+          >= request.resource.data.monto_pagado
+        && request.resource.data.saldo_pendiente is number
+        && request.resource.data.saldo_pendiente
+          == request.resource.data.monto_total
+            - request.resource.data.monto_pagado
+        && request.resource.data.emision is timestamp
+        && request.resource.data.vencimiento is timestamp
+        && request.resource.data.vencimiento
+          >= request.resource.data.emision
+        && request.resource.data.estatus in [
+          'Pendiente',
+          'Vencida',
+          'Pagada'
+        ]
+        && (
+          (
+            request.resource.data.saldo_pendiente == 0
+            && request.resource.data.estatus == 'Pagada'
+          ) || (
+            request.resource.data.saldo_pendiente > 0
+            && request.resource.data.estatus != 'Pagada'
+          )
+        )
+        && clientesEdicionFacturaValidos()
+        && auditoriaEdicionFacturaValida(facturaId);
 
       allow delete: if false;
     }
@@ -349,6 +478,9 @@ service cloud.firestore {
             'estatus',
             'ultima_accion',
             'historial_acciones',
+            'fecha_completado',
+            'completado_por',
+            'completado_por_uid',
             'updatedAt'
           ])
         && request.resource.data.estatus in [
@@ -357,9 +489,33 @@ service cloud.firestore {
           'Reprogramado',
           'Cancelado'
         ]
+        && (
+          request.resource.data.estatus == resource.data.estatus
+          || (
+            resource.data.estatus in [
+              'Pendiente',
+              'Reprogramado'
+            ]
+            && request.resource.data.estatus in [
+              'Reprogramado',
+              'Completado',
+              'Cancelado'
+            ]
+          )
+        )
         && request.resource.data.ultima_accion is map
         && request.resource.data.historial_acciones is list
-        && request.resource.data.updatedAt is timestamp;
+        && request.resource.data.updatedAt is timestamp
+        && (
+          request.resource.data.estatus != 'Completado'
+          || resource.data.estatus == 'Completado'
+          || (
+            request.resource.data.fecha_completado is timestamp
+            && request.resource.data.completado_por is string
+            && request.resource.data.completado_por_uid
+              == request.auth.uid
+          )
+        );
 
       allow delete: if isSU();
     }

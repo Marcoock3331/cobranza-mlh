@@ -1,4 +1,5 @@
 import { useState, useMemo, useContext } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { GlobalContext } from "../context/GlobalContext";
 import { useFacturas } from "../hooks/useFacturas";
 import { calcularDiasVencidos } from "../utils/fechas";
@@ -61,6 +62,34 @@ const normalizarGrupoFactura = (valor = "") => {
   );
 };
 
+const crearFormularioFactura = (factura = null) => {
+  if (!factura) {
+    return {
+      cliente_id: "",
+      cliente: "",
+      grupo: "General",
+      folio: "",
+      monto_total: "",
+      moneda: "MXN",
+      emision: "",
+      vencimiento: "",
+      observaciones: "",
+    };
+  }
+
+  return {
+    cliente_id: factura.cliente_id || "",
+    cliente: factura.cliente || "",
+    grupo: normalizarGrupoFactura(factura.grupo),
+    folio: factura.folio || "",
+    monto_total: factura.monto_total ?? "",
+    moneda: "MXN",
+    emision: factura.emision || "",
+    vencimiento: factura.vencimiento || "",
+    observaciones: factura.observaciones || "",
+  };
+};
+
 export default function Facturacion() {
   const {
     facturas,
@@ -72,6 +101,10 @@ export default function Facturacion() {
     registrarAbonoEnNube,
     eliminarAbonoEnNube,
   } = useContext(GlobalContext);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+  const facturaInicialEdicion = location.state?.editarFactura || null;
 
   const {
     busqueda,
@@ -87,25 +120,21 @@ export default function Facturacion() {
     limpiarFiltros,
   } = useFacturas(facturas);
 
-  const [modalActivo, setModalActivo] = useState(null);
-  const [facturaSeleccionada, setFacturaSeleccionada] = useState(null);
+  const [modalActivo, setModalActivo] = useState(
+    facturaInicialEdicion ? "editarFactura" : null,
+  );
+  const [facturaSeleccionada, setFacturaSeleccionada] = useState(
+    facturaInicialEdicion,
+  );
   const [notificacion, setNotificacion] = useState({
     titulo: "",
     descripcion: "",
     tipo: "exito",
   });
 
-  const [invoiceForm, setInvoiceForm] = useState({
-    cliente_id: "",
-    cliente: "",
-    grupo: "General",
-    folio: "",
-    monto_total: "",
-    moneda: "MXN",
-    emision: "",
-    vencimiento: "",
-    observaciones: "",
-  });
+  const [invoiceForm, setInvoiceForm] = useState(() =>
+    crearFormularioFactura(facturaInicialEdicion),
+  );
 
   const [pagoForm, setPagoForm] = useState({ monto: "", metodo: "Efectivo" });
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -162,29 +191,21 @@ export default function Facturacion() {
         plantilla: "atrasado",
         mensaje: generarMensajeWA("atrasado", facturaSeleccionada),
       });
-    } else if (tipo === "nuevaFactura")
-      setInvoiceForm({
-        cliente_id: "",
-        cliente: "",
-        grupo: "General",
-        folio: "",
-        monto_total: "",
-        moneda: "MXN",
-        emision: "",
-        vencimiento: "",
-        observaciones: "",
-      });
-    else if (tipo === "editarFactura" && facturaSeleccionada)
-      setInvoiceForm({
-        ...facturaSeleccionada,
-        grupo: normalizarGrupoFactura(facturaSeleccionada.grupo),
-      });
+    } else if (tipo === "nuevaFactura") {
+      setInvoiceForm(crearFormularioFactura());
+    } else if (tipo === "editarFactura" && facturaSeleccionada) {
+      setInvoiceForm(crearFormularioFactura(facturaSeleccionada));
+    }
 
     setModalActivo(tipo);
   };
 
   const cerrarModal = () => {
     setModalActivo(null);
+
+    if (location.state?.editarFactura) {
+      navigate("/facturas", { replace: true, state: null });
+    }
     if (
       [
         "notificacion",
@@ -205,8 +226,9 @@ export default function Facturacion() {
 
   const handleSaveFactura = async () => {
     setIsSubmitting(true);
+
     try {
-      const nuevoMonto = parseFloat(invoiceForm.monto_total) || 0;
+      const nuevoMonto = Number(invoiceForm.monto_total) || 0;
 
       if (
         !invoiceForm.cliente_id ||
@@ -220,24 +242,21 @@ export default function Facturacion() {
           "Selecciona cliente, folio, fechas y un monto válido para continuar.",
           "error",
         );
-        setIsSubmitting(false);
         return;
       }
 
-      // VALIDACIÓN LÓGICA DE FECHAS
       if (invoiceForm.vencimiento < invoiceForm.emision) {
         mostrarNotificacion(
           "Fechas inválidas",
           "La fecha de vencimiento no puede ser anterior a la fecha de emisión.",
           "error",
         );
-        setIsSubmitting(false);
         return;
       }
 
-      const clienteBD =
-        clientes.find((c) => c.id === invoiceForm.cliente_id) ||
-        clientes.find((c) => c.nombre === invoiceForm.cliente);
+      const clienteBD = clientes.find(
+        (cliente) => cliente.id === invoiceForm.cliente_id,
+      );
 
       if (!clienteBD) {
         mostrarNotificacion(
@@ -245,44 +264,12 @@ export default function Facturacion() {
           "Selecciona un cliente comercial válido.",
           "error",
         );
-        setIsSubmitting(false);
-        return;
-      }
-
-      const limite = Number(clienteBD.limite_credito) || 0;
-
-      if (limite <= 0) {
-        mostrarNotificacion(
-          "Línea de crédito no asignada",
-          `El cliente ${clienteBD.nombre} todavía no tiene una línea de crédito configurada. Primero el SU debe asignarla para capturar nuevas facturas.`,
-          "error",
-        );
-        setIsSubmitting(false);
-        return;
-      }
-
-      const deudaActual = Number(clienteBD.deuda_actual) || 0;
-      const creditoDisponible = limite - deudaActual;
-
-      let montoAIngresar = nuevoMonto;
-      if (modalActivo === "editarFactura") {
-        const montoAnterior = Number(facturaSeleccionada.monto_total) || 0;
-        montoAIngresar = nuevoMonto - montoAnterior;
-      }
-
-      if (montoAIngresar > creditoDisponible) {
-        mostrarNotificacion(
-          "Límite de Crédito Excedido",
-          `El cliente ${clienteBD.nombre} solo tiene $${Math.max(0, creditoDisponible).toLocaleString("es-MX")} de crédito libre. El nuevo monto supera el margen autorizado.`,
-          "error",
-        );
-        setIsSubmitting(false);
         return;
       }
 
       const payloadFactura = {
-        cliente_id: invoiceForm.cliente_id,
-        cliente: invoiceForm.cliente,
+        cliente_id: clienteBD.id,
+        cliente: clienteBD.nombre,
         grupo: normalizarGrupoFactura(invoiceForm.grupo),
         folio: invoiceForm.folio.trim(),
         monto_total: nuevoMonto,
@@ -293,6 +280,31 @@ export default function Facturacion() {
       };
 
       if (modalActivo === "nuevaFactura") {
+        const limite = Number(clienteBD.limite_credito) || 0;
+        const deudaActual = Number(clienteBD.deuda_actual) || 0;
+        const disponibleGuardado = Number(clienteBD.credito_disponible);
+        const creditoDisponible = Number.isFinite(disponibleGuardado)
+          ? disponibleGuardado
+          : Math.max(0, limite - deudaActual);
+
+        if (limite <= 0) {
+          mostrarNotificacion(
+            "Línea de crédito no asignada",
+            `El cliente ${clienteBD.nombre} todavía no tiene una línea de crédito configurada.`,
+            "error",
+          );
+          return;
+        }
+
+        if (nuevoMonto > creditoDisponible) {
+          mostrarNotificacion(
+            "Límite de Crédito Excedido",
+            `El cliente ${clienteBD.nombre} solo tiene $${Math.max(0, creditoDisponible).toLocaleString("es-MX")} de crédito libre.`,
+            "error",
+          );
+          return;
+        }
+
         const res = await crearFacturaEnNube(payloadFactura);
 
         if (!res?.success) {
@@ -306,9 +318,21 @@ export default function Facturacion() {
 
         mostrarNotificacion(
           "Factura Autorizada",
-          `Se ha generado el folio ${invoiceForm.folio} sin exceder el límite del cliente.`,
+          `Se ha generado el folio ${payloadFactura.folio} correctamente.`,
         );
-      } else if (modalActivo === "editarFactura") {
+        return;
+      }
+
+      if (modalActivo === "editarFactura") {
+        if (!facturaSeleccionada?.id) {
+          mostrarNotificacion(
+            "Error",
+            "No se identificó la factura que deseas editar.",
+            "error",
+          );
+          return;
+        }
+
         const res = await modificarFacturaEnNube(
           facturaSeleccionada.id,
           payloadFactura,
@@ -316,16 +340,24 @@ export default function Facturacion() {
 
         if (!res?.success) {
           mostrarNotificacion(
-            "Acción pendiente",
-            res?.error || "La edición de facturas aún no está habilitada.",
+            "No se pudo editar",
+            res?.error || "La modificación fue rechazada.",
             "error",
+          );
+          return;
+        }
+
+        if (res.sinCambios) {
+          mostrarNotificacion(
+            "Sin cambios",
+            "La factura conserva los mismos datos; no se generó una entrada de auditoría.",
           );
           return;
         }
 
         mostrarNotificacion(
           "Factura Modificada",
-          "Saldos y límites recalibrados automáticamente.",
+          `Se actualizaron ${res.camposModificados?.length || 1} campo(s). Los saldos, límites y métricas fueron recalculados y la edición quedó registrada para el SU.`,
         );
       }
     } catch (error) {
@@ -830,24 +862,28 @@ export default function Facturacion() {
                   <MessageSquare className="h-4 w-4 md:h-4 md:w-4 mr-2 text-green-600" />{" "}
                   Enviar Aviso WhatsApp
                 </button>
-                {userRole === "SU" && (
-                  <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-3 md:gap-2">
+                <div
+                  className={`mt-4 pt-4 border-t border-gray-200 grid gap-3 md:gap-2 ${
+                    userRole === "SU" ? "grid-cols-2" : "grid-cols-1"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => abrirFormulario("editarFactura")}
+                    className="p-3 md:p-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-amber-100 active:bg-amber-100 transition-colors"
+                  >
+                    <Edit className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Editar
+                  </button>
+                  {userRole === "SU" && (
                     <button
                       disabled
-                      title="Próximamente"
+                      title="La anulación financiera se implementará en un flujo separado"
                       className="p-3 md:p-2 bg-gray-100 text-gray-400 border border-gray-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs cursor-not-allowed"
                     >
-                      <Edit className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Editar
+                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Anular
                     </button>
-                    <button
-                      disabled
-                      title="Próximamente"
-                      className="p-3 md:p-2 bg-gray-100 text-gray-400 border border-gray-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs cursor-not-allowed"
-                    >
-                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Eliminar
-                    </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -1188,7 +1224,11 @@ export default function Facturacion() {
                   disabled={isSubmitting}
                   className="w-full md:w-auto px-6 py-3.5 md:py-2.5 bg-[#ffd700] text-[#0a192f] text-sm md:text-xs font-black rounded-xl md:rounded-lg shadow-sm active:bg-[#e6c200] transition-colors flex items-center justify-center disabled:opacity-50"
                 >
-                  {isSubmitting ? "Guardando..." : "Guardar Factura"}
+                  {isSubmitting
+                    ? "Guardando..."
+                    : modalActivo === "editarFactura"
+                      ? "Guardar Cambios"
+                      : "Guardar Factura"}
                 </button>
               </div>
             </div>

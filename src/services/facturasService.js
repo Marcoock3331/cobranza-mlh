@@ -5,6 +5,7 @@ import {
   collection,
   doc,
   increment,
+  runTransaction,
   serverTimestamp,
   Timestamp,
   writeBatch,
@@ -53,6 +54,86 @@ const convertirFechaFormulario = (fecha) => {
   }
 
   return fechaConvertida;
+};
+
+
+const convertirFechaAString = (fecha) => {
+  if (!fecha) return "";
+
+  if (fecha?.toDate && typeof fecha.toDate === "function") {
+    const valor = fecha.toDate();
+    return `${valor.getFullYear()}-${String(valor.getMonth() + 1).padStart(2, "0")}-${String(valor.getDate()).padStart(2, "0")}`;
+  }
+
+  if (fecha instanceof Date) {
+    return `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}-${String(fecha.getDate()).padStart(2, "0")}`;
+  }
+
+  const texto = String(fecha).split(" ")[0];
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    return texto;
+  }
+
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(texto)) {
+    const [dia, mes, anio] = texto.split("/");
+    return `${anio}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+  }
+
+  return "";
+};
+
+const calcularEstatusFinanciero = ({ saldo, vencimiento }) => {
+  if (redondearMoneda(saldo) === 0) return "Pagada";
+
+  const fecha = vencimiento?.toDate
+    ? vencimiento.toDate()
+    : vencimiento instanceof Date
+      ? new Date(vencimiento)
+      : convertirFechaFormulario(convertirFechaAString(vencimiento));
+
+  fecha.setHours(0, 0, 0, 0);
+
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  return fecha < hoy ? "Vencida" : "Pendiente";
+};
+
+const valoresIguales = (anterior, nuevo) => {
+  if (typeof anterior === "number" || typeof nuevo === "number") {
+    return redondearMoneda(anterior) === redondearMoneda(nuevo);
+  }
+
+  return String(anterior ?? "") === String(nuevo ?? "");
+};
+
+const ETIQUETAS_EDICION = {
+  cliente_id: "Cliente",
+  grupo: "Grupo",
+  folio: "Folio",
+  monto_total: "Monto total",
+  emision: "Emisión",
+  vencimiento: "Vencimiento",
+  observaciones: "Observaciones",
+};
+
+const formatearValorAuditoria = (campo, valor) => {
+  if (campo === "monto_total") {
+    return `$${redondearMoneda(valor).toLocaleString("es-MX", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+
+  if (campo === "emision" || campo === "vencimiento") {
+    const fecha = convertirFechaAString(valor);
+    if (!fecha) return "Sin fecha";
+    const [anio, mes, dia] = fecha.split("-");
+    return `${dia}/${mes}/${anio}`;
+  }
+
+  return String(valor ?? "").trim() || "Sin datos";
 };
 
 const esFacturaVencida = (factura) => {
@@ -752,11 +833,467 @@ export const facturasService = {
     }
   },
 
-  modificarFactura: async () => ({
-    success: false,
-    error:
-      "La modificación de facturas requiere recalibración de saldos y límites. En construcción.",
-  }),
+  modificarFactura: async ({
+    idFactura,
+    formData,
+    userName,
+    actor_uid,
+  }) => {
+    if (!actor_uid) {
+      return {
+        success: false,
+        error: "No se identificó al usuario responsable.",
+      };
+    }
+
+    if (!idFactura) {
+      return {
+        success: false,
+        error: "No se identificó la factura que será modificada.",
+      };
+    }
+
+    try {
+      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+
+      const resultado = await runTransaction(db, async (transaction) => {
+        const facturaSnap = await transaction.get(facturaRef);
+
+        if (!facturaSnap.exists()) {
+          throw new Error("La factura ya no existe en Firestore.");
+        }
+
+        const facturaAnterior = facturaSnap.data();
+
+        if (facturaAnterior.estatus === "Cancelada") {
+          throw new Error(
+            "Las facturas canceladas no pueden editarse desde este formulario.",
+          );
+        }
+
+        const clienteAnteriorId = facturaAnterior.cliente_id;
+        const clienteNuevoId = String(formData?.cliente_id || "").trim();
+
+        if (!clienteAnteriorId || !clienteNuevoId) {
+          throw new Error(
+            "La factura debe conservar un cliente enlazado mediante cliente_id.",
+          );
+        }
+
+        const clienteAnteriorRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          clienteAnteriorId,
+        );
+        const clienteNuevoRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          clienteNuevoId,
+        );
+
+        const clienteAnteriorSnap = await transaction.get(clienteAnteriorRef);
+        const clienteNuevoSnap =
+          clienteNuevoId === clienteAnteriorId
+            ? clienteAnteriorSnap
+            : await transaction.get(clienteNuevoRef);
+
+        if (!clienteAnteriorSnap.exists()) {
+          throw new Error(
+            "No se encontró el cliente original enlazado a la factura.",
+          );
+        }
+
+        if (!clienteNuevoSnap.exists()) {
+          throw new Error("El nuevo cliente seleccionado no existe.");
+        }
+
+        const clienteAnterior = clienteAnteriorSnap.data();
+        const clienteNuevo = clienteNuevoSnap.data();
+        const cambiaCliente = clienteAnteriorId !== clienteNuevoId;
+
+        if (
+          clienteNuevo.activo === false ||
+          clienteNuevo.estatus === "Inactivo"
+        ) {
+          throw new Error(
+            "No se puede asignar la factura a un cliente inactivo.",
+          );
+        }
+
+        const montoAnterior = redondearMoneda(
+          facturaAnterior.monto_total,
+        );
+        const saldoAnterior = redondearMoneda(
+          facturaAnterior.saldo_pendiente,
+        );
+        const montoPagado = redondearMoneda(
+          Number.isFinite(Number(facturaAnterior.monto_pagado))
+            ? facturaAnterior.monto_pagado
+            : montoAnterior - saldoAnterior,
+        );
+        const abonos = Array.isArray(facturaAnterior.abonos)
+          ? facturaAnterior.abonos
+          : [];
+
+        if (cambiaCliente && (montoPagado > 0 || abonos.length > 0)) {
+          throw new Error(
+            "No se puede cambiar el cliente de una factura que ya tiene abonos. Corrige los demás datos o revierte primero sus pagos.",
+          );
+        }
+
+        const montoNuevo = redondearMoneda(formData?.monto_total);
+
+        if (montoNuevo <= 0) {
+          throw new Error(
+            "El monto total de la factura debe ser mayor a cero.",
+          );
+        }
+
+        if (montoNuevo < montoPagado) {
+          throw new Error(
+            `El nuevo monto no puede ser menor a los $${montoPagado.toLocaleString("es-MX")} que ya fueron pagados.`,
+          );
+        }
+
+        const fechaEmision = convertirFechaFormulario(formData?.emision);
+        const fechaVencimiento = convertirFechaFormulario(
+          formData?.vencimiento,
+        );
+
+        if (fechaVencimiento < fechaEmision) {
+          throw new Error(
+            "La fecha de vencimiento no puede ser anterior a la fecha de emisión.",
+          );
+        }
+
+        const folioNuevo = String(formData?.folio || "").trim();
+
+        if (!folioNuevo) {
+          throw new Error("El folio de la factura es obligatorio.");
+        }
+
+        const saldoNuevo = redondearMoneda(montoNuevo - montoPagado);
+        const estatusAnteriorReal = calcularEstatusFinanciero({
+          saldo: saldoAnterior,
+          vencimiento: facturaAnterior.vencimiento,
+        });
+        const estatusNuevo = calcularEstatusFinanciero({
+          saldo: saldoNuevo,
+          vencimiento: fechaVencimiento,
+        });
+
+        const limiteAnterior = redondearMoneda(
+          clienteAnterior.limite_credito,
+        );
+        const deudaAnteriorGuardada = redondearMoneda(
+          clienteAnterior.deuda_actual,
+        );
+        const disponibleAnteriorGuardado = redondearMoneda(
+          clienteAnterior.credito_disponible,
+        );
+
+        if (!cambiaCliente) {
+          const diferenciaSaldo = redondearMoneda(
+            saldoNuevo - saldoAnterior,
+          );
+          const nuevaDeuda = redondearMoneda(
+            deudaAnteriorGuardada + diferenciaSaldo,
+          );
+          const nuevoDisponible = redondearMoneda(
+            disponibleAnteriorGuardado - diferenciaSaldo,
+          );
+
+          if (nuevaDeuda < 0) {
+            throw new Error(
+              "La edición produciría una deuda negativa en el cliente.",
+            );
+          }
+
+          if (
+            nuevoDisponible < 0 ||
+            nuevoDisponible > limiteAnterior
+          ) {
+            throw new Error(
+              `El cliente no cuenta con crédito suficiente. Disponible actual: $${disponibleAnteriorGuardado.toLocaleString("es-MX")}.`,
+            );
+          }
+
+          if (diferenciaSaldo !== 0) {
+            transaction.update(clienteAnteriorRef, {
+              deuda_actual: nuevaDeuda,
+              credito_disponible: nuevoDisponible,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        } else {
+          const limiteNuevoCliente = redondearMoneda(
+            clienteNuevo.limite_credito,
+          );
+          const deudaNuevoCliente = redondearMoneda(
+            clienteNuevo.deuda_actual,
+          );
+          const disponibleNuevoCliente = redondearMoneda(
+            clienteNuevo.credito_disponible,
+          );
+
+          const deudaRestauradaAnterior = redondearMoneda(
+            deudaAnteriorGuardada - saldoAnterior,
+          );
+          const disponibleRestauradoAnterior = redondearMoneda(
+            disponibleAnteriorGuardado + saldoAnterior,
+          );
+          const deudaAplicadaNuevo = redondearMoneda(
+            deudaNuevoCliente + saldoNuevo,
+          );
+          const disponibleAplicadoNuevo = redondearMoneda(
+            disponibleNuevoCliente - saldoNuevo,
+          );
+
+          if (
+            deudaRestauradaAnterior < 0 ||
+            disponibleRestauradoAnterior > limiteAnterior
+          ) {
+            throw new Error(
+              "Los datos financieros del cliente original no permiten mover la factura de forma segura.",
+            );
+          }
+
+          if (
+            limiteNuevoCliente <= 0 ||
+            disponibleAplicadoNuevo < 0 ||
+            disponibleAplicadoNuevo > limiteNuevoCliente
+          ) {
+            throw new Error(
+              `El nuevo cliente no tiene crédito suficiente para recibir un saldo de $${saldoNuevo.toLocaleString("es-MX")}.`,
+            );
+          }
+
+          transaction.update(clienteAnteriorRef, {
+            deuda_actual: deudaRestauradaAnterior,
+            credito_disponible: disponibleRestauradoAnterior,
+            updatedAt: serverTimestamp(),
+          });
+
+          transaction.update(clienteNuevoRef, {
+            deuda_actual: deudaAplicadaNuevo,
+            credito_disponible: disponibleAplicadoNuevo,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const valoresAnteriores = {
+          cliente_id: clienteAnteriorId,
+          cliente: facturaAnterior.cliente || clienteAnterior.nombre || "S/N",
+          grupo: String(facturaAnterior.grupo || "General"),
+          folio: String(facturaAnterior.folio || ""),
+          monto_total: montoAnterior,
+          emision: convertirFechaAString(facturaAnterior.emision),
+          vencimiento: convertirFechaAString(
+            facturaAnterior.vencimiento,
+          ),
+          observaciones: String(facturaAnterior.observaciones || ""),
+        };
+
+        const valoresNuevos = {
+          cliente_id: clienteNuevoId,
+          cliente: clienteNuevo.nombre || "S/N",
+          grupo: String(formData?.grupo || clienteNuevo.grupo || "General"),
+          folio: folioNuevo,
+          monto_total: montoNuevo,
+          emision: convertirFechaAString(fechaEmision),
+          vencimiento: convertirFechaAString(fechaVencimiento),
+          observaciones: String(formData?.observaciones || "").trim(),
+        };
+
+        const camposComparables = [
+          "cliente_id",
+          "grupo",
+          "folio",
+          "monto_total",
+          "emision",
+          "vencimiento",
+          "observaciones",
+        ];
+
+        const camposModificados = camposComparables.filter((campo) => {
+          if (campo === "cliente_id") {
+            return valoresAnteriores.cliente_id !== valoresNuevos.cliente_id;
+          }
+
+          return !valoresIguales(
+            valoresAnteriores[campo],
+            valoresNuevos[campo],
+          );
+        });
+
+        if (camposModificados.length === 0) {
+          return {
+            sinCambios: true,
+            factura: facturaAnterior,
+          };
+        }
+
+        const detalleCambios = camposModificados.map((campo) => {
+          const valorAnterior =
+            campo === "cliente_id"
+              ? valoresAnteriores.cliente
+              : valoresAnteriores[campo];
+          const valorNuevo =
+            campo === "cliente_id"
+              ? valoresNuevos.cliente
+              : valoresNuevos[campo];
+
+          return `${ETIQUETAS_EDICION[campo]}: ${formatearValorAuditoria(
+            campo,
+            valorAnterior,
+          )} → ${formatearValorAuditoria(campo, valorNuevo)}`;
+        });
+
+        const facturaUpdate = {
+          cliente_id: clienteNuevoId,
+          cliente: valoresNuevos.cliente,
+          grupo: valoresNuevos.grupo,
+          folio: valoresNuevos.folio,
+          monto_total: montoNuevo,
+          moneda: "MXN",
+          emision: Timestamp.fromDate(fechaEmision),
+          vencimiento: Timestamp.fromDate(fechaVencimiento),
+          observaciones: valoresNuevos.observaciones,
+          monto_pagado: montoPagado,
+          saldo_pendiente: saldoNuevo,
+          estatus: estatusNuevo,
+          ultima_edicion_audit_id: auditRef.id,
+          ultima_edicion_actor_uid: actor_uid,
+          ultima_edicion_at: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+
+        transaction.update(facturaRef, facturaUpdate);
+
+        const estabaVencida = estatusAnteriorReal === "Vencida";
+        const quedaVencida = estatusNuevo === "Vencida";
+        const estabaPagada = saldoAnterior === 0;
+        const quedaPagada = saldoNuevo === 0;
+        const estabaPendiente = saldoAnterior > 0;
+        const quedaPendiente = saldoNuevo > 0;
+
+        const diferenciaCartera = redondearMoneda(
+          saldoNuevo - saldoAnterior,
+        );
+        const diferenciaTotalFacturado = redondearMoneda(
+          montoNuevo - montoAnterior,
+        );
+        const diferenciaCarteraVencida = redondearMoneda(
+          (quedaVencida ? saldoNuevo : 0) -
+            (estabaVencida ? saldoAnterior : 0),
+        );
+        const diferenciaPendientes =
+          Number(quedaPendiente) - Number(estabaPendiente);
+        const diferenciaPagadas =
+          Number(quedaPagada) - Number(estabaPagada);
+        const diferenciaVencidas =
+          Number(quedaVencida) - Number(estabaVencida);
+        const diferenciaLiquidado = redondearMoneda(
+          (quedaPagada ? montoNuevo : 0) -
+            (estabaPagada ? montoAnterior : 0),
+        );
+
+        const statsUpdate = {
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (diferenciaCartera !== 0) {
+          statsUpdate.cartera_total = increment(diferenciaCartera);
+        }
+        if (diferenciaTotalFacturado !== 0) {
+          statsUpdate.total_facturado = increment(
+            diferenciaTotalFacturado,
+          );
+        }
+        if (diferenciaCarteraVencida !== 0) {
+          statsUpdate.cartera_vencida = increment(
+            diferenciaCarteraVencida,
+          );
+        }
+        if (diferenciaPendientes !== 0) {
+          statsUpdate.facturas_pendientes = increment(
+            diferenciaPendientes,
+          );
+        }
+        if (diferenciaPagadas !== 0) {
+          statsUpdate.facturas_pagadas = increment(diferenciaPagadas);
+        }
+        if (diferenciaVencidas !== 0) {
+          statsUpdate.facturas_vencidas = increment(
+            diferenciaVencidas,
+          );
+        }
+        if (diferenciaLiquidado !== 0) {
+          statsUpdate.total_liquidado = increment(
+            diferenciaLiquidado,
+          );
+        }
+
+        transaction.set(statsRef, statsUpdate, { merge: true });
+
+        const anterioresAudit = {};
+        const nuevosAudit = {};
+
+        camposModificados.forEach((campo) => {
+          if (campo === "cliente_id") {
+            anterioresAudit.cliente_id = valoresAnteriores.cliente_id;
+            anterioresAudit.cliente = valoresAnteriores.cliente;
+            nuevosAudit.cliente_id = valoresNuevos.cliente_id;
+            nuevosAudit.cliente = valoresNuevos.cliente;
+          } else {
+            anterioresAudit[campo] = valoresAnteriores[campo];
+            nuevosAudit[campo] = valoresNuevos[campo];
+          }
+        });
+
+        transaction.set(auditRef, {
+          actor_uid,
+          usuario: userName || "Usuario",
+          modulo: "Facturación",
+          tipo: "Edición de Factura",
+          factura_id: idFactura,
+          folio: valoresNuevos.folio,
+          cliente: valoresNuevos.cliente,
+          cliente_anterior_id: valoresAnteriores.cliente_id,
+          cliente_nuevo_id: valoresNuevos.cliente_id,
+          campos_modificados: camposModificados,
+          valores_anteriores: anterioresAudit,
+          valores_nuevos: nuevosAudit,
+          detalle: detalleCambios.join(" | "),
+          serverTime: serverTimestamp(),
+        });
+
+        return {
+          sinCambios: false,
+          camposModificados,
+          factura: {
+            id: idFactura,
+            ...facturaAnterior,
+            ...facturaUpdate,
+          },
+        };
+      });
+
+      return {
+        success: true,
+        ...resultado,
+      };
+    } catch (error) {
+      console.error("Error al modificar la factura:", error);
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
 
   eliminarFactura: async () => ({
     success: false,

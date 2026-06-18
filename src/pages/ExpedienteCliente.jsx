@@ -563,6 +563,9 @@ export default function ExpedienteCliente() {
                 const saldoPendiente = Number(fac.saldo_pendiente) || 0;
                 const montoAbonado = montoTotal - saldoPendiente;
                 const porcentajeLiquidado = montoTotal > 0 ? (montoAbonado / montoTotal) * 100 : 0;
+                const observacionLimpia = String(fac.observaciones || "")
+                  .replace(/^observaciones\s*:\s*/i, "")
+                  .trim();
 
                 return (
                   <div className="flex flex-col space-y-5 md:space-y-4">
@@ -595,6 +598,51 @@ export default function ExpedienteCliente() {
                       </div>
                     </div>
 
+                    <div className="relative overflow-hidden rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 shadow-sm">
+                      <div className="absolute inset-y-0 left-0 w-1 bg-amber-400" />
+
+                      <div className="p-4 pl-5 md:p-3 md:pl-5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center min-w-0">
+                            <div className="h-8 w-8 shrink-0 rounded-lg bg-amber-100 border border-amber-200 flex items-center justify-center">
+                              <StickyNote className="h-4 w-4 text-amber-700" />
+                            </div>
+
+                            <div className="ml-2.5 min-w-0">
+                              <p className="text-[10px] font-black uppercase tracking-[0.12em] text-amber-700">
+                                Observaciones de la factura
+                              </p>
+                              <p className="text-[10px] text-amber-600/80 mt-0.5">
+                                Nota interna para seguimiento operativo
+                              </p>
+                            </div>
+                          </div>
+
+                          <span
+                            className={`shrink-0 px-2 py-1 rounded-full border text-[9px] font-black uppercase tracking-wide ${
+                              observacionLimpia
+                                ? "bg-amber-100 border-amber-200 text-amber-700"
+                                : "bg-gray-100 border-gray-200 text-gray-500"
+                            }`}
+                          >
+                            {observacionLimpia ? "Registrada" : "Sin registro"}
+                          </span>
+                        </div>
+
+                        <div className="mt-3 rounded-lg border border-amber-100 bg-white/80 px-3 py-3">
+                          <p
+                            className={`text-xs leading-relaxed whitespace-pre-wrap break-words ${
+                              observacionLimpia
+                                ? "text-gray-700 font-medium"
+                                : "text-gray-400 italic"
+                            }`}
+                          >
+                            {observacionLimpia || "Sin observaciones registradas para esta factura."}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
                     <div>
                       <span className="block font-black text-[#0a192f] text-xs md:text-xs flex items-center mb-2 md:mb-2">
                         <FileText className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1 text-blue-600" /> Historial de Abonos
@@ -620,6 +668,15 @@ export default function ExpedienteCliente() {
                         </table>
                       </div>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => navigate("/facturas", { state: { editarFactura: fac } })}
+                      className="w-full px-4 py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-amber-100 active:bg-amber-100 transition-colors"
+                    >
+                      <Edit className="h-4 w-4 mr-2" />
+                      Editar esta factura
+                    </button>
                   </div>
                 );
               })()}

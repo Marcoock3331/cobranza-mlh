@@ -10,6 +10,36 @@ import {
   FilterX, Activity, Loader2
 } from "lucide-react";
 
+
+const ETIQUETAS_CAMBIOS_FACTURA = {
+  cliente_id: "Cliente",
+  grupo: "Grupo",
+  folio: "Folio",
+  monto_total: "Monto total",
+  emision: "Emisión",
+  vencimiento: "Vencimiento",
+  observaciones: "Observaciones",
+};
+
+const formatearCambioFactura = (campo, valor) => {
+  if (campo === "monto_total") {
+    return `$${(Number(valor) || 0).toLocaleString("es-MX", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }
+
+  if (campo === "emision" || campo === "vencimiento") {
+    const fecha = String(valor || "");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      const [anio, mes, dia] = fecha.split("-");
+      return `${dia}/${mes}/${anio}`;
+    }
+  }
+
+  return textoSeguro(valor, "Sin datos") || "Sin datos";
+};
+
 export default function GestionUsuarios() {
   // BLINDAJE: Extracción rigurosa para uso en servicios
   const {
@@ -27,6 +57,7 @@ export default function GestionUsuarios() {
 
   const [modalActivo, setModalActivo] = useState(null);
   const [usuarioSeleccionado, setUsuarioSeleccionado] = useState(null);
+  const [actividadSeleccionada, setActividadSeleccionada] = useState(null);
   const [tempSolicitud, setTempSolicitud] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [notificacion, setNotificacion] = useState({ titulo: "", descripcion: "", tipo: "exito" });
@@ -57,7 +88,8 @@ export default function GestionUsuarios() {
     return (actividad || []).filter((act) => {
       const matchBusqueda =
         (act.cliente || "").toLowerCase().includes(busquedaLimpia) ||
-        (act.detalle || "").toLowerCase().includes(busquedaLimpia);
+        (act.detalle || "").toLowerCase().includes(busquedaLimpia) ||
+        (act.folio || "").toLowerCase().includes(busquedaLimpia);
       const matchModulo = filtroActividad.modulo === "Todos" || act.modulo === filtroActividad.modulo;
       const matchTipo = filtroActividad.tipo === "Todos" || act.tipo === filtroActividad.tipo;
 
@@ -87,6 +119,7 @@ export default function GestionUsuarios() {
     if (isSubmitting) return;
     setModalActivo(null);
     setUsuarioSeleccionado(null);
+    setActividadSeleccionada(null);
     setTempSolicitud(null);
   };
 
@@ -398,7 +431,7 @@ export default function GestionUsuarios() {
                   <option value="Todos">Todos los Módulos</option><option value="Facturación">Facturación</option><option value="Calendario">Calendario</option><option value="Clientes">Clientes</option><option value="Sistema">Sistema Base</option>
                 </select>
                 <select value={filtroActividad.tipo} onChange={(e) => actualizarFiltroActividad("tipo", e.target.value)} className="w-full px-3 md:px-2 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs text-gray-600 outline-none">
-                  <option value="Todos">Todos los Eventos</option><option value="Facturas">Facturas</option><option value="Pagos">Pagos / Abonos</option><option value="Crédito">Créditos</option><option value="WhatsApp">WhatsApp</option><option value="Recordatorios">Recordatorios</option><option value="Sistema">Ajustes Base</option>
+                  <option value="Todos">Todos los Eventos</option><option value="Creación">Creación</option><option value="Edición de Factura">Edición de Factura</option><option value="Abono">Abono</option><option value="Eliminación de Abono">Eliminación de Abono</option><option value="Actualización">Actualización</option><option value="Reprogramación">Reprogramación</option><option value="Cancelación">Cancelación</option><option value="WhatsApp">WhatsApp</option><option value="Eliminación">Eliminación</option>
                 </select>
                 <input type="date" value={filtroActividad.fecha} onChange={(e) => actualizarFiltroActividad("fecha", e.target.value)} className="w-full px-3 md:px-2 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs text-gray-500 outline-none" />
               </div>
@@ -413,6 +446,18 @@ export default function GestionUsuarios() {
                           {act.cliente !== "N/A" && <span className="text-xs md:text-xs font-black text-[#0a192f] uppercase tracking-tight ml-1 truncate max-w-[220px]">{textoSeguro(act.cliente)}</span>}
                         </div>
                         <p className="text-xs md:text-xs text-gray-600 font-medium leading-relaxed">{textoSeguro(act.detalle)}</p>
+                        {act.tipo === "Edición de Factura" && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActividadSeleccionada(act);
+                              setModalActivo("detalleEdicionFactura");
+                            }}
+                            className="mt-2 px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-[11px] font-black hover:bg-amber-100 active:bg-amber-100 transition-colors"
+                          >
+                            Ver cambios detallados
+                          </button>
+                        )}
                       </div>
                       <div className="shrink-0 text-left md:text-right flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center w-full md:w-auto border-t md:border-0 pt-2 md:pt-0 border-gray-100 gap-2">
                         <span className="text-[11px] font-mono text-gray-400 flex items-center"><Clock className="h-3.5 w-3.5 md:h-3 md:w-3 mr-1.5 md:mr-1" />{textoSeguro(act.fechaHora, "Sin fecha")}</span>
@@ -441,7 +486,7 @@ export default function GestionUsuarios() {
       {/* MODALES "BOTTOM SHEET" DE SEGURIDAD */}
       {modalActivo && (
         <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm md:p-4">
-          <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in max-h-[90vh] pb-6 md:pb-0 m-auto md:m-0">
+          <div className={`bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in max-h-[90vh] pb-6 md:pb-0 m-auto md:m-0 ${modalActivo === "detalleEdicionFactura" ? "max-w-2xl" : "max-w-sm"}`}>
             <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
 
             {modalActivo !== "notificacion" && (
@@ -450,6 +495,7 @@ export default function GestionUsuarios() {
                   {modalActivo === "nuevoUsuario" && <><UserPlus className="h-4 w-4 md:h-4 md:w-4 mr-1.5" /> Alta de Personal</>}
                   {modalActivo === "confirmarEstado" && <><Power className="h-4 w-4 md:h-4 md:w-4 mr-1.5 text-amber-500" /> Confirmar Cambio de Estado</>}
                   {modalActivo === "confirmarSolicitud" && <><Shield className="h-4 w-4 md:h-4 md:w-4 mr-1.5 text-amber-500" /> Resolver Movimiento</>}
+                  {modalActivo === "detalleEdicionFactura" && <><Activity className="h-4 w-4 mr-1.5 text-amber-500" /> Detalle de Edición de Factura</>}
                 </h2>
                 <button onClick={cerrarModal} className="text-gray-400 active:text-red-500 bg-gray-50 md:bg-transparent p-1 md:p-0 rounded-full"><XCircle className="h-6 w-6 md:h-5 md:w-5" /></button>
               </div>
@@ -520,6 +566,45 @@ export default function GestionUsuarios() {
                 </div>
               )}
 
+              {modalActivo === "detalleEdicionFactura" && actividadSeleccionada && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3">
+                      <span className="block text-[10px] font-black uppercase text-gray-400">Factura</span>
+                      <strong className="font-mono text-[#0a192f]">{textoSeguro(actividadSeleccionada.folio, "S/F")}</strong>
+                    </div>
+                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3">
+                      <span className="block text-[10px] font-black uppercase text-gray-400">Operador</span>
+                      <strong className="text-[#0a192f]">{textoSeguro(actividadSeleccionada.usuario)}</strong>
+                    </div>
+                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 sm:col-span-2">
+                      <span className="block text-[10px] font-black uppercase text-gray-400">Cliente</span>
+                      <strong className="text-[#0a192f]">{textoSeguro(actividadSeleccionada.cliente)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <div className="grid grid-cols-3 bg-gray-100 text-[10px] font-black uppercase text-gray-500">
+                      <div className="p-2.5">Campo</div>
+                      <div className="p-2.5 border-l border-gray-200">Antes</div>
+                      <div className="p-2.5 border-l border-gray-200">Después</div>
+                    </div>
+                    {(actividadSeleccionada.campos_modificados || []).map((campo) => {
+                      const campoValor = campo === "cliente_id" ? "cliente" : campo;
+                      return (
+                        <div key={campo} className="grid grid-cols-3 text-xs border-t border-gray-100">
+                          <div className="p-2.5 font-black text-gray-600">{ETIQUETAS_CAMBIOS_FACTURA[campo] || campo}</div>
+                          <div className="p-2.5 border-l border-gray-100 text-red-700 break-words">{formatearCambioFactura(campo, actividadSeleccionada.valores_anteriores?.[campoValor])}</div>
+                          <div className="p-2.5 border-l border-gray-100 text-green-700 break-words">{formatearCambioFactura(campo, actividadSeleccionada.valores_nuevos?.[campoValor])}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <p className="text-[11px] text-gray-400 font-mono">{textoSeguro(actividadSeleccionada.fechaHora, "Sin fecha")}</p>
+                </div>
+              )}
+
               {modalActivo === "notificacion" && (
                 <div className="text-center py-4 md:py-2">
                   <div className={`h-14 w-14 md:h-12 md:w-12 rounded-full flex items-center justify-center mx-auto mb-4 md:mb-3 ${notificacion.tipo === 'error' ? 'bg-red-100' : 'bg-green-100'}`}>
@@ -532,8 +617,8 @@ export default function GestionUsuarios() {
             </div>
 
             <div className="p-4 md:p-3 border-t border-gray-100 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-2 md:rounded-b-xl shrink-0">
-              {modalActivo === "notificacion" ? (
-                <button onClick={cerrarModal} className={`w-full px-4 py-3.5 md:py-2 text-sm md:text-xs font-black text-white rounded-xl md:rounded shadow-sm transition-colors ${notificacion.tipo === 'error' ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'}`}>Aceptar</button>
+              {modalActivo === "notificacion" || modalActivo === "detalleEdicionFactura" ? (
+                <button onClick={cerrarModal} className={`w-full px-4 py-3.5 md:py-2 text-sm md:text-xs font-black text-white rounded-xl md:rounded shadow-sm transition-colors ${modalActivo === "detalleEdicionFactura" ? "bg-[#0a192f] hover:bg-[#112240]" : notificacion.tipo === "error" ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"}`}>{modalActivo === "detalleEdicionFactura" ? "Cerrar" : "Aceptar"}</button>
               ) : (
                 <>
                   <button onClick={cerrarModal} disabled={isSubmitting} className="w-full md:w-auto px-4 py-3.5 md:py-1.5 text-sm md:text-xs font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 hover:bg-gray-50 transition-colors disabled:opacity-50">Cancelar</button>

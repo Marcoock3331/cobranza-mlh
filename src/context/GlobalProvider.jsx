@@ -352,16 +352,24 @@ function GlobalDataProvider({ authData, children }) {
     [facturas, clientes, actorUid, userName],
   );
 
-  const modificarFacturaEnNube = useCallback(async () => {
-    window.alert(
-      "La modificación de facturas requiere recálculo de métricas. Se implementará en el módulo de Facturación.",
-    );
+  const modificarFacturaEnNube = useCallback(
+    async (idFactura, formData) => {
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
 
-    return {
-      success: false,
-      error: "La modificación de facturas no está habilitada.",
-    };
-  }, []);
+      return facturasService.modificarFactura({
+        idFactura,
+        formData,
+        userName,
+        actor_uid: actorUid,
+      });
+    },
+    [actorUid, userName],
+  );
 
   const eliminarFacturaEnNube = useCallback(async () => {
     window.alert(
