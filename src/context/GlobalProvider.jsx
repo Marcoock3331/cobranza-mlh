@@ -7,12 +7,14 @@ import {
   orderBy,
   query,
 } from "firebase/firestore";
+import { useLocation } from "react-router-dom";
 
 import { db } from "../config/firebase";
-import { usuariosService } from "../services/usuariosService";
-import { facturasService } from "../services/facturasService";
 import { clientesService } from "../services/clientesService";
+import { facturasService } from "../services/facturasService";
+import { usuariosService } from "../services/usuariosService";
 import { formatearFechaSegura } from "../utils/normalizadores";
+import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
 import { AuthContext } from "./AuthContext";
 import { GlobalContext } from "./GlobalContext";
 
@@ -24,60 +26,14 @@ const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
 const SOLICITUDES_COLLECTION = "solicitudes";
 
-const normalizarFactura = (documento) => {
-  const factura = documento.data();
-
-  const emisionStr = factura.emision?.toDate
-    ? factura.emision.toDate().toISOString().split("T")[0]
-    : factura.emision;
-
-  const vencimientoStr = factura.vencimiento?.toDate
-    ? factura.vencimiento.toDate().toISOString().split("T")[0]
-    : factura.vencimiento;
-
-  let estatusReal = factura.estatus;
-
-  if (
-    (estatusReal === "Pendiente" || estatusReal === "Reprogramado") &&
-    factura.vencimiento?.toDate
-  ) {
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
-
-    const fechaVencimiento = factura.vencimiento.toDate();
-    fechaVencimiento.setHours(0, 0, 0, 0);
-
-    if (hoy > fechaVencimiento) {
-      estatusReal = "Vencida";
-    }
-  }
-
-  return {
-    id: documento.id,
-    ...factura,
-    estatus: estatusReal,
-    emision: emisionStr,
-    vencimiento: vencimientoStr,
-    _abonos_raw: factura.abonos || [],
-    abonos: (factura.abonos || []).map((abono) => ({
-      ...abono,
-      fecha: abono.fecha?.toDate
-        ? abono.fecha.toDate().toLocaleString("es-MX")
-        : abono.fecha,
-    })),
-  };
-};
-
 const ordenarFacturas = (lista) =>
   [...lista].sort((primera, segunda) => {
     const fechaPrimera =
-      primera.createdAt?.toMillis?.() ||
       primera.emision?.toDate?.().getTime?.() ||
       new Date(primera.emision || 0).getTime() ||
       0;
 
     const fechaSegunda =
-      segunda.createdAt?.toMillis?.() ||
       segunda.emision?.toDate?.().getTime?.() ||
       new Date(segunda.emision || 0).getTime() ||
       0;
@@ -85,9 +41,15 @@ const ordenarFacturas = (lista) =>
     return fechaSegunda - fechaPrimera;
   });
 
+const rutaNecesitaFacturasGlobales = (pathname) =>
+  pathname === "/" ||
+  pathname === "/calendario" ||
+  pathname.startsWith("/clientes/");
+
 export const GlobalProvider = ({ children }) => {
   const authContextValue = useContext(AuthContext);
   const authData = authContextValue ?? AUTH_DATA_VACIO;
+
   const valorSinSesion = useMemo(
     () => ({
       ...authData,
@@ -96,7 +58,16 @@ export const GlobalProvider = ({ children }) => {
         cartera_total: 0,
         cartera_vencida: 0,
         ingresos_mes: 0,
+        ingresos_semana: 0,
         clientes_activos: 0,
+        facturas_pendientes: 0,
+        facturas_pagadas: 0,
+        facturas_vencidas: 0,
+        facturas_total: 0,
+        total_facturado: 0,
+        total_liquidado: 0,
+        cobrado_historico: 0,
+        abonos_registrados: 0,
       },
       clientes: [],
       facturas: [],
@@ -121,19 +92,32 @@ export const GlobalProvider = ({ children }) => {
 };
 
 function GlobalDataProvider({ authData, children }) {
+  const location = useLocation();
   const { currentUser, userName, userRole } = authData;
-
   const actorUid = currentUser.uid;
+  const necesitaFacturasGlobales = rutaNecesitaFacturasGlobales(
+    location.pathname,
+  );
 
   const [clientes, setClientes] = useState([]);
-  const [facturas, setFacturas] = useState([]);
+  const [facturasGlobales, setFacturasGlobales] = useState([]);
   const [solicitudes, setSolicitudes] = useState([]);
   const [actividad, setActividad] = useState([]);
   const [usuarios, setUsuarios] = useState([]);
   const [statsDB, setStatsDB] = useState({
     cartera_total: 0,
+    cartera_vencida: 0,
     ingresos_mes: 0,
     ingresos_semana: 0,
+    clientes_activos: 0,
+    facturas_pendientes: 0,
+    facturas_pagadas: 0,
+    facturas_vencidas: 0,
+    facturas_total: 0,
+    total_facturado: 0,
+    total_liquidado: 0,
+    cobrado_historico: 0,
+    abonos_registrados: 0,
   });
 
   useEffect(() => {
@@ -194,31 +178,6 @@ function GlobalDataProvider({ authData, children }) {
       },
     );
 
-    const unsubFacturas = onSnapshot(
-      collection(db, FACTURAS_COLLECTION),
-      (snap) => {
-        setFacturas((facturasPrevias) => {
-          const mapa = new Map(
-            facturasPrevias.map((factura) => [factura.id, factura]),
-          );
-
-          snap.docChanges().forEach((cambio) => {
-            if (cambio.type === "removed") {
-              mapa.delete(cambio.doc.id);
-              return;
-            }
-
-            mapa.set(cambio.doc.id, normalizarFactura(cambio.doc));
-          });
-
-          return ordenarFacturas(Array.from(mapa.values()));
-        });
-      },
-      (error) => {
-        console.error("Error escuchando facturas:", error);
-      },
-    );
-
     const unsubStats = onSnapshot(
       doc(db, STATS_COLLECTION, STATS_DOC),
       (docSnap) => {
@@ -262,7 +221,6 @@ function GlobalDataProvider({ authData, children }) {
 
     return () => {
       unsubClientes();
-      unsubFacturas();
       unsubStats();
       unsubActividad();
       unsubSolicitudes();
@@ -270,26 +228,58 @@ function GlobalDataProvider({ authData, children }) {
     };
   }, [actorUid, userRole]);
 
+  useEffect(() => {
+    if (!actorUid || !necesitaFacturasGlobales) {
+      return undefined;
+    }
+
+    const unsubFacturas = onSnapshot(
+      collection(db, FACTURAS_COLLECTION),
+      (snap) => {
+        const facturasNormalizadas = snap.docs.map((documento) =>
+          normalizarFacturaSnapshot(documento),
+        );
+
+        setFacturasGlobales(ordenarFacturas(facturasNormalizadas));
+      },
+      (error) => {
+        console.error("Error escuchando facturas globales:", error);
+      },
+    );
+
+    return () => {
+      unsubFacturas();
+    };
+  }, [actorUid, necesitaFacturasGlobales]);
+
+  const facturas = useMemo(
+    () => (necesitaFacturasGlobales ? facturasGlobales : []),
+    [necesitaFacturasGlobales, facturasGlobales],
+  );
+
   const stats = useMemo(() => {
-    let vencida = 0;
-
-    facturas.forEach((factura) => {
-      if (factura.estatus === "Vencida") {
-        vencida += Number(factura.saldo_pendiente) || 0;
-      }
-    });
-
     const clientesReales = clientes.filter(
       (cliente) => cliente.activo !== false && cliente.estatus !== "Inactivo",
     );
 
     return {
-      cartera_total: statsDB.cartera_total || 0,
-      cartera_vencida: statsDB.cartera_vencida ?? vencida,
-      ingresos_mes: statsDB.ingresos_mes || 0,
-      clientes_activos: clientesReales.length,
+      ...statsDB,
+      cartera_total: Number(statsDB.cartera_total) || 0,
+      cartera_vencida: Number(statsDB.cartera_vencida) || 0,
+      ingresos_mes: Number(statsDB.ingresos_mes) || 0,
+      ingresos_semana: Number(statsDB.ingresos_semana) || 0,
+      clientes_activos:
+        Number(statsDB.clientes_activos) || clientesReales.length,
+      facturas_pendientes: Number(statsDB.facturas_pendientes) || 0,
+      facturas_pagadas: Number(statsDB.facturas_pagadas) || 0,
+      facturas_vencidas: Number(statsDB.facturas_vencidas) || 0,
+      facturas_total: Number(statsDB.facturas_total) || 0,
+      total_facturado: Number(statsDB.total_facturado) || 0,
+      total_liquidado: Number(statsDB.total_liquidado) || 0,
+      cobrado_historico: Number(statsDB.cobrado_historico) || 0,
+      abonos_registrados: Number(statsDB.abonos_registrados) || 0,
     };
-  }, [facturas, clientes, statsDB]);
+  }, [clientes, statsDB]);
 
   const crearFacturaEnNube = useCallback(
     async (formData) => {
@@ -343,13 +333,11 @@ function GlobalDataProvider({ authData, children }) {
       return facturasService.eliminarAbono({
         idFactura,
         idAbono,
-        facturas,
-        clientes,
         userName,
         actor_uid: actorUid,
       });
     },
-    [facturas, clientes, actorUid, userName],
+    [actorUid, userName],
   );
 
   const modificarFacturaEnNube = useCallback(
@@ -415,27 +403,21 @@ function GlobalDataProvider({ authData, children }) {
     () => ({
       ...authData,
       authLoading: authData.loading,
-
       stats,
-
       clientes,
       setClientes,
       eliminarClienteEnNube,
-
       facturas,
-      setFacturas,
+      setFacturas: setFacturasGlobales,
       crearFacturaEnNube,
       modificarFacturaEnNube,
       eliminarFacturaEnNube,
       registrarAbonoEnNube,
       eliminarAbonoEnNube,
-
       actividad: actividadVisible,
       setActividad,
-
       solicitudes,
       setSolicitudes,
-
       usuarios: usuariosVisibles,
     }),
     [

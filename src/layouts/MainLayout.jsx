@@ -17,17 +17,10 @@ import logoMLH from "../assets/MLH LOGO1.png";
 export default function MainLayout() {
   const navigate = useNavigate();
 
-  const {
-    userName,
-    userRole,
-    facturas,
-  } = useContext(GlobalContext);
+  const { userName, userRole, stats } = useContext(GlobalContext);
 
-  const facturasPendientesCount = Array.isArray(facturas)
-    ? facturas.filter(
-        (factura) => factura.estatus !== "Pagada",
-      ).length
-    : 0;
+  const facturasPendientesCount =
+    Number(stats?.facturas_pendientes) || 0;
 
   const handleCerrarSesion = async () => {
     try {

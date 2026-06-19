@@ -4,10 +4,14 @@ import {
   arrayUnion,
   collection,
   doc,
+  getDoc,
+  getDocs,
   increment,
+  query,
   runTransaction,
   serverTimestamp,
   Timestamp,
+  where,
   writeBatch,
 } from "firebase/firestore";
 
@@ -596,8 +600,6 @@ export const facturasService = {
   eliminarAbono: async ({
     idFactura,
     idAbono,
-    facturas,
-    clientes,
     userName,
     actor_uid,
   }) => {
@@ -609,34 +611,61 @@ export const facturasService = {
     }
 
     try {
-      const factura = facturas.find(
-        (item) => item.id === idFactura,
+      const facturaRef = doc(
+        db,
+        FACTURAS_COLLECTION,
+        idFactura,
       );
 
-      if (!factura) {
+      const facturaSnapshot = await getDoc(facturaRef);
+
+      if (!facturaSnapshot.exists()) {
         throw new Error("La factura no fue encontrada.");
       }
 
-      const abonoTarget = (
-        factura._abonos_raw || []
-      ).find((abono) => abono.id_abono === idAbono);
+      const factura = {
+        id: facturaSnapshot.id,
+        ...facturaSnapshot.data(),
+      };
+
+      const abonosFactura = Array.isArray(factura.abonos)
+        ? factura.abonos
+        : [];
+
+      const abonoTarget = abonosFactura.find(
+        (abono) => abono.id_abono === idAbono,
+      );
 
       if (!abonoTarget) {
         throw new Error("El abono no fue encontrado.");
       }
 
-      const clienteBD = clientes.find(
-        (cliente) => cliente.id === factura.cliente_id,
+      if (!factura.cliente_id) {
+        throw new Error(
+          "La factura no contiene un cliente_id válido.",
+        );
+      }
+
+      const clienteRef = doc(
+        db,
+        CLIENTES_COLLECTION,
+        factura.cliente_id,
       );
 
-      if (!clienteBD) {
+      const clienteSnapshot = await getDoc(clienteRef);
+
+      if (!clienteSnapshot.exists()) {
         throw new Error(
           "No se encontró el cliente enlazado mediante cliente_id.",
         );
       }
 
-      const montoAbono =
-        Number(abonoTarget.monto) || 0;
+      const clienteBD = {
+        id: clienteSnapshot.id,
+        ...clienteSnapshot.data(),
+      };
+
+      const montoAbono = Number(abonoTarget.monto) || 0;
 
       if (montoAbono <= 0) {
         throw new Error(
@@ -679,31 +708,27 @@ export const facturasService = {
           ? "Pendiente"
           : "Pagada";
 
-      const batch = writeBatch(db);
-
-      const facturaRef = doc(
-        db,
-        FACTURAS_COLLECTION,
-        idFactura,
+      const facturasClienteQuery = query(
+        collection(db, FACTURAS_COLLECTION),
+        where("cliente_id", "==", factura.cliente_id),
       );
 
-      batch.update(facturaRef, {
-        saldo_pendiente: nuevoSaldo,
-        monto_pagado: nuevoMontoPagado,
-        estatus: nuevoEstatus,
-        abonos: arrayRemove(abonoTarget),
-        updatedAt: serverTimestamp(),
-      });
-
-      const facturasCliente = facturas.filter(
-        (item) => item.cliente_id === factura.cliente_id,
+      const facturasClienteSnapshot = await getDocs(
+        facturasClienteQuery,
       );
 
       const abonosRestantes = [];
 
-      facturasCliente.forEach((item) => {
-        (item._abonos_raw || []).forEach((abono) => {
-          if (abono.id_abono !== idAbono) {
+      facturasClienteSnapshot.docs.forEach((documento) => {
+        const data = documento.data();
+        const abonos = Array.isArray(data.abonos) ? data.abonos : [];
+
+        abonos.forEach((abono) => {
+          const esAbonoEliminado =
+            documento.id === idFactura &&
+            abono.id_abono === idAbono;
+
+          if (!esAbonoEliminado) {
             abonosRestantes.push(abono);
           }
         });
@@ -722,6 +747,15 @@ export const facturasService = {
       });
 
       const ultimoAbono = abonosRestantes[0];
+      const batch = writeBatch(db);
+
+      batch.update(facturaRef, {
+        saldo_pendiente: nuevoSaldo,
+        monto_pagado: nuevoMontoPagado,
+        estatus: nuevoEstatus,
+        abonos: arrayRemove(abonoTarget),
+        updatedAt: serverTimestamp(),
+      });
 
       const clienteUpdatePayload = {
         deuda_actual: increment(montoAbono),
@@ -730,18 +764,12 @@ export const facturasService = {
       };
 
       if (ultimoAbono) {
-        clienteUpdatePayload.monto_ultimo_pago =
-          ultimoAbono.monto;
-        clienteUpdatePayload.fecha_ultimo_pago =
-          ultimoAbono.fecha;
-        clienteUpdatePayload.metodo_ultimo_pago =
-          ultimoAbono.metodo;
-        clienteUpdatePayload.ultimo_deposito_monto =
-          ultimoAbono.monto;
-        clienteUpdatePayload.ultimo_deposito_fecha =
-          ultimoAbono.fecha;
-        clienteUpdatePayload.ultimo_deposito_metodo =
-          ultimoAbono.metodo;
+        clienteUpdatePayload.monto_ultimo_pago = ultimoAbono.monto;
+        clienteUpdatePayload.fecha_ultimo_pago = ultimoAbono.fecha;
+        clienteUpdatePayload.metodo_ultimo_pago = ultimoAbono.metodo;
+        clienteUpdatePayload.ultimo_deposito_monto = ultimoAbono.monto;
+        clienteUpdatePayload.ultimo_deposito_fecha = ultimoAbono.fecha;
+        clienteUpdatePayload.ultimo_deposito_metodo = ultimoAbono.metodo;
       } else {
         clienteUpdatePayload.monto_ultimo_pago = null;
         clienteUpdatePayload.fecha_ultimo_pago = null;
@@ -750,12 +778,6 @@ export const facturasService = {
         clienteUpdatePayload.ultimo_deposito_fecha = null;
         clienteUpdatePayload.ultimo_deposito_metodo = null;
       }
-
-      const clienteRef = doc(
-        db,
-        CLIENTES_COLLECTION,
-        clienteBD.id,
-      );
 
       batch.update(clienteRef, clienteUpdatePayload);
 
@@ -771,24 +793,17 @@ export const facturasService = {
       }
 
       if (esMismaSemana(abonoTarget.fecha)) {
-        statsPayload.ingresos_semana =
-          increment(-montoAbono);
+        statsPayload.ingresos_semana = increment(-montoAbono);
       }
 
       if (pasaAVencida) {
-        statsPayload.cartera_vencida =
-          increment(montoAbono);
+        statsPayload.cartera_vencida = increment(montoAbono);
       }
 
-      if (
-        factura.estatus === "Pagada" &&
-        nuevoSaldo > 0
-      ) {
+      if (factura.estatus === "Pagada" && nuevoSaldo > 0) {
         statsPayload.facturas_pagadas = increment(-1);
         statsPayload.facturas_pendientes = increment(1);
-        statsPayload.total_liquidado = increment(
-          -montoTotal,
-        );
+        statsPayload.total_liquidado = increment(-montoTotal);
 
         if (pasaAVencida) {
           statsPayload.facturas_vencidas = increment(1);
