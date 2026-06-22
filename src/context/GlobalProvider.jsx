@@ -42,8 +42,6 @@ const ordenarFacturas = (lista) =>
   });
 
 const rutaNecesitaFacturasGlobales = (pathname) =>
-  pathname === "/" ||
-  pathname === "/calendario" ||
   pathname.startsWith("/clientes/");
 
 export const GlobalProvider = ({ children }) => {
@@ -359,16 +357,30 @@ function GlobalDataProvider({ authData, children }) {
     [actorUid, userName],
   );
 
-  const eliminarFacturaEnNube = useCallback(async () => {
-    window.alert(
-      "La anulación de facturas requiere estorno de saldos. Se implementará en el módulo de Facturación.",
-    );
+  const eliminarFacturaEnNube = useCallback(
+    async (idFactura) => {
+      if (userRole !== "SU") {
+        return {
+          success: false,
+          error: "Solo el SU puede eliminar facturas.",
+        };
+      }
 
-    return {
-      success: false,
-      error: "La anulación de facturas no está habilitada.",
-    };
-  }, []);
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return facturasService.eliminarFactura({
+        idFactura,
+        userName,
+        actor_uid: actorUid,
+      });
+    },
+    [actorUid, userName, userRole],
+  );
 
   const eliminarClienteEnNube = useCallback(
     async (id, nombreCliente) => {

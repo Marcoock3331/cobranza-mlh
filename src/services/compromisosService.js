@@ -1,16 +1,22 @@
-import { db } from "../config/firebase";
 import {
   arrayUnion,
   collection,
   doc,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   Timestamp,
   where,
   writeBatch,
 } from "firebase/firestore";
+
+import { db } from "../config/firebase";
 import { formatearFechaSegura } from "../utils/normalizadores";
+
+const COMPROMISOS_COLLECTION = "compromisos";
+const ACTIVIDAD_COLLECTION = "actividad";
+const ESTADOS_FINALES = ["Completado", "Cancelado"];
 
 const validarActor = (actorUid) => {
   if (!actorUid) {
@@ -24,40 +30,72 @@ const validarActor = (actorUid) => {
 };
 
 const crearAccion = (responsable, accion, detalle) => ({
-  responsable: responsable || "Admin",
+  responsable: responsable || "Operador MLH",
   fecha: Timestamp.now(),
   accion,
   detalle,
 });
 
+const crearActividad = ({ actorUid, userName, tipo, cliente, detalle }) => ({
+  actor_uid: actorUid,
+  usuario: userName || "Operador MLH",
+  modulo: "Calendario",
+  tipo,
+  cliente: cliente || "Recordatorio general",
+  detalle,
+  serverTime: serverTimestamp(),
+});
+
+const fechaDesdeISO = (fechaISO) => {
+  if (!fechaISO) {
+    throw new Error("La fecha del compromiso es obligatoria.");
+  }
+
+  const [anio, mes, dia] = fechaISO.split("-").map(Number);
+  const fecha = new Date(anio, mes - 1, dia);
+  fecha.setHours(12, 0, 0, 0);
+
+  if (!anio || !mes || !dia || Number.isNaN(fecha.getTime())) {
+    throw new Error("La fecha del compromiso no es válida.");
+  }
+
+  return { fecha, anio, mes, dia };
+};
+
+const descripcionVinculo = (tipoVinculo) => {
+  if (tipoVinculo === "FACTURA") return "recordatorio de factura";
+  if (tipoVinculo === "CLIENTE") return "recordatorio de cliente";
+  return "recordatorio general";
+};
+
 export const compromisosService = {
   escucharCompromisosMes: (mesAnio, callback) => {
     const consulta = query(
-      collection(db, "compromisos"),
+      collection(db, COMPROMISOS_COLLECTION),
       where("mes_anio", "==", mesAnio),
     );
 
     return onSnapshot(
       consulta,
       (snapshot) => {
-        const compromisos = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
+        callback(
+          snapshot.docs.map((documento) => {
+            const data = documento.data();
 
-          return {
-            id: docSnap.id,
-            ...data,
-            fecha_compromiso_texto: formatearFechaSegura(
-              data.fecha_compromiso,
-              "Sin fecha",
-            ),
-            ultima_accion_fecha: formatearFechaSegura(
-              data.ultima_accion?.fecha,
-              "Reciente",
-            ),
-          };
-        });
-
-        callback(compromisos);
+            return {
+              id: documento.id,
+              ...data,
+              fecha_compromiso_texto: formatearFechaSegura(
+                data.fecha_compromiso,
+                "Sin fecha",
+              ),
+              ultima_accion_fecha: formatearFechaSegura(
+                data.ultima_accion?.fecha,
+                "Reciente",
+              ),
+            };
+          }),
+        );
       },
       (error) => {
         console.error("Error al escuchar compromisos:", error);
@@ -66,69 +104,93 @@ export const compromisosService = {
     );
   },
 
-  crearCompromiso: async (data, userName, actor_uid) => {
-    const errorActor = validarActor(actor_uid);
+  crearCompromiso: async (data, userName, actorUid) => {
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
-      if (!data?.fecha) {
-        throw new Error("La fecha del compromiso es obligatoria.");
+      const { fecha, anio, mes, dia } = fechaDesdeISO(data?.fecha);
+      const tipoVinculo = data.tipo_vinculo || "GENERAL";
+      const titulo = data.titulo?.trim();
+      const motivo = data.motivo?.trim();
+
+      if (!titulo) {
+        throw new Error("El título del recordatorio es obligatorio.");
       }
 
-      const [anio, mes, dia] = data.fecha.split("-").map(Number);
-      const fechaCompromiso = new Date(anio, mes - 1, dia);
+      if (!motivo) {
+        throw new Error("El detalle del recordatorio es obligatorio.");
+      }
+
+      if (tipoVinculo === "CLIENTE" && !data.cliente_id) {
+        throw new Error("Selecciona un cliente para este recordatorio.");
+      }
 
       if (
-        !anio ||
-        !mes ||
-        !dia ||
-        Number.isNaN(fechaCompromiso.getTime())
+        tipoVinculo === "FACTURA" &&
+        (!data.cliente_id || !data.factura_id)
       ) {
-        throw new Error("La fecha del compromiso no es válida.");
+        throw new Error("Selecciona un cliente y una factura.");
       }
 
-      const batch = writeBatch(db);
+      const clienteId =
+        tipoVinculo === "GENERAL" ? null : data.cliente_id || null;
+      const clienteNombre =
+        tipoVinculo === "GENERAL" ? "" : data.cliente_nombre || "";
+      const facturaId =
+        tipoVinculo === "FACTURA" ? data.factura_id || null : null;
+      const folioFactura =
+        tipoVinculo === "FACTURA" ? data.folio_factura || "" : "";
+      const telefono =
+        tipoVinculo === "GENERAL" ? "" : data.telefono || "";
+      const monto =
+        tipoVinculo === "FACTURA" ? Number(data.monto) || 0 : 0;
+
       const accionInicial = crearAccion(
         userName,
         "Creación",
-        "Evento creado",
+        `${descripcionVinculo(tipoVinculo)} creado`,
       );
 
       const nuevoCompromiso = {
-        cliente_id: data.cliente_id || "N/A",
-        cliente_nombre: data.cliente_nombre || "Sin Nombre",
-        factura_id: data.factura_id || null,
-        folio_factura: data.folio_factura || null,
+        tipo_vinculo: tipoVinculo,
+        titulo,
+        motivo,
+        cliente_id: clienteId,
+        cliente_nombre: clienteNombre,
+        factura_id: facturaId,
+        folio_factura: folioFactura,
         tipo_evento: data.tipo_evento || "Recordatorio",
-        motivo: data.motivo || "Seguimiento",
-        monto: Number(data.monto) || 0,
-        telefono: data.telefono || "",
-        fecha_compromiso: Timestamp.fromDate(fechaCompromiso),
+        monto,
+        telefono,
+        fecha_compromiso: Timestamp.fromDate(fecha),
         mes_anio: `${anio}-${String(mes).padStart(2, "0")}`,
         estatus: "Pendiente",
         ultima_accion: accionInicial,
         historial_acciones: [accionInicial],
-        creado_por: userName || "Admin",
+        creado_por: userName || "Operador MLH",
+        creado_por_uid: actorUid,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
 
-      const compromisoRef = doc(collection(db, "compromisos"));
-      batch.set(compromisoRef, nuevoCompromiso);
+      const batch = writeBatch(db);
+      const compromisoRef = doc(collection(db, COMPROMISOS_COLLECTION));
+      const actividadRef = doc(collection(db, ACTIVIDAD_COLLECTION));
 
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "Admin",
-        modulo: "Calendario",
-        tipo: "Creación",
-        cliente: nuevoCompromiso.cliente_nombre,
-        detalle: `Se agendó un ${nuevoCompromiso.tipo_evento.toLowerCase()} para el ${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${anio}. Motivo: ${nuevoCompromiso.motivo}.`,
-        serverTime: serverTimestamp(),
-      });
+      batch.set(compromisoRef, nuevoCompromiso);
+      batch.set(
+        actividadRef,
+        crearActividad({
+          actorUid,
+          userName,
+          tipo: "Creación",
+          cliente: clienteNombre,
+          detalle: `Se agendó un ${descripcionVinculo(tipoVinculo)} para el ${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${anio}. Título: ${titulo}.`,
+        }),
+      );
 
       await batch.commit();
-
       return { success: true, id: compromisoRef.id };
     } catch (error) {
       console.error("Error al crear compromiso:", error);
@@ -136,47 +198,54 @@ export const compromisosService = {
     }
   },
 
-  completarCompromiso: async (
-    id,
-    clienteNombre,
-    userName,
-    actor_uid,
-  ) => {
-    const errorActor = validarActor(actor_uid);
+  completarCompromiso: async (id, clienteNombre, userName, actorUid) => {
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
-      const batch = writeBatch(db);
-      const accion = crearAccion(
-        userName,
-        "Completar",
-        "Marcado como completado",
-      );
+      await runTransaction(db, async (transaction) => {
+        const compromisoRef = doc(db, COMPROMISOS_COLLECTION, id);
+        const snapshot = await transaction.get(compromisoRef);
 
-      const compromisoRef = doc(db, "compromisos", id);
-      batch.update(compromisoRef, {
-        estatus: "Completado",
-        fecha_completado: serverTimestamp(),
-        completado_por: userName || "Admin",
-        completado_por_uid: actor_uid,
-        updatedAt: serverTimestamp(),
-        ultima_accion: accion,
-        historial_acciones: arrayUnion(accion),
+        if (!snapshot.exists()) {
+          throw new Error("El recordatorio ya no existe.");
+        }
+
+        const compromiso = snapshot.data();
+
+        if (ESTADOS_FINALES.includes(compromiso.estatus)) {
+          throw new Error("Este recordatorio ya tiene un estado final.");
+        }
+
+        const accion = crearAccion(
+          userName,
+          "Completar",
+          "Marcado como completado",
+        );
+
+        transaction.update(compromisoRef, {
+          estatus: "Completado",
+          fecha_completado: serverTimestamp(),
+          completado_por: userName || "Operador MLH",
+          completado_por_uid: actorUid,
+          updatedAt: serverTimestamp(),
+          ultima_accion: accion,
+          historial_acciones: arrayUnion(accion),
+        });
+
+        const actividadRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+        transaction.set(
+          actividadRef,
+          crearActividad({
+            actorUid,
+            userName,
+            tipo: "Actualización",
+            cliente: clienteNombre,
+            detalle: "El recordatorio fue marcado como completado.",
+          }),
+        );
       });
 
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "Admin",
-        modulo: "Calendario",
-        tipo: "Actualización",
-        cliente: clienteNombre || "N/A",
-        detalle:
-          "El compromiso de seguimiento fue marcado como completado.",
-        serverTime: serverTimestamp(),
-      });
-
-      await batch.commit();
       return { success: true };
     } catch (error) {
       console.error("Error completando compromiso:", error);
@@ -186,57 +255,60 @@ export const compromisosService = {
 
   reprogramarCompromiso: async (
     id,
-    nuevaFechaStr,
+    nuevaFechaISO,
     clienteNombre,
     userName,
-    actor_uid,
+    actorUid,
   ) => {
-    const errorActor = validarActor(actor_uid);
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
-      const [anio, mes, dia] = nuevaFechaStr.split("-").map(Number);
-      const nuevaFecha = new Date(anio, mes - 1, dia);
-
-      if (
-        !anio ||
-        !mes ||
-        !dia ||
-        Number.isNaN(nuevaFecha.getTime())
-      ) {
-        throw new Error("La nueva fecha no es válida.");
-      }
-
-      const batch = writeBatch(db);
+      const { fecha, anio, mes, dia } = fechaDesdeISO(nuevaFechaISO);
       const fechaLegible = `${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${anio}`;
-      const accion = crearAccion(
-        userName,
-        "Reprogramación",
-        `Reprogramado para el ${fechaLegible}`,
-      );
 
-      const compromisoRef = doc(db, "compromisos", id);
-      batch.update(compromisoRef, {
-        fecha_compromiso: Timestamp.fromDate(nuevaFecha),
-        mes_anio: `${anio}-${String(mes).padStart(2, "0")}`,
-        estatus: "Reprogramado",
-        updatedAt: serverTimestamp(),
-        ultima_accion: accion,
-        historial_acciones: arrayUnion(accion),
+      await runTransaction(db, async (transaction) => {
+        const compromisoRef = doc(db, COMPROMISOS_COLLECTION, id);
+        const snapshot = await transaction.get(compromisoRef);
+
+        if (!snapshot.exists()) {
+          throw new Error("El recordatorio ya no existe.");
+        }
+
+        const compromiso = snapshot.data();
+
+        if (ESTADOS_FINALES.includes(compromiso.estatus)) {
+          throw new Error("Un recordatorio cerrado no puede reprogramarse.");
+        }
+
+        const accion = crearAccion(
+          userName,
+          "Reprogramación",
+          `Reprogramado para el ${fechaLegible}`,
+        );
+
+        transaction.update(compromisoRef, {
+          fecha_compromiso: Timestamp.fromDate(fecha),
+          mes_anio: `${anio}-${String(mes).padStart(2, "0")}`,
+          estatus: "Reprogramado",
+          updatedAt: serverTimestamp(),
+          ultima_accion: accion,
+          historial_acciones: arrayUnion(accion),
+        });
+
+        const actividadRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+        transaction.set(
+          actividadRef,
+          crearActividad({
+            actorUid,
+            userName,
+            tipo: "Reprogramación",
+            cliente: clienteNombre,
+            detalle: `El recordatorio fue reprogramado para el ${fechaLegible}.`,
+          }),
+        );
       });
 
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "Admin",
-        modulo: "Calendario",
-        tipo: "Reprogramación",
-        cliente: clienteNombre || "N/A",
-        detalle: `El compromiso fue reprogramado para la fecha ${fechaLegible}.`,
-        serverTime: serverTimestamp(),
-      });
-
-      await batch.commit();
       return { success: true };
     } catch (error) {
       console.error("Error reprogramando compromiso:", error);
@@ -244,43 +316,51 @@ export const compromisosService = {
     }
   },
 
-  cancelarCompromiso: async (
-    id,
-    clienteNombre,
-    userName,
-    actor_uid,
-  ) => {
-    const errorActor = validarActor(actor_uid);
+  cancelarCompromiso: async (id, clienteNombre, userName, actorUid) => {
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
-      const batch = writeBatch(db);
-      const accion = crearAccion(
-        userName,
-        "Cancelación",
-        "Cancelado por el operador",
-      );
+      await runTransaction(db, async (transaction) => {
+        const compromisoRef = doc(db, COMPROMISOS_COLLECTION, id);
+        const snapshot = await transaction.get(compromisoRef);
 
-      const compromisoRef = doc(db, "compromisos", id);
-      batch.update(compromisoRef, {
-        estatus: "Cancelado",
-        updatedAt: serverTimestamp(),
-        ultima_accion: accion,
-        historial_acciones: arrayUnion(accion),
+        if (!snapshot.exists()) {
+          throw new Error("El recordatorio ya no existe.");
+        }
+
+        const compromiso = snapshot.data();
+
+        if (ESTADOS_FINALES.includes(compromiso.estatus)) {
+          throw new Error("Este recordatorio ya tiene un estado final.");
+        }
+
+        const accion = crearAccion(
+          userName,
+          "Cancelación",
+          "Cancelado por el operador",
+        );
+
+        transaction.update(compromisoRef, {
+          estatus: "Cancelado",
+          updatedAt: serverTimestamp(),
+          ultima_accion: accion,
+          historial_acciones: arrayUnion(accion),
+        });
+
+        const actividadRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+        transaction.set(
+          actividadRef,
+          crearActividad({
+            actorUid,
+            userName,
+            tipo: "Cancelación",
+            cliente: clienteNombre,
+            detalle: "Se canceló el recordatorio del calendario.",
+          }),
+        );
       });
 
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "Admin",
-        modulo: "Calendario",
-        tipo: "Cancelación",
-        cliente: clienteNombre || "N/A",
-        detalle: "Se canceló el compromiso de seguimiento.",
-        serverTime: serverTimestamp(),
-      });
-
-      await batch.commit();
       return { success: true };
     } catch (error) {
       console.error("Error cancelando compromiso:", error);
@@ -294,9 +374,9 @@ export const compromisosService = {
     clienteNombre,
     tipoMensaje,
     userName,
-    actor_uid,
+    actor_uid: actorUid,
   }) => {
-    const errorActor = validarActor(actor_uid);
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
@@ -309,24 +389,23 @@ export const compromisosService = {
           `WhatsApp abierto (${tipoMensaje})`,
         );
 
-        const compromisoRef = doc(db, "compromisos", idCompromiso);
-        batch.update(compromisoRef, {
+        batch.update(doc(db, COMPROMISOS_COLLECTION, idCompromiso), {
           updatedAt: serverTimestamp(),
           ultima_accion: accion,
           historial_acciones: arrayUnion(accion),
         });
       }
 
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "Admin",
-        modulo: "Calendario",
-        tipo: "WhatsApp",
-        cliente: clienteNombre || "N/A",
-        detalle: `Se abrió WhatsApp con una plantilla tipo "${tipoMensaje}".`,
-        serverTime: serverTimestamp(),
-      });
+      batch.set(
+        doc(collection(db, ACTIVIDAD_COLLECTION)),
+        crearActividad({
+          actorUid,
+          userName,
+          tipo: "WhatsApp",
+          cliente: clienteNombre,
+          detalle: `Se abrió WhatsApp con una plantilla tipo "${tipoMensaje}".`,
+        }),
+      );
 
       await batch.commit();
       return { success: true };
@@ -336,32 +415,25 @@ export const compromisosService = {
     }
   },
 
-  eliminarCompromiso: async (
-    id,
-    clienteNombre,
-    userName,
-    actor_uid,
-  ) => {
-    const errorActor = validarActor(actor_uid);
+  eliminarCompromiso: async (id, clienteNombre, userName, actorUid) => {
+    const errorActor = validarActor(actorUid);
     if (errorActor) return errorActor;
 
     try {
       const batch = writeBatch(db);
 
-      const compromisoRef = doc(db, "compromisos", id);
-      batch.delete(compromisoRef);
-
-      const actividadRef = doc(collection(db, "actividad"));
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: userName || "SU",
-        modulo: "Calendario",
-        tipo: "Eliminación",
-        cliente: clienteNombre || "N/A",
-        detalle:
-          "El SU eliminó permanentemente un registro de compromiso del calendario.",
-        serverTime: serverTimestamp(),
-      });
+      batch.delete(doc(db, COMPROMISOS_COLLECTION, id));
+      batch.set(
+        doc(collection(db, ACTIVIDAD_COLLECTION)),
+        crearActividad({
+          actorUid,
+          userName,
+          tipo: "Eliminación",
+          cliente: clienteNombre,
+          detalle:
+            "El SU eliminó permanentemente un recordatorio del calendario.",
+        }),
+      );
 
       await batch.commit();
       return { success: true };

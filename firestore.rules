@@ -369,7 +369,7 @@ service cloud.firestore {
         && clientesEdicionFacturaValidos()
         && auditoriaEdicionFacturaValida(facturaId);
 
-      allow delete: if false;
+      allow delete: if isSU();
     }
 
     match /solicitudes/{solicitudId} {
@@ -434,30 +434,44 @@ service cloud.firestore {
       allow read: if isStaff();
 
       allow create: if isStaff()
-        && request.resource.data.keys().hasAll([
+        && request.resource.data.keys().hasOnly([
+          'tipo_vinculo',
+          'titulo',
+          'motivo',
           'cliente_id',
           'cliente_nombre',
+          'factura_id',
+          'folio_factura',
           'tipo_evento',
-          'motivo',
           'monto',
+          'telefono',
           'fecha_compromiso',
           'mes_anio',
           'estatus',
           'ultima_accion',
           'historial_acciones',
           'creado_por',
+          'creado_por_uid',
           'createdAt',
           'updatedAt'
         ])
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente_nombre is string
+        && request.resource.data.tipo_vinculo in [
+          'GENERAL',
+          'CLIENTE',
+          'FACTURA'
+        ]
+        && request.resource.data.titulo is string
+        && request.resource.data.titulo != ''
+        && request.resource.data.motivo is string
+        && request.resource.data.motivo != ''
         && request.resource.data.tipo_evento in [
           'Recordatorio',
           'Seguimiento',
           'Promesa'
         ]
-        && request.resource.data.motivo is string
+        && request.resource.data.cliente_nombre is string
+        && request.resource.data.folio_factura is string
+        && request.resource.data.telefono is string
         && request.resource.data.monto is number
         && request.resource.data.monto >= 0
         && request.resource.data.fecha_compromiso is timestamp
@@ -465,8 +479,41 @@ service cloud.firestore {
         && request.resource.data.estatus == 'Pendiente'
         && request.resource.data.ultima_accion is map
         && request.resource.data.historial_acciones is list
+        && request.resource.data.creado_por is string
+        && request.resource.data.creado_por_uid == request.auth.uid
         && request.resource.data.createdAt is timestamp
-        && request.resource.data.updatedAt is timestamp;
+        && request.resource.data.updatedAt is timestamp
+        && (
+          (
+            request.resource.data.tipo_vinculo == 'GENERAL'
+            && request.resource.data.cliente_id == null
+            && request.resource.data.factura_id == null
+            && request.resource.data.cliente_nombre == ''
+            && request.resource.data.folio_factura == ''
+            && request.resource.data.telefono == ''
+            && request.resource.data.monto == 0
+          )
+          ||
+          (
+            request.resource.data.tipo_vinculo == 'CLIENTE'
+            && request.resource.data.cliente_id is string
+            && request.resource.data.cliente_id != ''
+            && request.resource.data.factura_id == null
+            && request.resource.data.cliente_nombre != ''
+            && request.resource.data.folio_factura == ''
+            && request.resource.data.monto == 0
+          )
+          ||
+          (
+            request.resource.data.tipo_vinculo == 'FACTURA'
+            && request.resource.data.cliente_id is string
+            && request.resource.data.cliente_id != ''
+            && request.resource.data.factura_id is string
+            && request.resource.data.factura_id != ''
+            && request.resource.data.cliente_nombre != ''
+            && request.resource.data.folio_factura != ''
+          )
+        );
 
       allow update: if isStaff()
         && request.resource.data
@@ -490,17 +537,21 @@ service cloud.firestore {
           'Cancelado'
         ]
         && (
-          request.resource.data.estatus == resource.data.estatus
-          || (
-            resource.data.estatus in [
-              'Pendiente',
-              'Reprogramado'
-            ]
-            && request.resource.data.estatus in [
-              'Reprogramado',
-              'Completado',
-              'Cancelado'
-            ]
+          (
+            resource.data.estatus in ['Completado', 'Cancelado']
+            && request.resource.data.estatus == resource.data.estatus
+          )
+          ||
+          (
+            resource.data.estatus in ['Pendiente', 'Reprogramado']
+            && (
+              request.resource.data.estatus == resource.data.estatus
+              || request.resource.data.estatus in [
+                'Reprogramado',
+                'Completado',
+                'Cancelado'
+              ]
+            )
           )
         )
         && request.resource.data.ultima_accion is map

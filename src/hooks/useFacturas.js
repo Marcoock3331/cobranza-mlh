@@ -3,10 +3,24 @@ import { useMemo, useState } from "react";
 const redondearMoneda = (valor) =>
   Math.round((Number(valor) || 0) * 100) / 100;
 
-export const useFacturas = (stats = {}) => {
+const ESTATUS_VALIDOS = new Set([
+  "Todas",
+  "Pendiente",
+  "Vencida",
+  "Pagada",
+]);
+
+export const useFacturas = (
+  stats = {},
+  { filtroEstatusInicial = "Todas" } = {},
+) => {
+  const estatusInicial = ESTATUS_VALIDOS.has(filtroEstatusInicial)
+    ? filtroEstatusInicial
+    : "Todas";
+
   const [busqueda, setBusqueda] = useState("");
   const [busquedaAplicada, setBusquedaAplicada] = useState("");
-  const [filtroEstatus, setFiltroEstatus] = useState("Todas");
+  const [filtroEstatus, setFiltroEstatus] = useState(estatusInicial);
   const [fechaInicio, setFechaInicio] = useState("");
   const [fechaFin, setFechaFin] = useState("");
 

@@ -110,6 +110,69 @@ const crearFormularioFactura = (factura = null) => {
   };
 };
 
+
+function TarjetaResumenFacturacion({
+  etiqueta,
+  valor,
+  descripcion,
+  icono: Icono,
+  variante = "azul",
+}) {
+  const estilos = {
+    azul: {
+      tarjeta: "border-blue-200 bg-blue-50/40",
+      etiqueta: "text-blue-700",
+      valor: "text-[#0a192f]",
+      icono: "bg-white/80 text-blue-600 border-blue-100",
+    },
+    rojo: {
+      tarjeta: "border-red-200 bg-red-50/40",
+      etiqueta: "text-red-700",
+      valor: "text-red-600",
+      icono: "bg-white/80 text-red-600 border-red-100",
+    },
+    verde: {
+      tarjeta: "border-green-200 bg-green-50/40",
+      etiqueta: "text-green-700",
+      valor: "text-green-700",
+      icono: "bg-white/80 text-green-600 border-green-100",
+    },
+  };
+
+  const configuracion = estilos[variante] || estilos.azul;
+
+  return (
+    <article
+      className={`p-4 md:p-5 rounded-xl border text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${configuracion.tarjeta}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p
+            className={`text-[10px] md:text-xs uppercase font-black tracking-wide ${configuracion.etiqueta}`}
+          >
+            {etiqueta}
+          </p>
+          <strong
+            className={`text-xl md:text-3xl mt-2 block break-words ${configuracion.valor}`}
+          >
+            {valor}
+          </strong>
+        </div>
+
+        <span
+          className={`h-9 w-9 md:h-10 md:w-10 rounded-xl border flex items-center justify-center shrink-0 ${configuracion.icono}`}
+        >
+          <Icono className="h-4 w-4 md:h-5 md:w-5" />
+        </span>
+      </div>
+
+      <p className="text-[10px] md:text-xs text-gray-500 mt-2 leading-relaxed">
+        {descripcion}
+      </p>
+    </article>
+  );
+}
+
 export default function Facturacion() {
   const {
     stats,
@@ -124,7 +187,25 @@ export default function Facturacion() {
 
   const location = useLocation();
   const navigate = useNavigate();
+
+  const parametrosURL = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search],
+  );
+
+  const estadoSolicitado = parametrosURL.get("estado");
+  const filtroEstatusInicial = [
+    "Todas",
+    "Pendiente",
+    "Vencida",
+    "Pagada",
+  ].includes(estadoSolicitado)
+    ? estadoSolicitado
+    : "Todas";
+
   const facturaInicialEdicion = location.state?.editarFactura || null;
+  const facturaInicialGestion = location.state?.gestionarFactura || null;
+  const facturaInicial = facturaInicialGestion || facturaInicialEdicion;
 
   const {
     busqueda,
@@ -141,7 +222,7 @@ export default function Facturacion() {
     setFechaFin,
     kpis,
     limpiarFiltros,
-  } = useFacturas(stats);
+  } = useFacturas(stats, { filtroEstatusInicial });
 
   const [clienteBusqueda, setClienteBusqueda] = useState(null);
   const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
@@ -168,11 +249,13 @@ export default function Facturacion() {
     fechaFin,
   });
 
-  const [modalActivo, setModalActivo] = useState(
-    facturaInicialEdicion ? "editarFactura" : null,
-  );
+  const [modalActivo, setModalActivo] = useState(() => {
+    if (facturaInicialGestion) return "opcionesFactura";
+    if (facturaInicialEdicion) return "editarFactura";
+    return null;
+  });
   const [facturaSeleccionada, setFacturaSeleccionada] = useState(
-    facturaInicialEdicion,
+    facturaInicial,
   );
   const [notificacion, setNotificacion] = useState({
     titulo: "",
@@ -349,8 +432,14 @@ export default function Facturacion() {
   const cerrarModal = () => {
     setModalActivo(null);
 
-    if (location.state?.editarFactura) {
-      navigate("/facturas", { replace: true, state: null });
+    if (
+      location.state?.editarFactura ||
+      location.state?.gestionarFactura
+    ) {
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: null,
+      });
     }
     if (
       [
@@ -565,25 +654,41 @@ export default function Facturacion() {
   };
 
   const ejecutarEliminacion = async () => {
-    try {
-      if (itemAEliminar?.tipo === "factura") {
-        const res = await eliminarFacturaEnNube(itemAEliminar.data.id);
+    if (!itemAEliminar || isSubmitting) return;
 
-        if (!res?.success) {
+    setIsSubmitting(true);
+
+    try {
+      if (itemAEliminar.tipo === "factura") {
+        if (userRole !== "SU") {
           mostrarNotificacion(
-            "Acción pendiente",
-            res?.error ||
-              "La eliminación/anulación de facturas aún no está habilitada.",
+            "Acción no permitida",
+            "Solo el SU puede eliminar facturas.",
             "error",
           );
           return;
         }
 
+        const res = await eliminarFacturaEnNube(itemAEliminar.data.id);
+
+        if (!res?.success) {
+          mostrarNotificacion(
+            "Error",
+            res?.error || "No se pudo eliminar la factura.",
+            "error",
+          );
+          return;
+        }
+
+        await recargarFacturas();
+
+        setFacturaSeleccionada(null);
+
         mostrarNotificacion(
-          "Factura Eliminada",
-          "La factura fue procesada correctamente.",
+          "Factura eliminada",
+          "Se eliminó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
         );
-      } else if (itemAEliminar?.tipo === "abono") {
+      } else if (itemAEliminar.tipo === "abono") {
         const res = await eliminarAbonoEnNube(
           facturaSeleccionada.id,
           itemAEliminar.data.id_abono,
@@ -601,7 +706,7 @@ export default function Facturacion() {
         await recargarFacturas();
 
         mostrarNotificacion(
-          "Pago Anulado",
+          "Pago anulado",
           "Abono revertido. La deuda regresó al saldo del cliente.",
         );
       }
@@ -609,6 +714,7 @@ export default function Facturacion() {
       console.error(error);
       mostrarNotificacion("Error", "Ocurrió un error inesperado.", "error");
     } finally {
+      setIsSubmitting(false);
       setItemAEliminar(null);
     }
   };
@@ -686,33 +792,29 @@ export default function Facturacion() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
-        <div className="bg-white p-4 md:p-5 rounded-xl border border-blue-100 shadow-sm flex flex-col border-l-4 border-l-blue-500">
-          <p className="text-[10px] md:text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1 flex items-center">
-            <DollarSign className="h-4 w-4 md:h-4 md:w-4 mr-1 text-blue-500" />{" "}
-            Deuda Activa en Calle
-          </p>
-          <h3 className="text-xl md:text-2xl font-black text-[#0a192f]">
-            ${kpis.deuda_activa.toLocaleString("es-MX")}
-          </h3>
-        </div>
-        <div className="bg-white p-4 md:p-5 rounded-xl border border-red-100 shadow-sm flex flex-col border-l-4 border-l-red-500 bg-red-50/20">
-          <p className="text-[10px] md:text-[11px] font-bold text-red-500 uppercase tracking-wider mb-1 flex items-center">
-            <AlertTriangle className="h-4 w-4 md:h-4 md:w-4 mr-1" /> Saldo
-            Vencido Urgente
-          </p>
-          <h3 className="text-xl md:text-2xl font-black text-red-600">
-            ${kpis.monto_vencido.toLocaleString("es-MX")}
-          </h3>
-        </div>
-        <div className="bg-white p-4 md:p-5 rounded-xl border border-green-100 shadow-sm flex flex-col border-l-4 border-l-green-500">
-          <p className="text-[10px] md:text-[11px] font-bold text-green-600 uppercase tracking-wider mb-1 flex items-center">
-            <TrendingUp className="h-4 w-4 md:h-4 md:w-4 mr-1" /> Total
-            Liquidado
-          </p>
-          <h3 className="text-xl md:text-2xl font-black text-green-700">
-            ${(Number(kpis.total_liquidado) || 0).toLocaleString("es-MX")}
-          </h3>
-        </div>
+        <TarjetaResumenFacturacion
+          etiqueta="Deuda activa"
+          valor={`$${kpis.deuda_activa.toLocaleString("es-MX")}`}
+          descripcion="Saldo total pendiente actualmente colocado."
+          icono={DollarSign}
+          variante="azul"
+        />
+
+        <TarjetaResumenFacturacion
+          etiqueta="Saldo vencido"
+          valor={`$${kpis.monto_vencido.toLocaleString("es-MX")}`}
+          descripcion="Cartera vencida que requiere seguimiento."
+          icono={AlertTriangle}
+          variante="rojo"
+        />
+
+        <TarjetaResumenFacturacion
+          etiqueta="Total liquidado"
+          valor={`$${(Number(kpis.total_liquidado) || 0).toLocaleString("es-MX")}`}
+          descripcion="Facturas cerradas mediante pagos registrados."
+          icono={TrendingUp}
+          variante="verde"
+        />
       </div>
 
       <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex flex-col space-y-4">
@@ -767,8 +869,8 @@ export default function Facturacion() {
                     : "Buscar folio por inicio"
                 }
               >
-                <Hash className="h-4 w-4 mr-1.5" />
-                Folio
+                <Search className="h-4 w-4 mr-1.5" />
+                Buscar
               </button>
             </div>
 
@@ -1183,11 +1285,13 @@ export default function Facturacion() {
                   </button>
                   {userRole === "SU" && (
                     <button
-                      disabled
-                      title="La anulación financiera se implementará en un flujo separado"
-                      className="p-3 md:p-2 bg-gray-100 text-gray-400 border border-gray-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs cursor-not-allowed"
+                      type="button"
+                      onClick={() =>
+                        confirmarEliminacion("factura", facturaSeleccionada)
+                      }
+                      className="p-3 md:p-2 bg-red-50 text-red-700 border border-red-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-red-100 active:bg-red-100 transition-colors"
                     >
-                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Anular
+                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Eliminar
                     </button>
                   )}
                 </div>
@@ -1557,7 +1661,7 @@ export default function Facturacion() {
                   <p className="text-sm md:text-sm text-gray-600 mt-2">
                     {itemAEliminar?.tipo === "factura" ? (
                       <>
-                        Estás a punto de eliminar permanentemente la factura{" "}
+                        Estás a punto de eliminar la factura{" "}
                         <span className="font-bold text-[#0a192f]">
                           {itemAEliminar.data?.folio}
                         </span>{" "}
@@ -1565,7 +1669,8 @@ export default function Facturacion() {
                         <span className="font-bold text-[#0a192f]">
                           {itemAEliminar.data?.cliente}
                         </span>
-                        .
+                        . Esta operación también ajustará el saldo del cliente,
+                        el crédito disponible, las métricas globales y la bitácora.
                       </>
                     ) : (
                       <>
@@ -1586,7 +1691,7 @@ export default function Facturacion() {
                   <p>
                     <strong>Atención:</strong>{" "}
                     {itemAEliminar?.tipo === "factura"
-                      ? `Esta acción borrará la factura y todo su historial de abonos.`
+                      ? "Solo el SU puede eliminar facturas. La factura dejará de existir en el listado activo y su movimiento quedará auditado."
                       : "El saldo de la factura se recalculará automáticamente."}{" "}
                     Esta acción es irreversible.
                   </p>
@@ -1605,9 +1710,20 @@ export default function Facturacion() {
                 </button>
                 <button
                   onClick={ejecutarEliminacion}
-                  className="w-full md:w-auto px-5 py-3.5 md:py-2 text-sm md:text-xs font-black text-white bg-red-600 active:bg-red-700 rounded-xl md:rounded-lg shadow-sm flex items-center justify-center transition-colors"
+                  disabled={isSubmitting}
+                  className="w-full md:w-auto px-5 py-3.5 md:py-2 text-sm md:text-xs font-black text-white bg-red-600 active:bg-red-700 rounded-xl md:rounded-lg shadow-sm flex items-center justify-center transition-colors disabled:opacity-60"
                 >
-                  <Trash2 className="h-4 w-4 mr-1.5 md:mr-1" /> Sí, Eliminar
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-1.5 md:mr-1 animate-spin" />
+                      Procesando...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-4 w-4 mr-1.5 md:mr-1" />
+                      Sí, eliminar
+                    </>
+                  )}
                 </button>
               </div>
             </div>

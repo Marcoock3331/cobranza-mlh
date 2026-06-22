@@ -1,1064 +1,1443 @@
-import { useState, useMemo, useContext, useEffect } from "react";
+import { useContext, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import Select from "react-select";
-import { GlobalContext } from "../context/GlobalContext";
-import { generarMensajeWA, normalizarTelefonoMX } from "../utils/whatsapp";
-import { compromisosService } from "../services/compromisosService";
-import { textoSeguro } from "../utils/normalizadores";
-
 import {
+  AlertTriangle,
+  Bell,
   Calendar as CalendarIcon,
+  CalendarDays,
+  Check,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  Send,
-  XCircle,
-  Check,
-  Plus,
-  User,
-  Smartphone,
+  Clock3,
   Eye,
   EyeOff,
-  PhoneCall,
-  Handshake,
+  FileText,
+  Filter,
   Loader2,
-  CalendarDays,
+  MessageCircle,
+  Plus,
+  Send,
+  Smartphone,
+  Trash2,
+  Users,
+  X,
 } from "lucide-react";
 
+import { GlobalContext } from "../context/GlobalContext";
+import { useAgendaRango } from "../hooks/useAgendaRango";
+import { calendarioConsultaService } from "../services/calendarioConsultaService";
+import { compromisosService } from "../services/compromisosService";
+import {
+  agruparEventosPorDia,
+  claveAFecha,
+  contarCategorias,
+  fechaAClave,
+  formatearPeriodo,
+  generarDiasRango,
+  obtenerRangoAgenda,
+  sumarDias,
+} from "../utils/agenda";
+import { generarMensajeWA, normalizarTelefonoMX } from "../utils/whatsapp";
+
+const VISTAS = [
+  { value: "DIA", label: "Día" },
+  { value: "SEMANA", label: "Semana" },
+  { value: "MES", label: "Mes" },
+];
+
+const FILTROS = [
+  { value: "TODOS", label: "Todos" },
+  { value: "VENCIDAS", label: "Vencidas" },
+  { value: "POR_VENCER", label: "Por vencer" },
+  { value: "RECORDATORIOS", label: "Recordatorios" },
+];
+
+const CATEGORIAS = {
+  VENCIDAS: {
+    etiqueta: "Vencidas",
+    chip: "bg-red-50 text-red-700 border-red-200 hover:bg-red-100",
+    tarjeta: "border-red-200 bg-red-50/40",
+    icono: AlertTriangle,
+  },
+  POR_VENCER: {
+    etiqueta: "Por vencer",
+    chip: "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100",
+    tarjeta: "border-amber-200 bg-amber-50/40",
+    icono: Clock3,
+  },
+  RECORDATORIOS: {
+    etiqueta: "Recordatorios",
+    chip: "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100",
+    tarjeta: "border-blue-200 bg-blue-50/40",
+    icono: Bell,
+  },
+};
+
+const ESTADO_FORMULARIO = {
+  tipoVinculo: "GENERAL",
+  titulo: "",
+  motivo: "",
+  tipoEvento: "Recordatorio",
+  fecha: fechaAClave(new Date()),
+  clienteId: "",
+  facturaId: "",
+};
+
+const formatearMoneda = (valor) =>
+  (Number(valor) || 0).toLocaleString("es-MX", {
+    style: "currency",
+    currency: "MXN",
+  });
+
+const mismoDia = (primera, segunda) =>
+  fechaAClave(primera) === fechaAClave(segunda);
+
+const esEstadoFinal = (estatus) =>
+  ["Completado", "Cancelado"].includes(estatus);
+
+function ContadorCategoria({ categoria, cantidad, onClick, compacto = false }) {
+  if (!cantidad) return null;
+
+  const configuracion = CATEGORIAS[categoria];
+  const Icono = configuracion.icono;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group w-full flex items-center justify-between gap-2 border rounded-xl shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${configuracion.chip} ${
+        compacto
+          ? "px-2.5 py-1.5 text-[10px] md:text-[11px]"
+          : "px-3.5 py-2.5 text-[11px] md:text-xs"
+      } font-black uppercase tracking-wide`}
+    >
+      <span className="flex items-center min-w-0">
+        <span
+          className={`mr-2 shrink-0 rounded-lg bg-white/80 border border-current/10 flex items-center justify-center ${
+            compacto ? "h-6 w-6" : "h-7 w-7"
+          }`}
+        >
+          <Icono className={compacto ? "h-3.5 w-3.5" : "h-4 w-4"} />
+        </span>
+        <span className="truncate leading-none">
+          {configuracion.etiqueta}
+        </span>
+      </span>
+
+      <span
+        className={`rounded-full bg-white border border-current/10 shadow-sm leading-none ${
+          compacto
+            ? "min-w-6 px-1.5 py-1 text-[10px]"
+            : "min-w-7 px-2 py-1.5 text-[11px]"
+        } text-center`}
+      >
+        {cantidad}
+      </span>
+    </button>
+  );
+}
+
+function ModalBase({ children, onClose, maxWidth = "max-w-2xl" }) {
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-sm flex items-end md:items-center justify-center md:p-4">
+      <div
+        className={`bg-white w-full ${maxWidth} max-h-[94vh] rounded-t-3xl md:rounded-2xl shadow-2xl overflow-hidden flex flex-col`}
+      >
+        <div className="md:hidden h-1.5 w-12 bg-gray-200 rounded-full mx-auto mt-3 shrink-0" />
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute opacity-0 pointer-events-none"
+          aria-label="Cerrar"
+        />
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export default function Calendario() {
-  // BLINDAJE: Extracción de currentUser para firmar las operaciones
-  const { facturas, clientes, userName, userRole, currentUser } = useContext(GlobalContext);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const { clientes, userName, userRole, currentUser } = useContext(GlobalContext);
 
-  const [fechaActual, setFechaActual] = useState(new Date());
-  const añoActual = fechaActual.getFullYear();
-  const mesActualNum = fechaActual.getMonth();
-  const nombresMeses = [
-    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-  ];
-  const mesActualTexto = `${nombresMeses[mesActualNum]} ${añoActual}`;
-  const primerDiaDelMes = new Date(añoActual, mesActualNum, 1).getDay();
-  const diasEnElMes = new Date(añoActual, mesActualNum + 1, 0).getDate();
+  const fechaInicial = useMemo(() => {
+    const fechaURL = claveAFecha(searchParams.get("fecha"));
+    return fechaURL || new Date();
+  }, [searchParams]);
 
-  const fechaHoy = new Date();
-  const hoyDiaExacto = fechaHoy.getDate();
-  const hoyMesExacto = fechaHoy.getMonth();
-  const hoyAnioExacto = fechaHoy.getFullYear();
+  const vistaInicial = ["DIA", "SEMANA", "MES"].includes(
+    searchParams.get("vista"),
+  )
+    ? searchParams.get("vista")
+    : "SEMANA";
 
-  const [modalActivo, setModalActivo] = useState(null);
-  const [diaSeleccionado, setDiaSeleccionado] = useState(null);
+  const filtroInicial = [
+    "TODOS",
+    "VENCIDAS",
+    "POR_VENCER",
+    "RECORDATORIOS",
+  ].includes(searchParams.get("filtro"))
+    ? searchParams.get("filtro")
+    : "TODOS";
+
+  const [fechaActual, setFechaActual] = useState(fechaInicial);
+  const [vista, setVista] = useState(vistaInicial);
+  const [filtro, setFiltro] = useState(filtroInicial);
+  const [mostrarResueltos, setMostrarResueltos] = useState(false);
+
+  const [modalActivo, setModalActivo] = useState("");
+  const [fechaSeleccionada, setFechaSeleccionada] = useState("");
+  const [categoriaSeleccionada, setCategoriaSeleccionada] = useState("TODOS");
   const [eventoSeleccionado, setEventoSeleccionado] = useState(null);
-  const [mensajeExito, setMensajeExito] = useState({ titulo: "", descripcion: "" });
-  const [mostrarCompletados, setMostrarCompletados] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [mensajeExito, setMensajeExito] = useState("");
 
-  const [formClienteId, setFormClienteId] = useState(null);
-  const [formFacturaSeleccionada, setFormFacturaSeleccionada] = useState("");
-  const [formMotivo, setFormMotivo] = useState("");
-  const [formTipoEvento, setFormTipoEvento] = useState("Recordatorio");
-  const [nuevaFechaReprogramacion, setNuevaFechaReprogramacion] = useState("");
+  const [formulario, setFormulario] = useState(ESTADO_FORMULARIO);
+  const [facturasCliente, setFacturasCliente] = useState([]);
+  const [cargandoFacturasCliente, setCargandoFacturasCliente] = useState(false);
+  const [nuevaFecha, setNuevaFecha] = useState("");
+  const [datosWhatsapp, setDatosWhatsapp] = useState({
+    telefono: "",
+    plantilla: "manual",
+    mensaje: "",
+  });
 
-  const [datosWhatsapp, setDatosWhatsapp] = useState({ telefono: "", plantilla: "atrasado", mensaje: "" });
-  const [compromisos, setCompromisos] = useState([]);
+  const rango = useMemo(
+    () => obtenerRangoAgenda(fechaActual, vista),
+    [fechaActual, vista],
+  );
 
-  useEffect(() => {
-    const mesAnioFormat = `${añoActual}-${String(mesActualNum + 1).padStart(2, "0")}`;
-    const unsub = compromisosService.escucharCompromisosMes(
-      mesAnioFormat,
-      (data) => {
-        setCompromisos(data);
-      },
-    );
-    return () => unsub();
-  }, [mesActualNum, añoActual]);
+  const { eventos, cargando, error } = useAgendaRango(rango.inicio, rango.fin);
 
-  const eventosMes = (() => {
-    const mapeo = {};
-    const hoy = new Date();
-    hoy.setHours(0, 0, 0, 0);
+  const eventosBaseVisibles = useMemo(
+    () =>
+      eventos.filter(
+        (evento) =>
+          evento.origen === "FACTURA" ||
+          mostrarResueltos ||
+          !esEstadoFinal(evento.estatus),
+      ),
+    [eventos, mostrarResueltos],
+  );
 
-    if (facturas) {
-      facturas.forEach((f) => {
-        if (f.vencimiento) {
-          const [fechaParte] = f.vencimiento.split(" ");
-          let dia, mes, año;
+  const eventosVisibles = useMemo(
+    () =>
+      eventosBaseVisibles.filter(
+        (evento) => filtro === "TODOS" || evento.categoria === filtro,
+      ),
+    [eventosBaseVisibles, filtro],
+  );
 
-          if (fechaParte.includes("-")) {
-            [año, mes, dia] = fechaParte.split("-").map(Number);
-          } else {
-            [dia, mes, año] = fechaParte.split("/").map(Number);
-          }
+  const eventosPorDia = useMemo(
+    () => agruparEventosPorDia(eventosVisibles),
+    [eventosVisibles],
+  );
 
-          const fechaVencimientoObj = new Date(año, mes - 1, dia);
+  const resumenPeriodo = useMemo(
+    () => contarCategorias(eventosBaseVisibles),
+    [eventosBaseVisibles],
+  );
 
-          if (mes - 1 === mesActualNum && año === añoActual) {
-            let estatusEvento = "Pendiente";
+  const diasRango = useMemo(
+    () => generarDiasRango(rango.inicio, rango.fin),
+    [rango],
+  );
 
-            if (f.estatus === "Pagada") estatusEvento = "Completado";
-            else if (f.estatus === "Cancelada") estatusEvento = "Cancelado";
-            else if (f.estatus === "Reprogramado")
-              estatusEvento = "Reprogramado";
-            else if (
-              f.estatus === "Vencida" ||
-              (f.estatus === "Pendiente" && fechaVencimientoObj < hoy)
-            ) {
-              estatusEvento = "Vencido";
-            }
+  const diasMesGrid = useMemo(() => {
+    if (vista !== "MES") return diasRango;
 
-            if (
-              !mostrarCompletados &&
-              (estatusEvento === "Completado" || estatusEvento === "Cancelado")
-            )
-              return;
+    const inicioMes = rango.inicio;
+    const finMes = rango.fin;
+    const ajusteInicio = inicioMes.getDay() === 0 ? -6 : 1 - inicioMes.getDay();
+    const inicioGrid = sumarDias(inicioMes, ajusteInicio);
+    const ultimoMes = sumarDias(finMes, -1);
+    const ajusteFin = ultimoMes.getDay() === 0 ? 0 : 7 - ultimoMes.getDay();
+    const finGrid = sumarDias(ultimoMes, ajusteFin + 1);
 
-            if (!mapeo[dia]) mapeo[dia] = [];
-            mapeo[dia].push({
-              id: f.id,
-              tipo: "VENCIMIENTO",
-              titulo: `Vence ${textoSeguro(f.folio)}`,
-              cliente: f.cliente,
-              cliente_id: f.cliente_id,
-              monto: f.saldo_pendiente ?? f.monto_total ?? 0,
-              estatus_evento: estatusEvento,
-              telefono: f.telefono || "",
-              detalle: f,
-              ultima_accion_fecha: f.ultima_accion?.fecha
-                ? textoSeguro(f.ultima_accion.fecha)
-                : "Reciente",
-              responsable_accion: f.ultima_accion?.responsable
-                ? textoSeguro(f.ultima_accion.responsable)
-                : "Sistema",
-            });
-          }
-        }
-      });
+    return generarDiasRango(inicioGrid, finGrid);
+  }, [vista, diasRango, rango]);
+
+  const opcionesClientes = useMemo(
+    () =>
+      (clientes || [])
+        .filter(
+          (cliente) =>
+            cliente.activo !== false && cliente.estatus !== "Inactivo",
+        )
+        .sort((a, b) =>
+          (a.nombre || "").localeCompare(b.nombre || "", "es", {
+            sensitivity: "base",
+          }),
+        )
+        .map((cliente) => ({
+          value: cliente.id,
+          label: `${cliente.nombre}${
+            cliente.numero_cliente ? ` - #${cliente.numero_cliente}` : ""
+          }`,
+        })),
+    [clientes],
+  );
+
+  const tituloPeriodo = formatearPeriodo(rango.inicio, rango.fin, vista);
+
+  const navegarPeriodo = (direccion) => {
+    if (vista === "DIA") {
+      setFechaActual((actual) => sumarDias(actual, direccion));
+      return;
     }
 
-    compromisos.forEach((c) => {
-      let dia = 1;
-      if (c.fecha_compromiso && c.fecha_compromiso.toDate) {
-        dia = c.fecha_compromiso.toDate().getDate();
-      } else if (c.fecha_compromiso && c.fecha_compromiso.seconds) {
-        dia = new Date(c.fecha_compromiso.seconds * 1000).getDate();
-      }
+    if (vista === "SEMANA") {
+      setFechaActual((actual) => sumarDias(actual, direccion * 7));
+      return;
+    }
 
-      const estatusEvento = c.estatus || "Pendiente";
-
-      if (
-        !mostrarCompletados &&
-        (estatusEvento === "Completado" || estatusEvento === "Cancelado")
-      )
-        return;
-
-      if (!mapeo[dia]) mapeo[dia] = [];
-      mapeo[dia].push({
-        id: c.id,
-        tipo: c.tipo_evento || "COMPROMISO",
-        titulo: c.motivo,
-        cliente: c.cliente_nombre,
-        cliente_id: c.cliente_id,
-        monto: c.monto,
-        telefono: c.telefono || "",
-        estatus_evento: estatusEvento,
-        detalle: { folio: c.folio_factura, cliente: c.cliente_nombre },
-        ultima_accion_fecha: c.ultima_accion_fecha,
-        responsable_accion: c.ultima_accion?.responsable
-          ? textoSeguro(c.ultima_accion.responsable)
-          : "Admin",
-      });
-    });
-
-    return mapeo;
-  })();
-
-  const opcionesClientes = useMemo(() => {
-    return clientes
-      .filter(
-        (c) => c.activo !== false && c.estatus !== "Inactivo",
-      )
-      .map((c) => ({
-        value: c.id,
-        label:
-          c.nombre +
-          (c.numero_cliente ? " - #" + c.numero_cliente : ""),
-      }));
-  }, [clientes]);
-
-  const facturasClienteSeleccionado = useMemo(() => {
-    if (!formClienteId) return [];
-    return facturas.filter(
-      (f) =>
-        f.cliente_id === formClienteId &&
-        f.estatus !== "Pagada" &&
-        f.estatus !== "Cancelada",
+    setFechaActual(
+      (actual) => new Date(actual.getFullYear(), actual.getMonth() + direccion, 1),
     );
-  }, [facturas, formClienteId]);
-
-  const cambiarMes = (direccion) => {
-    const nuevaFecha = new Date(fechaActual);
-    nuevaFecha.setMonth(nuevaFecha.getMonth() + direccion);
-    setFechaActual(nuevaFecha);
   };
 
-  const abrirDia = (dia) => {
-    setDiaSeleccionado(dia);
-    setModalActivo("verDia");
+  const abrirDetalle = (fechaClave = "", categoria = "TODOS") => {
+    setFechaSeleccionada(fechaClave);
+    setCategoriaSeleccionada(categoria);
+    setModalActivo("DETALLE");
+  };
+
+  const abrirGestionFactura = (evento) => {
+    if (!evento?.detalle) return;
+
+    navigate("/facturas", {
+      state: {
+        gestionarFactura: evento.detalle,
+      },
+    });
+  };
+
+  const abrirNuevoRecordatorio = (fechaClave = "") => {
+    const fecha = fechaClave || fechaAClave(new Date());
+
+    setFormulario({
+      ...ESTADO_FORMULARIO,
+      fecha,
+    });
+    setFacturasCliente([]);
+    setFechaSeleccionada(fecha);
+    setModalActivo("CREAR");
   };
 
   const cerrarModal = () => {
     if (isSubmitting) return;
-    setModalActivo(null);
-    setFormClienteId(null);
-    setFormFacturaSeleccionada("");
-    setFormMotivo("");
-    setFormTipoEvento("Recordatorio");
-    setNuevaFechaReprogramacion("");
+    setModalActivo("");
+    setEventoSeleccionado(null);
+    setNuevaFecha("");
   };
 
-  const abrirModalWhatsapp = (ev) => {
-    setEventoSeleccionado(ev);
-    const plantillaInicial =
-      ev.estatus_evento === "Vencido"
-        ? "atrasado"
-        : ev.tipo === "VENCIMIENTO"
-          ? "proximo"
-          : "manual";
+  const eventosDetalle = useMemo(() => {
+    const base = fechaSeleccionada
+      ? eventos.filter((evento) => evento.fechaClave === fechaSeleccionada)
+      : eventos;
 
-    const datosFacturaFalsa = {
-      cliente: ev.cliente,
-      folio: ev.detalle?.folio || "S/F",
-      saldo_pendiente: ev.monto || 0,
-      vencimiento: ev.detalle?.vencimiento || "los próximos días",
-    };
+    return base.filter((evento) => {
+      if (
+        evento.origen === "COMPROMISO" &&
+        !mostrarResueltos &&
+        esEstadoFinal(evento.estatus)
+      ) {
+        return false;
+      }
 
-    const clienteDB =
-      clientes.find((c) => c.id === ev.cliente_id) ||
-      clientes.find((c) => c.nombre === ev.cliente);
-    const telefonoReal =
-      clienteDB?.telefono || ev.telefono || ev.detalle?.telefono || "";
-
-    setDatosWhatsapp({
-      telefono: telefonoReal,
-      plantilla: plantillaInicial,
-      mensaje: generarMensajeWA(plantillaInicial, datosFacturaFalsa),
+      return (
+        categoriaSeleccionada === "TODOS" ||
+        evento.categoria === categoriaSeleccionada
+      );
     });
-    setModalActivo("whatsapp");
-  };
+  }, [eventos, fechaSeleccionada, categoriaSeleccionada, mostrarResueltos]);
 
-  const enviarWhatsApp = async () => {
-    if (!currentUser?.uid) {
-      alert("Error: No se identificó al usuario responsable de la acción.");
-      return;
-    }
+  const cambiarTipoVinculo = async (tipoVinculo) => {
+    const clienteActualId = formulario.clienteId;
 
-    setIsSubmitting(true);
-    try {
-      const numeroLimpio = normalizarTelefonoMX(datosWhatsapp.telefono);
+    setFormulario((anterior) => ({
+      ...anterior,
+      tipoVinculo,
+      clienteId: tipoVinculo === "GENERAL" ? "" : anterior.clienteId,
+      facturaId: "",
+    }));
+    setFacturasCliente([]);
 
-      if (!numeroLimpio.startsWith("52") || numeroLimpio.length !== 12) {
-        alert(
-          "El número de teléfono no parece válido. Revisa que tenga 10 dígitos.",
-        );
-        setIsSubmitting(false);
-        return;
-      }
+    if (tipoVinculo !== "FACTURA" || !clienteActualId) return;
 
-      const mensajeCodificado = encodeURIComponent(datosWhatsapp.mensaje);
-      const url = `https://wa.me/${numeroLimpio}?text=${mensajeCodificado}`;
-
-      window.open(url, "_blank", "noopener,noreferrer");
-
-      const res = await compromisosService.registrarWhatsAppCompromiso({
-        idCompromiso:
-          eventoSeleccionado.tipo !== "VENCIMIENTO"
-            ? eventoSeleccionado.id
-            : null,
-        esFacturaAuto: eventoSeleccionado.tipo === "VENCIMIENTO",
-        clienteNombre: eventoSeleccionado.cliente,
-        tipoMensaje: datosWhatsapp.plantilla,
-        userName: userName,
-        actor_uid: currentUser.uid // BLINDAJE INYECTADO
-      });
-
-      if (res.success) {
-        setMensajeExito({
-          titulo: "WhatsApp Abierto",
-          descripcion: "WhatsApp se abrió y la acción quedó registrada en la bitácora.",
-        });
-        setModalActivo("exito");
-      } else {
-        alert(
-          "Aviso abierto, pero falló el registro en base de datos: " +
-            res.error,
-        );
-      }
-    } catch (error) {
-      console.error(error);
-      alert("Error inesperado al registrar WhatsApp.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleAgregarRecordatorio = async (e) => {
-    e.preventDefault();
-
-    if (!currentUser?.uid) {
-      alert("Error: No se identificó al usuario responsable de la acción.");
-      return;
-    }
-
-    if (!formClienteId) {
-      alert("Por favor seleccione un cliente desde el buscador.");
-      return;
-    }
-
-    if (!formMotivo.trim()) {
-      alert("Escriba un motivo válido.");
-      return;
-    }
-
-    setIsSubmitting(true);
-
-    const clienteSeleccionado = clientes.find((c) => c.id === formClienteId);
-
-    if (!clienteSeleccionado) {
-      setIsSubmitting(false);
-      alert(
-        "No se pudo enlazar el cliente seleccionado. Recarga la página e intenta de nuevo.",
+    setCargandoFacturasCliente(true);
+    const resultado =
+      await calendarioConsultaService.consultarFacturasAbiertasCliente(
+        clienteActualId,
       );
+    setCargandoFacturasCliente(false);
+
+    if (!resultado.success) {
+      window.alert(resultado.error);
       return;
     }
 
-    const mesFormat = String(mesActualNum + 1).padStart(2, "0");
-    const diaFormat = String(diaSeleccionado).padStart(2, "0");
-    const fechaArmada = `${añoActual}-${mesFormat}-${diaFormat}`;
+    setFacturasCliente(resultado.facturas);
+  };
 
-    let facturaIdReal = null;
-    let folioFacturaReal = "S/F";
-    let montoReal = 0;
+  const seleccionarCliente = async (opcion) => {
+    const clienteId = opcion?.value || "";
 
-    if (formFacturaSeleccionada) {
-      const facObj = facturas.find((f) => f.id === formFacturaSeleccionada);
-      if (facObj) {
-        facturaIdReal = facObj.id;
-        folioFacturaReal = facObj.folio || "S/F";
-        montoReal = Number(facObj.saldo_pendiente || facObj.monto_total || 0);
-      }
+    setFormulario((anterior) => ({
+      ...anterior,
+      clienteId,
+      facturaId: "",
+    }));
+    setFacturasCliente([]);
+
+    if (!clienteId || formulario.tipoVinculo !== "FACTURA") return;
+
+    setCargandoFacturasCliente(true);
+    const resultado =
+      await calendarioConsultaService.consultarFacturasAbiertasCliente(
+        clienteId,
+      );
+    setCargandoFacturasCliente(false);
+
+    if (!resultado.success) {
+      window.alert(resultado.error);
+      return;
     }
 
-    const dataCompromiso = {
-      fecha: fechaArmada,
-      cliente_id: clienteSeleccionado.id,
-      cliente_nombre: clienteSeleccionado.nombre,
-      factura_id: facturaIdReal,
-      folio_factura: folioFacturaReal,
-      tipo_evento: formTipoEvento,
-      motivo: formMotivo,
-      monto: montoReal,
-      telefono: clienteSeleccionado.telefono || "",
+    setFacturasCliente(resultado.facturas);
+  };
+
+  const guardarRecordatorio = async (event) => {
+    event.preventDefault();
+
+    if (!currentUser?.uid) {
+      window.alert("No se identificó al usuario responsable.");
+      return;
+    }
+
+    const cliente = clientes.find(
+      (item) => item.id === formulario.clienteId,
+    );
+    const factura = facturasCliente.find(
+      (item) => item.id === formulario.facturaId,
+    );
+
+    setIsSubmitting(true);
+
+    const resultado = await compromisosService.crearCompromiso(
+      {
+        fecha: formulario.fecha,
+        tipo_vinculo: formulario.tipoVinculo,
+        titulo: formulario.titulo,
+        motivo: formulario.motivo,
+        tipo_evento: formulario.tipoEvento,
+        cliente_id: cliente?.id || null,
+        cliente_nombre: cliente?.nombre || "",
+        telefono: cliente?.telefono || "",
+        factura_id: factura?.id || null,
+        folio_factura: factura?.folio || "",
+        monto: Number(factura?.saldo_pendiente) || 0,
+      },
+      userName,
+      currentUser.uid,
+    );
+
+    setIsSubmitting(false);
+
+    if (!resultado.success) {
+      window.alert(`No se pudo guardar: ${resultado.error}`);
+      return;
+    }
+
+    setMensajeExito("El recordatorio quedó registrado y auditado.");
+    setModalActivo("EXITO");
+  };
+
+  const actualizarEstado = async (evento, accion) => {
+    if (!currentUser?.uid || evento.origen !== "COMPROMISO") return;
+
+    if (esEstadoFinal(evento.estatus)) {
+      window.alert("Este recordatorio ya tiene un estado final.");
+      return;
+    }
+
+    if (accion === "REPROGRAMAR") {
+      setEventoSeleccionado(evento);
+      setNuevaFecha(evento.fechaClave);
+      setModalActivo("REPROGRAMAR");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    const resultado =
+      accion === "COMPLETAR"
+        ? await compromisosService.completarCompromiso(
+            evento.detalle.id,
+            evento.cliente || evento.titulo,
+            userName,
+            currentUser.uid,
+          )
+        : await compromisosService.cancelarCompromiso(
+            evento.detalle.id,
+            evento.cliente || evento.titulo,
+            userName,
+            currentUser.uid,
+          );
+
+    setIsSubmitting(false);
+
+    if (!resultado.success) {
+      window.alert(resultado.error);
+    }
+  };
+
+  const confirmarReprogramacion = async (event) => {
+    event.preventDefault();
+    if (!eventoSeleccionado || !nuevaFecha || !currentUser?.uid) return;
+
+    setIsSubmitting(true);
+    const resultado = await compromisosService.reprogramarCompromiso(
+      eventoSeleccionado.detalle.id,
+      nuevaFecha,
+      eventoSeleccionado.cliente || eventoSeleccionado.titulo,
+      userName,
+      currentUser.uid,
+    );
+    setIsSubmitting(false);
+
+    if (!resultado.success) {
+      window.alert(resultado.error);
+      return;
+    }
+
+    setMensajeExito("El recordatorio fue reprogramado correctamente.");
+    setModalActivo("EXITO");
+  };
+
+  const eliminarRecordatorio = async (evento) => {
+    if (
+      userRole !== "SU" ||
+      !currentUser?.uid ||
+      !window.confirm("¿Eliminar permanentemente este recordatorio?")
+    ) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    const resultado = await compromisosService.eliminarCompromiso(
+      evento.detalle.id,
+      evento.cliente || evento.titulo,
+      userName,
+      currentUser.uid,
+    );
+    setIsSubmitting(false);
+
+    if (!resultado.success) {
+      window.alert(resultado.error);
+    }
+  };
+
+  const abrirWhatsapp = (evento) => {
+    if (!evento.cliente_id) return;
+
+    const cliente = clientes.find((item) => item.id === evento.cliente_id);
+    const telefono = cliente?.telefono || evento.telefono || "";
+    const plantilla = evento.categoria === "VENCIDAS" ? "atrasado" : "proximo";
+    const datos = {
+      cliente: evento.cliente,
+      folio: evento.folio || "S/F",
+      saldo_pendiente: evento.monto,
+      vencimiento: evento.fechaClave,
     };
 
-    const res = await compromisosService.crearCompromiso(
-      dataCompromiso,
-      userName,
-      currentUser.uid // BLINDAJE INYECTADO
-    );
-    setIsSubmitting(false);
-
-    if (res.success) {
-      cerrarModal();
-      setMensajeExito({
-        titulo: "Seguimiento Guardado",
-        descripcion: `El evento ha sido clasificado y agendado exitosamente en la nube.`,
-      });
-      setModalActivo("exito");
-    } else {
-      alert("Error al guardar el compromiso: " + res.error);
-    }
+    setEventoSeleccionado(evento);
+    setDatosWhatsapp({
+      telefono,
+      plantilla,
+      mensaje: generarMensajeWA(plantilla, datos),
+    });
+    setModalActivo("WHATSAPP");
   };
 
-  const procesarReprogramacion = async (e) => {
-    e.preventDefault();
+  const enviarWhatsapp = async () => {
+    if (!eventoSeleccionado || !currentUser?.uid) return;
 
-    if (!currentUser?.uid) {
-      alert("Error: No se identificó al usuario responsable de la acción.");
+    const numero = normalizarTelefonoMX(datosWhatsapp.telefono);
+
+    if (!numero.startsWith("52") || numero.length !== 12) {
+      window.alert("El teléfono debe contener 10 dígitos válidos.");
       return;
     }
 
-    if (!nuevaFechaReprogramacion) return;
+    window.open(
+      `https://wa.me/${numero}?text=${encodeURIComponent(datosWhatsapp.mensaje)}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
 
     setIsSubmitting(true);
-    const res = await compromisosService.reprogramarCompromiso(
-      eventoSeleccionado.id,
-      nuevaFechaReprogramacion,
-      eventoSeleccionado.cliente,
+    const resultado = await compromisosService.registrarWhatsAppCompromiso({
+      idCompromiso:
+        eventoSeleccionado.origen === "COMPROMISO"
+          ? eventoSeleccionado.detalle.id
+          : null,
+      esFacturaAuto: eventoSeleccionado.origen === "FACTURA",
+      clienteNombre: eventoSeleccionado.cliente,
+      tipoMensaje: datosWhatsapp.plantilla,
       userName,
-      currentUser.uid // BLINDAJE INYECTADO
-    );
+      actor_uid: currentUser.uid,
+    });
     setIsSubmitting(false);
 
-    if (res.success) {
-      cerrarModal();
-      setMensajeExito({
-        titulo: "Compromiso Reprogramado",
-        descripcion: `La nueva fecha ha sido pactada y guardada en el historial.`,
-      });
-      setModalActivo("exito");
-    } else {
-      alert("Error al reprogramar: " + res.error);
-    }
-  };
-
-  const handleActualizarEstado = async (evento, nuevoEstatus) => {
-    if (!currentUser?.uid) {
-      alert("Error: No se identificó al usuario responsable de la acción.");
+    if (!resultado.success) {
+      window.alert(resultado.error);
       return;
     }
 
-    if (evento.tipo === "VENCIMIENTO") {
-      alert(
-        "Acción denegada: El estado de las facturas automáticas solo puede modificarse ingresando un abono en el módulo de Facturación.",
-      );
-      return;
-    }
-
-    if (nuevoEstatus === evento.estatus_evento) return;
-
-    if (["Completado", "Cancelado"].includes(evento.estatus_evento)) {
-      alert(
-        "Este compromiso ya fue cerrado y no puede cambiar nuevamente de estado.",
-      );
-      return;
-    }
-
-    if (nuevoEstatus === "Completado") {
-      const res = await compromisosService.completarCompromiso(
-        evento.id,
-        evento.cliente,
-        userName,
-        currentUser.uid // BLINDAJE INYECTADO
-      );
-      if (!res.success)
-        alert("No se pudo actualizar el compromiso: " + res.error);
-    } else if (nuevoEstatus === "Cancelado") {
-      const res = await compromisosService.cancelarCompromiso(
-        evento.id,
-        evento.cliente,
-        userName,
-        currentUser.uid // BLINDAJE INYECTADO
-      );
-      if (!res.success)
-        alert("No se pudo cancelar el compromiso: " + res.error);
-    } else if (nuevoEstatus === "Reprogramado") {
-      setEventoSeleccionado(evento);
-      setModalActivo("reprogramar");
-    }
-  };
-
-  const handleEliminarCompromiso = async (evento) => {
-    if (!currentUser?.uid) {
-      alert("Error: No se identificó al usuario responsable de la acción.");
-      return;
-    }
-
-    if (
-      window.confirm(
-        `¿Estás seguro de eliminar permanentemente este registro del sistema?`,
-      )
-    ) {
-      const res = await compromisosService.eliminarCompromiso(
-        evento.id,
-        evento.cliente,
-        userName,
-        currentUser.uid // BLINDAJE INYECTADO
-      );
-      if (!res.success)
-        alert("No se pudo eliminar el compromiso: " + res.error);
-    }
+    setMensajeExito("WhatsApp se abrió y la acción quedó registrada.");
+    setModalActivo("EXITO");
   };
 
   const customSelectStyles = {
     control: (base) => ({
       ...base,
-      fontSize: "0.75rem",
+      minHeight: "44px",
+      fontSize: "0.8rem",
+      borderRadius: "0.75rem",
       borderColor: "#e5e7eb",
       boxShadow: "none",
       "&:hover": { borderColor: "#60a5fa" },
     }),
-    option: (base) => ({
-      ...base,
-      fontSize: "0.75rem",
-    }),
-    menu: (base) => ({
-      ...base,
-      zIndex: 9999,
-    }),
+    menu: (base) => ({ ...base, zIndex: 9999 }),
+    option: (base) => ({ ...base, fontSize: "0.8rem" }),
+  };
+
+  const renderContadoresDia = (fecha) => {
+    const clave = fechaAClave(fecha);
+    const eventosDia = eventosPorDia[clave] || [];
+    const conteos = contarCategorias(eventosDia);
+
+    return (
+      <div className="space-y-1.5">
+        <ContadorCategoria
+          categoria="VENCIDAS"
+          cantidad={conteos.VENCIDAS}
+          compacto={vista === "MES"}
+          onClick={(event) => {
+            event.stopPropagation();
+            abrirDetalle(clave, "VENCIDAS");
+          }}
+        />
+        <ContadorCategoria
+          categoria="POR_VENCER"
+          cantidad={conteos.POR_VENCER}
+          compacto={vista === "MES"}
+          onClick={(event) => {
+            event.stopPropagation();
+            abrirDetalle(clave, "POR_VENCER");
+          }}
+        />
+        <ContadorCategoria
+          categoria="RECORDATORIOS"
+          cantidad={conteos.RECORDATORIOS}
+          compacto={vista === "MES"}
+          onClick={(event) => {
+            event.stopPropagation();
+            abrirDetalle(clave, "RECORDATORIOS");
+          }}
+        />
+      </div>
+    );
   };
 
   return (
-    <div className="flex flex-col space-y-6 animate-fade-in text-sm relative pb-10">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mt-4">
+    <div className="flex flex-col space-y-4 md:space-y-6 pb-6 animate-fade-in">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 mt-2 md:mt-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#0a192f] flex items-center">
-            <CalendarIcon className="h-6 w-6 mr-2 text-blue-600" /> Agenda de
-            Cobros y Compromisos
+          <h1 className="text-xl md:text-2xl font-black text-[#0a192f] flex items-center">
+            <CalendarIcon className="h-5 w-5 md:h-6 md:w-6 mr-2 text-blue-600" />
+            Agenda de Cobranza
           </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Monitoreo de promesas pactadas y vencimientos automáticos de cuentas
-            por cobrar.
+          <p className="text-xs md:text-sm text-gray-500 mt-1">
+            Vencimientos, próximos cobros y recordatorios operativos.
           </p>
         </div>
+
+        <button
+          type="button"
+          onClick={() => abrirNuevoRecordatorio(fechaAClave(new Date()))}
+          className="w-full lg:w-auto px-5 py-3 bg-[#0a192f] text-white rounded-xl font-black text-sm flex items-center justify-center shadow-md hover:bg-[#112240]"
+        >
+          <Plus className="h-4 w-4 mr-2" />
+          Nuevo recordatorio
+        </button>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
-        <div className="p-4 bg-gray-50/50 border-b border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <div className="flex items-center space-x-2">
-            <h2 className="font-black text-[#0a192f] text-base tracking-tight uppercase font-mono">
-              {mesActualTexto}
-            </h2>
+      <div className="grid grid-cols-3 gap-2 md:gap-4">
+        {Object.entries(CATEGORIAS).map(([categoria, configuracion]) => {
+          const Icono = configuracion.icono;
+          const cantidad = resumenPeriodo[categoria] || 0;
+
+          return (
+            <button
+              key={categoria}
+              type="button"
+              onClick={() => abrirDetalle("", categoria)}
+              className={`p-3 md:p-4 rounded-xl border text-left transition-all hover:-translate-y-0.5 hover:shadow-md ${configuracion.tarjeta}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] md:text-xs uppercase font-black tracking-wide text-gray-500 truncate">
+                  {configuracion.etiqueta}
+                </span>
+                <Icono className="h-4 w-4 md:h-5 md:w-5 shrink-0" />
+              </div>
+              <strong className="text-xl md:text-3xl text-[#0a192f] mt-2 block">
+                {cantidad}
+              </strong>
+              <span className="hidden md:block text-[10px] text-gray-500 mt-1">
+                Ver detalle del periodo
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100 bg-gray-50/60 space-y-4">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                  Periodo visible
+                </p>
+                <h2 className="text-sm md:text-base font-black text-[#0a192f] capitalize">
+                  {tituloPeriodo}
+                </h2>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => navegarPeriodo(-1)}
+                  className="p-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-100"
+                  aria-label="Periodo anterior"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFechaActual(new Date())}
+                  className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs font-black text-blue-600 hover:bg-blue-50"
+                >
+                  Hoy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navegarPeriodo(1)}
+                  className="p-2 bg-white border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-100"
+                  aria-label="Periodo siguiente"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 p-1 bg-white border border-gray-200 rounded-xl">
+              {VISTAS.map((opcion) => (
+                <button
+                  key={opcion.value}
+                  type="button"
+                  onClick={() => setVista(opcion.value)}
+                  className={`px-3 py-2 text-xs font-black rounded-lg transition-colors ${
+                    vista === opcion.value
+                      ? "bg-[#0a192f] text-white"
+                      : "text-gray-500 hover:bg-gray-100"
+                  }`}
+                >
+                  {opcion.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-center space-x-3 w-full sm:w-auto">
-            <button
-              onClick={() => setMostrarCompletados(!mostrarCompletados)}
-              className={`px-3 py-1.5 text-xs font-bold rounded-md flex items-center transition-colors flex-1 sm:flex-none justify-center border ${mostrarCompletados ? "bg-gray-100 text-gray-700 border-gray-200" : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"}`}
-            >
-              {mostrarCompletados ? (
-                <EyeOff className="h-3.5 w-3.5 mr-1.5" />
-              ) : (
-                <Eye className="h-3.5 w-3.5 mr-1.5" />
-              )}
-              {mostrarCompletados ? "Ocultar Resueltos" : "Mostrar Resueltos"}
-            </button>
-
-            <div className="flex items-center space-x-1 shrink-0">
-              <button
-                onClick={() => cambiarMes(-1)}
-                className="p-1.5 bg-white border border-gray-200 hover:bg-gray-50 rounded-md transition-all text-gray-600"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => setFechaActual(new Date())}
-                className="px-3 py-1.5 text-[11px] font-bold text-blue-600 border border-transparent hover:bg-blue-50 rounded-md transition-all"
-              >
-                Hoy
-              </button>
-              <button
-                onClick={() => cambiarMes(1)}
-                className="p-1.5 bg-white border border-gray-200 hover:bg-gray-50 rounded-md transition-all text-gray-600"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 hide-scrollbar-mobile">
+              <Filter className="h-4 w-4 text-gray-400 shrink-0" />
+              {FILTROS.map((opcion) => (
+                <button
+                  key={opcion.value}
+                  type="button"
+                  onClick={() => setFiltro(opcion.value)}
+                  className={`whitespace-nowrap px-3 py-1.5 rounded-full border text-[10px] md:text-xs font-black transition-colors ${
+                    filtro === opcion.value
+                      ? "bg-[#0a192f] text-white border-[#0a192f]"
+                      : "bg-white text-gray-500 border-gray-200 hover:border-gray-400"
+                  }`}
+                >
+                  {opcion.label}
+                </button>
+              ))}
             </div>
+
+            <button
+              type="button"
+              onClick={() => setMostrarResueltos((actual) => !actual)}
+              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-600 flex items-center justify-center"
+            >
+              {mostrarResueltos ? (
+                <EyeOff className="h-4 w-4 mr-2" />
+              ) : (
+                <Eye className="h-4 w-4 mr-2" />
+              )}
+              {mostrarResueltos ? "Ocultar resueltos" : "Mostrar resueltos"}
+            </button>
           </div>
         </div>
 
-        <div className="overflow-x-auto custom-scrollbar w-full">
-          <div className="min-w-[800px] md:min-w-full">
-            <div className="grid grid-cols-7 bg-[#0a192f] text-white text-[10px] font-black uppercase tracking-wider text-center py-2 border-b border-gray-200">
-              <div>Dom</div>
-              <div>Lun</div>
-              <div>Mar</div>
-              <div>Mié</div>
-              <div>Jue</div>
-              <div>Vie</div>
-              <div>Sáb</div>
-            </div>
+        {error && (
+          <div className="m-4 p-3 rounded-xl border border-red-200 bg-red-50 text-red-700 text-xs font-bold">
+            {error}
+          </div>
+        )}
 
-            <div className="p-0">
-              <div className="grid grid-cols-7 gap-0 bg-gray-100 border-l border-t border-gray-100">
-                {Array.from({ length: primerDiaDelMes }).map((_, idx) => (
-                  <div
-                    key={`empty-${idx}`}
-                    className="bg-gray-50/50 min-h-[90px] border-b border-r border-gray-100"
-                  />
-                ))}
-                {Array.from({ length: diasEnElMes }).map((_, idx) => {
-                  const dia = idx + 1;
-                  const listaEventos = eventosMes[dia] || [];
-                  const esHoy =
-                    dia === hoyDiaExacto &&
-                    mesActualNum === hoyMesExacto &&
-                    añoActual === hoyAnioExacto;
+        {cargando ? (
+          <div className="p-10 flex items-center justify-center text-gray-400">
+            <Loader2 className="h-6 w-6 animate-spin mr-2" />
+            Consultando el periodo visible...
+          </div>
+        ) : (
+          <>
+            {vista === "MES" ? (
+              <div className="p-2 md:p-0">
+                <div className="grid grid-cols-7 bg-[#0a192f] text-white text-[9px] md:text-[10px] font-black uppercase tracking-wider text-center rounded-t-xl md:rounded-none">
+                  {['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map((dia) => (
+                    <div key={dia} className="py-2">{dia}</div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-7 border-l border-t border-gray-100">
+                  {diasMesGrid.map((fecha) => {
+                    const fueraMes = fecha.getMonth() !== rango.inicio.getMonth();
+                    const esHoy = mismoDia(fecha, new Date());
+                    const clave = fechaAClave(fecha);
 
-                  return (
-                    <div
-                      key={`dia-${dia}`}
-                      onClick={() => abrirDia(dia)}
-                      className={`min-h-[90px] bg-white border-b border-r border-gray-100 p-1.5 flex flex-col justify-between transition-colors hover:bg-gray-50/60 cursor-pointer ${esHoy ? "bg-blue-50/30" : ""}`}
-                    >
-                      <div className="flex justify-between items-center">
+                    return (
+                      <div
+                        key={clave}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => abrirDetalle(clave, "TODOS")}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            abrirDetalle(clave, "TODOS");
+                          }
+                        }}
+                        className={`min-h-20 md:min-h-32 p-1 md:p-2 border-r border-b border-gray-100 text-left align-top transition-colors hover:bg-blue-50/30 cursor-pointer ${
+                          fueraMes ? "bg-gray-50 text-gray-300" : "bg-white"
+                        }`}
+                      >
                         <span
-                          className={`text-xs font-bold font-mono h-5 w-5 flex items-center justify-center rounded-full ${esHoy ? "bg-blue-600 text-white shadow-sm" : "text-gray-700"}`}
+                          className={`h-6 w-6 flex items-center justify-center rounded-full text-[10px] md:text-xs font-black mb-1 ${
+                            esHoy ? "bg-blue-600 text-white" : "text-[#0a192f]"
+                          }`}
                         >
-                          {dia}
+                          {fecha.getDate()}
                         </span>
+                        {!fueraMes && renderContadoresDia(fecha)}
                       </div>
-                      <div className="space-y-1 mt-1 flex-1 overflow-hidden">
-                        {listaEventos.slice(0, 3).map((ev) => {
-                          let badgeColor =
-                            "bg-blue-50 text-blue-600 border-blue-100";
-                          if (ev.estatus_evento === "Completado")
-                            badgeColor =
-                              "bg-green-50 text-green-600 border-green-100";
-                          else if (ev.estatus_evento === "Vencido")
-                            badgeColor =
-                              "bg-red-50 text-red-600 border-red-100";
-                          else if (ev.estatus_evento === "Reprogramado")
-                            badgeColor =
-                              "bg-purple-50 text-purple-600 border-purple-100";
-                          else if (ev.estatus_evento === "Cancelado")
-                            badgeColor =
-                              "bg-gray-100 text-gray-500 border-gray-200 opacity-60 line-through";
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div
+                  className={`hidden md:grid divide-x divide-gray-100 ${
+                    vista === "DIA" ? "md:grid-cols-1" : "md:grid-cols-7"
+                  }`}
+                >
+                  {diasRango.map((fecha) => {
+                    const clave = fechaAClave(fecha);
+                    const esHoy = mismoDia(fecha, new Date());
 
-                          return (
-                            <div
-                              key={ev.id}
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold truncate border flex items-center ${badgeColor}`}
-                              title={`${textoSeguro(ev.titulo)} - ${textoSeguro(ev.cliente)}`}
-                            >
-                              {ev.tipo === "Seguimiento" && (
-                                <PhoneCall className="h-2.5 w-2.5 mr-1 shrink-0" />
-                              )}
-                              {ev.tipo === "Promesa" && (
-                                <Handshake className="h-2.5 w-2.5 mr-1 shrink-0" />
-                              )}
-                              {textoSeguro(ev.titulo)}
-                            </div>
-                          );
-                        })}
-                        {listaEventos.length > 3 && (
-                          <span className="text-[9px] font-bold text-gray-400 block pl-1 mt-1">
-                            +{listaEventos.length - 3} actividades
-                          </span>
-                        )}
+                    return (
+                      <div
+                        key={clave}
+                        className={`min-h-72 p-3 ${esHoy ? "bg-blue-50/30" : "bg-white"}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => abrirDetalle(clave, "TODOS")}
+                          className="w-full text-left"
+                        >
+                          <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                            {fecha.toLocaleDateString("es-MX", { weekday: "long" })}
+                          </p>
+                          <div className="flex items-center justify-between mt-1 mb-4">
+                            <strong className="text-lg text-[#0a192f]">
+                              {fecha.getDate()}
+                            </strong>
+                            {esHoy && (
+                              <span className="px-2 py-0.5 bg-blue-600 text-white text-[9px] rounded-full font-black uppercase">
+                                Hoy
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                        {renderContadoresDia(fecha)}
+                        <button
+                          type="button"
+                          onClick={() => abrirNuevoRecordatorio(clave)}
+                          className="w-full mt-4 py-2 border border-dashed border-gray-300 text-gray-400 rounded-lg text-[10px] font-bold hover:border-blue-300 hover:text-blue-600"
+                        >
+                          + Agregar
+                        </button>
                       </div>
+                    );
+                  })}
+                </div>
+
+                <div className="md:hidden p-3 space-y-3">
+                  {diasRango.map((fecha) => {
+                    const clave = fechaAClave(fecha);
+                    const eventosDia = eventosPorDia[clave] || [];
+                    const esHoy = mismoDia(fecha, new Date());
+
+                    return (
+                      <article
+                        key={clave}
+                        className={`rounded-2xl border p-4 ${
+                          esHoy
+                            ? "border-blue-200 bg-blue-50/40"
+                            : "border-gray-200 bg-white"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-3">
+                          <button
+                            type="button"
+                            onClick={() => abrirDetalle(clave, "TODOS")}
+                            className="text-left"
+                          >
+                            <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+                              {fecha.toLocaleDateString("es-MX", { weekday: "long" })}
+                            </p>
+                            <h3 className="text-base font-black text-[#0a192f] capitalize">
+                              {fecha.toLocaleDateString("es-MX", {
+                                day: "numeric",
+                                month: "long",
+                              })}
+                            </h3>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => abrirNuevoRecordatorio(clave)}
+                            className="h-10 w-10 rounded-xl bg-[#0a192f] text-white flex items-center justify-center"
+                            aria-label="Agregar recordatorio"
+                          >
+                            <Plus className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        {eventosDia.length ? (
+                          renderContadoresDia(fecha)
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => abrirDetalle(clave, "TODOS")}
+                            className="w-full py-4 rounded-xl bg-gray-50 text-xs font-bold text-gray-400"
+                          >
+                            Sin actividades
+                          </button>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      {modalActivo === "DETALLE" && (
+        <ModalBase onClose={cerrarModal} maxWidth="max-w-3xl">
+          <div className="p-4 md:p-5 border-b border-gray-100 flex items-start justify-between gap-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-blue-600">
+                Detalle de agenda
+              </p>
+              <h2 className="text-lg font-black text-[#0a192f] capitalize">
+                {fechaSeleccionada
+                  ? claveAFecha(fechaSeleccionada)?.toLocaleDateString("es-MX", {
+                      weekday: "long",
+                      day: "numeric",
+                      month: "long",
+                      year: "numeric",
+                    })
+                  : tituloPeriodo}
+              </h2>
+            </div>
+            <button type="button" onClick={cerrarModal} className="p-2 text-gray-400">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="p-4 md:p-5 overflow-y-auto custom-scrollbar space-y-4">
+            {eventosDetalle.length === 0 ? (
+              <div className="py-10 text-center text-gray-400">
+                <CalendarDays className="h-10 w-10 mx-auto mb-3 text-gray-200" />
+                <p className="text-sm font-bold">No hay actividades en esta selección.</p>
+              </div>
+            ) : (
+              Object.keys(CATEGORIAS).map((categoria) => {
+                const lista = eventosDetalle.filter(
+                  (evento) => evento.categoria === categoria,
+                );
+                if (!lista.length) return null;
+                const configuracion = CATEGORIAS[categoria];
+                const Icono = configuracion.icono;
+
+                return (
+                  <section key={categoria}>
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-xs font-black uppercase tracking-wider text-gray-500 flex items-center">
+                        <Icono className="h-4 w-4 mr-2" />
+                        {configuracion.etiqueta}
+                      </h3>
+                      <span className="text-xs font-black text-[#0a192f]">{lista.length}</span>
                     </div>
+
+                    <div className="space-y-2">
+                      {lista.map((evento) => (
+                        <article
+                          key={evento.id}
+                          className={`rounded-xl border p-3 md:p-4 ${configuracion.tarjeta}`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[10px] uppercase font-black px-2.5 py-1 rounded-full bg-white border border-gray-200 text-gray-600">
+                                  {evento.origen === "FACTURA"
+                                    ? "Factura"
+                                    : evento.tipoVinculo || "Recordatorio"}
+                                </span>
+
+                                {evento.estatus &&
+                                  evento.origen === "COMPROMISO" && (
+                                    <span className="text-[10px] uppercase font-black text-blue-700">
+                                      {evento.estatus}
+                                    </span>
+                                  )}
+
+                                {evento.origen === "COMPROMISO" &&
+                                  evento.tipoVinculo === "FACTURA" &&
+                                  evento.folio && (
+                                    <span className="text-[10px] font-black px-2.5 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700">
+                                      Folio {evento.folio}
+                                    </span>
+                                  )}
+                              </div>
+
+                              <h4 className="font-black text-[#0a192f] mt-2 text-base">
+                                {evento.origen === "FACTURA"
+                                  ? evento.folio
+                                  : evento.titulo}
+                              </h4>
+
+                              {evento.cliente && (
+                                <p className="text-xs font-bold text-gray-600 mt-1">
+                                  {evento.cliente}
+                                </p>
+                              )}
+
+                              {evento.origen === "COMPROMISO" &&
+                                evento.tipoVinculo === "FACTURA" &&
+                                evento.folio && (
+                                  <p className="text-xs font-black text-blue-700 mt-1">
+                                    Factura vinculada: {evento.folio}
+                                  </p>
+                                )}
+
+                              {evento.motivo && (
+                                <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                                  {evento.motivo}
+                                </p>
+                              )}
+                              {evento.origen === "FACTURA" && (
+                                <p className="text-sm font-black text-red-600 mt-2">
+                                  {formatearMoneda(evento.monto)}
+                                </p>
+                              )}
+                              <p className="text-[10px] text-gray-400 mt-2">
+                                {claveAFecha(evento.fechaClave)?.toLocaleDateString("es-MX")}
+                              </p>
+                            </div>
+
+                            <div className="flex gap-1 shrink-0">
+                              {evento.cliente_id && (
+                                <button
+                                  type="button"
+                                  onClick={() => abrirWhatsapp(evento)}
+                                  className="p-2 rounded-lg bg-white border border-gray-200 text-green-600 hover:bg-green-50"
+                                  title="WhatsApp"
+                                >
+                                  <MessageCircle className="h-4 w-4" />
+                                </button>
+                              )}
+                              {evento.origen === "FACTURA" && (
+                                <button
+                                  type="button"
+                                  onClick={() => abrirGestionFactura(evento)}
+                                  className="px-3 py-2 rounded-lg bg-white border border-blue-200 text-blue-700 hover:bg-blue-50 font-black text-[10px] flex items-center"
+                                  title="Abrir Gestión de Factura"
+                                >
+                                  <FileText className="h-4 w-4 mr-1.5" />
+                                  Ir a Facturación
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {evento.origen === "COMPROMISO" && !esEstadoFinal(evento.estatus) && (
+                            <div className="grid grid-cols-3 gap-2 mt-3 pt-3 border-t border-gray-200/70">
+                              <button
+                                type="button"
+                                onClick={() => actualizarEstado(evento, "COMPLETAR")}
+                                disabled={isSubmitting}
+                                className="py-2 rounded-lg bg-green-600 text-white text-[10px] font-black disabled:opacity-50"
+                              >
+                                Completar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => actualizarEstado(evento, "REPROGRAMAR")}
+                                disabled={isSubmitting}
+                                className="py-2 rounded-lg bg-purple-600 text-white text-[10px] font-black disabled:opacity-50"
+                              >
+                                Reprogramar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => actualizarEstado(evento, "CANCELAR")}
+                                disabled={isSubmitting}
+                                className="py-2 rounded-lg bg-gray-600 text-white text-[10px] font-black disabled:opacity-50"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          )}
+
+                          {userRole === "SU" && evento.origen === "COMPROMISO" && (
+                            <button
+                              type="button"
+                              onClick={() => eliminarRecordatorio(evento)}
+                              disabled={isSubmitting}
+                              className="mt-2 text-[10px] font-bold text-red-500 flex items-center"
+                            >
+                              <Trash2 className="h-3 w-3 mr-1" />
+                              Eliminar permanentemente
+                            </button>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })
+            )}
+          </div>
+
+          <div className="p-4 border-t border-gray-100 bg-gray-50 flex flex-col sm:flex-row gap-2 justify-end">
+            {fechaSeleccionada && (
+              <button
+                type="button"
+                onClick={() => abrirNuevoRecordatorio(fechaSeleccionada)}
+                className="px-4 py-3 sm:py-2 bg-[#ffd700] text-[#0a192f] rounded-xl font-black text-xs flex items-center justify-center"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Agregar recordatorio
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={cerrarModal}
+              className="px-4 py-3 sm:py-2 bg-[#0a192f] text-white rounded-xl font-black text-xs"
+            >
+              Cerrar
+            </button>
+          </div>
+        </ModalBase>
+      )}
+
+      {modalActivo === "CREAR" && (
+        <ModalBase onClose={cerrarModal} maxWidth="max-w-xl">
+          <div className="p-4 md:p-5 border-b border-gray-100 flex items-center justify-between">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-blue-600">
+                Nueva actividad
+              </p>
+              <h2 className="text-lg font-black text-[#0a192f]">Crear recordatorio</h2>
+            </div>
+            <button type="button" onClick={cerrarModal} className="p-2 text-gray-400">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <form onSubmit={guardarRecordatorio} className="p-4 md:p-5 overflow-y-auto custom-scrollbar space-y-4">
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-wider text-gray-400 mb-2">
+                Tipo de vínculo
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { value: "GENERAL", label: "General", icon: Bell },
+                  { value: "CLIENTE", label: "Cliente", icon: Users },
+                  { value: "FACTURA", label: "Factura", icon: FileText },
+                ].map((opcion) => {
+                  const Icono = opcion.icon;
+                  return (
+                    <button
+                      key={opcion.value}
+                      type="button"
+                      onClick={() => cambiarTipoVinculo(opcion.value)}
+                      className={`p-3 rounded-xl border text-xs font-black flex flex-col items-center gap-1.5 ${
+                        formulario.tipoVinculo === opcion.value
+                          ? "bg-[#0a192f] text-white border-[#0a192f]"
+                          : "bg-white text-gray-500 border-gray-200"
+                      }`}
+                    >
+                      <Icono className="h-4 w-4" />
+                      {opcion.label}
+                    </button>
                   );
                 })}
               </div>
             </div>
-          </div>
-        </div>
-      </div>
 
-      {modalActivo === "verDia" && diaSeleccionado && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border animate-scale-up flex flex-col max-h-[90vh]">
-            <div className="p-4 border-b bg-gray-50 flex justify-between items-center shrink-0">
-              <h3 className="font-black text-[#0a192f] text-sm flex items-center gap-1.5">
-                <CalendarIcon className="h-4 w-4 text-blue-600" />
-                Gestión Operativa: {diaSeleccionado} de{" "}
-                {nombresMeses[mesActualNum]}
-              </h3>
-              <button
-                onClick={cerrarModal}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <XCircle className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="p-4 overflow-y-auto flex-1 bg-white space-y-3 custom-scrollbar">
-              <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">
-                Comentarios y Vencimientos
-              </h4>
-              {(eventosMes[diaSeleccionado] || []).length > 0 ? (
-                (eventosMes[diaSeleccionado] || []).map((ev) => {
-                  const coloresSelector = {
-                    Pendiente: "bg-blue-50 text-blue-700 border-blue-200",
-                    Completado: "bg-green-50 text-green-700 border-green-200",
-                    Reprogramado:
-                      "bg-purple-50 text-purple-700 border-purple-200",
-                    Vencido: "bg-red-50 text-red-700 border-red-200",
-                    Cancelado: "bg-gray-50 text-gray-500 border-gray-200",
-                  };
-
-                  return (
-                    <div
-                      key={ev.id}
-                      className={`p-3 border rounded-lg transition-colors flex flex-col gap-2 ${ev.estatus_evento === "Cancelado" ? "bg-gray-50/30 border-gray-100 opacity-70" : "bg-gray-50/50 border-gray-200"}`}
-                    >
-                      <div className="flex justify-between items-start gap-4">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {ev.tipo === "VENCIMIENTO" ? (
-                              <span
-                                className={`text-[9px] font-black uppercase border rounded px-1.5 py-0.5 ${coloresSelector[ev.estatus_evento]}`}
-                              >
-                                {ev.estatus_evento}
-                              </span>
-                            ) : (
-                              <select
-                                value={ev.estatus_evento}
-                                onChange={(e) =>
-                                  handleActualizarEstado(ev, e.target.value)
-                                }
-                                disabled={["Completado", "Cancelado"].includes(
-                                  ev.estatus_evento,
-                                )}
-                                title={
-                                  ["Completado", "Cancelado"].includes(
-                                    ev.estatus_evento,
-                                  )
-                                    ? "Estado final: no admite más cambios"
-                                    : "Cambiar estado del compromiso"
-                                }
-                                className={`text-[9px] font-black uppercase border rounded px-1.5 py-0.5 outline-none transition-colors ${
-                                  ["Completado", "Cancelado"].includes(
-                                    ev.estatus_evento,
-                                  )
-                                    ? "cursor-not-allowed opacity-70"
-                                    : "cursor-pointer"
-                                } ${coloresSelector[ev.estatus_evento]}`}
-                              >
-                                <option value="Pendiente">Pendiente</option>
-                                <option value="Completado">Completado</option>
-                                <option value="Reprogramado">
-                                  Reprogramado
-                                </option>
-                                <option value="Cancelado">Cancelado</option>
-                              </select>
-                            )}
-
-                            <span className="text-[9px] font-bold text-gray-400 border border-gray-200 px-1 rounded uppercase tracking-wider bg-white">
-                              {ev.tipo === "VENCIMIENTO"
-                                ? "FACTURA"
-                                : textoSeguro(ev.tipo)}
-                            </span>
-                            <strong className="text-gray-800 font-bold text-xs">
-                              {textoSeguro(ev.detalle?.folio, "S/F")}
-                            </strong>
-                          </div>
-                          <p
-                            className={`text-xs font-black mt-1.5 uppercase tracking-tight ${ev.estatus_evento === "Cancelado" ? "text-gray-400 line-through" : "text-gray-700"}`}
-                          >
-                            {textoSeguro(ev.cliente)}
-                          </p>
-                          <p className="text-[11px] font-medium text-gray-600 mt-0.5">
-                            {textoSeguro(ev.titulo)}
-                          </p>
-                        </div>
-                        <div className="flex items-center space-x-1 shrink-0">
-                          <button
-                            onClick={() => abrirModalWhatsapp(ev)}
-                            className="p-1.5 bg-white border border-gray-200 text-[#25D366] hover:bg-[#25D366] hover:text-white rounded-md transition-all shadow-sm"
-                            title="Contactar vía WhatsApp"
-                          >
-                            <Send className="h-3.5 w-3.5" />
-                          </button>
-                          {userRole === "SU" && ev.tipo !== "VENCIMIENTO" && (
-                            <button
-                              onClick={() => handleEliminarCompromiso(ev)}
-                              className="p-1.5 bg-white border border-gray-200 text-red-500 hover:bg-red-500 hover:text-white rounded-md transition-all shadow-sm ml-1"
-                              title="Eliminar Permanente"
-                            >
-                              <XCircle className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="mt-1 pt-2 border-t border-gray-200/60 flex items-center justify-between text-[9px] text-gray-500">
-                        <span className="truncate pr-2">
-                          Actualizado: {ev.ultima_accion_fecha}
-                        </span>
-                        <span className="font-bold text-gray-600 shrink-0 bg-white px-1.5 py-0.5 rounded border border-gray-100 flex items-center">
-                          <User className="h-2.5 w-2.5 mr-1" />{" "}
-                          {ev.responsable_accion}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })
-              ) : (
-                <p className="text-xs text-gray-400 py-6 text-center italic">
-                  Agenda operativa despejada.
-                </p>
-              )}
-            </div>
-
-            <div className="p-4 border-t border-gray-100 bg-gray-50 shrink-0">
-              <h4 className="text-xs font-bold text-[#0a192f] uppercase tracking-wider mb-3 flex items-center gap-1">
-                <Plus className="h-3.5 w-3.5 text-blue-600" /> Agendar Acción
-                Comercial
-              </h4>
-              <form onSubmit={handleAgregarRecordatorio} className="space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="relative z-50">
-                    <Select
-                      options={opcionesClientes}
-                      value={
-                        opcionesClientes.find(
-                          (op) => op.value === formClienteId,
-                        ) || null
-                      }
-                      onChange={(op) => {
-                        setFormClienteId(op ? op.value : null);
-                        setFormFacturaSeleccionada("");
-                      }}
-                      placeholder="Buscar Cliente..."
-                      isClearable
-                      isDisabled={isSubmitting}
-                      styles={customSelectStyles}
-                      noOptionsMessage={() => "No se encontraron clientes"}
-                    />
-                  </div>
-                  <select
-                    value={formTipoEvento}
-                    onChange={(e) => setFormTipoEvento(e.target.value)}
-                    disabled={isSubmitting}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded text-gray-700 font-bold disabled:opacity-50 bg-white outline-none focus:border-blue-400"
-                  >
-                    <option value="Recordatorio">Recordatorio Simple</option>
-                    <option value="Seguimiento">Llamada de Seguimiento</option>
-                    <option value="Promesa">Promesa de Pago</option>
-                  </select>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="col-span-2">
-                    <input
-                      type="text"
-                      placeholder="Motivo o detalle de la acción *"
-                      required
-                      value={formMotivo}
-                      onChange={(e) => setFormMotivo(e.target.value)}
-                      disabled={isSubmitting}
-                      className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded bg-white focus:outline-none focus:border-blue-400 transition-all disabled:opacity-50"
-                    />
-                  </div>
-                  <div>
-                    <select
-                      value={formFacturaSeleccionada}
-                      onChange={(e) =>
-                        setFormFacturaSeleccionada(e.target.value)
-                      }
-                      disabled={
-                        isSubmitting || facturasClienteSeleccionado.length === 0
-                      }
-                      className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded bg-white focus:outline-none focus:border-blue-400 transition-all disabled:opacity-50"
-                    >
-                      <option value="">SIN FACTURA</option>
-                      {facturasClienteSeleccionado.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.folio}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-2 bg-[#0a192f] hover:bg-[#1a2b45] text-white font-bold text-xs rounded transition-colors shadow-sm flex items-center justify-center gap-1 mt-1 disabled:opacity-50"
-                >
-                  {isSubmitting ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Check className="h-3.5 w-3.5" />
-                  )}
-                  {isSubmitting ? "Guardando..." : "Registrar Compromiso"}
-                </button>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modalActivo === "reprogramar" && eventoSeleccionado && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-scale-up">
-            <div className="p-4 border-b border-gray-100 bg-purple-50 flex justify-between items-center">
-              <h2 className="text-sm font-bold text-purple-900 flex items-center">
-                <CalendarDays className="h-4 w-4 mr-2" /> Reprogramar Fecha
-              </h2>
-              <button
-                onClick={cerrarModal}
-                className="text-purple-400 hover:text-purple-600 transition-colors"
-              >
-                <XCircle className="h-5 w-5" />
-              </button>
-            </div>
-            <form onSubmit={procesarReprogramacion} className="p-5 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                  Cliente / Motivo
-                </label>
-                <p className="font-bold text-[#0a192f] text-sm">
-                  {textoSeguro(eventoSeleccionado.cliente)}
-                </p>
-                <p className="text-xs text-gray-500 truncate">
-                  {textoSeguro(eventoSeleccionado.titulo)}
-                </p>
-              </div>
-              <div>
-                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                  Nueva Fecha de Compromiso
-                </label>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Fecha</label>
                 <input
                   type="date"
                   required
-                  value={nuevaFechaReprogramacion}
-                  onChange={(e) => setNuevaFechaReprogramacion(e.target.value)}
-                  disabled={isSubmitting}
-                  className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-purple-500 text-sm font-mono"
+                  value={formulario.fecha}
+                  onChange={(event) =>
+                    setFormulario((anterior) => ({ ...anterior, fecha: event.target.value }))
+                  }
+                  className="w-full px-3 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                 />
               </div>
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Tipo operativo</label>
+                <select
+                  value={formulario.tipoEvento}
+                  onChange={(event) =>
+                    setFormulario((anterior) => ({ ...anterior, tipoEvento: event.target.value }))
+                  }
+                  className="w-full px-3 py-3 border border-gray-200 rounded-xl text-sm bg-white"
+                >
+                  <option value="Recordatorio">Recordatorio</option>
+                  <option value="Seguimiento">Seguimiento</option>
+                  <option value="Promesa">Promesa de pago</option>
+                </select>
+              </div>
+            </div>
+
+            {formulario.tipoVinculo !== "GENERAL" && (
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Cliente</label>
+                <Select
+                  options={opcionesClientes}
+                  value={opcionesClientes.find((opcion) => opcion.value === formulario.clienteId) || null}
+                  onChange={seleccionarCliente}
+                  placeholder="Buscar cliente..."
+                  isClearable
+                  styles={customSelectStyles}
+                  noOptionsMessage={() => "No se encontraron clientes"}
+                />
+              </div>
+            )}
+
+            {formulario.tipoVinculo === "FACTURA" && (
+              <div>
+                <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Factura abierta</label>
+                <select
+                  required
+                  value={formulario.facturaId}
+                  onChange={(event) =>
+                    setFormulario((anterior) => ({ ...anterior, facturaId: event.target.value }))
+                  }
+                  disabled={!formulario.clienteId || cargandoFacturasCliente}
+                  className="w-full px-3 py-3 border border-gray-200 rounded-xl text-sm bg-white disabled:bg-gray-100"
+                >
+                  <option value="">
+                    {cargandoFacturasCliente ? "Consultando facturas..." : "Seleccionar factura"}
+                  </option>
+                  {facturasCliente.map((factura) => (
+                    <option key={factura.id} value={factura.id}>
+                      {factura.folio} — {formatearMoneda(factura.saldo_pendiente)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Título</label>
+              <input
+                type="text"
+                required
+                value={formulario.titulo}
+                onChange={(event) =>
+                  setFormulario((anterior) => ({ ...anterior, titulo: event.target.value }))
+                }
+                placeholder="Ej. Revisar reporte semanal"
+                className="w-full px-3 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-black uppercase text-gray-400 mb-1.5">Detalle</label>
+              <textarea
+                required
+                rows="4"
+                value={formulario.motivo}
+                onChange={(event) =>
+                  setFormulario((anterior) => ({ ...anterior, motivo: event.target.value }))
+                }
+                placeholder="Describe la acción que debe realizarse."
+                className="w-full px-3 py-3 border border-gray-200 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-200"
+              />
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row gap-2 justify-end pt-2">
+              <button
+                type="button"
+                onClick={cerrarModal}
+                disabled={isSubmitting}
+                className="px-5 py-3 rounded-xl bg-gray-100 text-gray-600 font-black text-xs"
+              >
+                Cancelar
+              </button>
               <button
                 type="submit"
-                disabled={isSubmitting || !nuevaFechaReprogramacion}
-                className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-lg shadow-sm transition-colors flex items-center justify-center disabled:opacity-50 mt-2"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
-                ) : (
-                  <Check className="h-3.5 w-3.5 mr-2" />
-                )}
-                {isSubmitting ? "Procesando..." : "Confirmar Reprogramación"}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {modalActivo === "whatsapp" && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden animate-scale-up mt-10 mb-auto">
-            <div className="p-4 border-b border-gray-100 bg-[#25D366] text-white flex justify-between items-center">
-              <h2 className="text-base font-bold flex items-center">
-                <Smartphone className="h-5 w-5 mr-2" /> Gestión vía WhatsApp
-              </h2>
-              <button
-                onClick={() => setModalActivo("verDia")}
-                className="text-green-100 hover:text-white transition-colors"
-              >
-                <XCircle className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="p-5 flex flex-col md:flex-row gap-5">
-              <div className="flex-1 space-y-4">
-                <div>
-                  <label className="block text-[10px] font-bold text-gray-400 uppercase">
-                    Cliente a Contactar
-                  </label>
-                  <p className="font-bold text-[#0a192f] text-sm">
-                    {textoSeguro(eventoSeleccionado?.cliente)}
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                    Teléfono Destino
-                  </label>
-                  <input
-                    type="text"
-                    value={datosWhatsapp.telefono}
-                    onChange={(e) =>
-                      setDatosWhatsapp({
-                        ...datosWhatsapp,
-                        telefono: e.target.value,
-                      })
-                    }
-                    className="w-full px-3 py-1.5 border border-gray-300 rounded focus:ring-2 focus:ring-green-500 font-mono text-sm"
-                  />
-                </div>
-              </div>
-
-              <div className="flex-[2] space-y-3">
-                <div>
-                  <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                    Plantilla de Abordaje
-                  </label>
-                  <select
-                    value={datosWhatsapp.plantilla}
-                    onChange={(e) => {
-                      const nuevaPlantilla = e.target.value;
-                      const datosFacturaFalsa = {
-                        cliente: eventoSeleccionado?.cliente,
-                        folio: eventoSeleccionado?.detalle?.folio || "S/F",
-                        saldo_pendiente: eventoSeleccionado?.monto || 0,
-                        vencimiento: "los próximos días",
-                      };
-                      setDatosWhatsapp({
-                        ...datosWhatsapp,
-                        plantilla: nuevaPlantilla,
-                        mensaje: generarMensajeWA(
-                          nuevaPlantilla,
-                          datosFacturaFalsa,
-                        ),
-                      });
-                    }}
-                    className="w-full px-3 py-1.5 border border-gray-300 rounded focus:ring-2 focus:ring-green-500 bg-white text-sm font-medium"
-                  >
-                    <option value="atrasado">Cobro: Saldo Vencido</option>
-                    <option value="proximo">Aviso: Vencimiento Próximo</option>
-                    <option value="manual">Seguimiento Libre</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                    Vista Previa del Mensaje
-                  </label>
-                  <textarea
-                    value={datosWhatsapp.mensaje}
-                    onChange={(e) =>
-                      setDatosWhatsapp({
-                        ...datosWhatsapp,
-                        mensaje: e.target.value,
-                      })
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-green-500 text-xs resize-none"
-                    rows="6"
-                  ></textarea>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end space-x-3">
-              <button
-                onClick={() => setModalActivo("verDia")}
                 disabled={isSubmitting}
-                className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+                className="px-5 py-3 rounded-xl bg-[#ffd700] text-[#0a192f] font-black text-xs flex items-center justify-center disabled:opacity-50"
               >
-                Volver a Agenda
-              </button>
-              <button
-                onClick={enviarWhatsApp}
-                disabled={!datosWhatsapp.telefono || isSubmitting}
-                className="px-5 py-2 bg-[#25D366] hover:bg-[#1DA851] text-white text-xs font-bold rounded-lg shadow-sm flex items-center transition-colors disabled:opacity-50"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
-                ) : (
-                  <Send className="h-3.5 w-3.5 mr-2" />
-                )}
-                {isSubmitting ? "Registrando..." : "Abrir WhatsApp"}
+                {isSubmitting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Check className="h-4 w-4 mr-2" />}
+                Guardar recordatorio
               </button>
             </div>
-          </div>
-        </div>
+          </form>
+        </ModalBase>
       )}
 
-      {modalActivo === "exito" && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden text-center p-6 border animate-scale-up">
-            <div className="h-12 w-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
-              <Check className="h-6 w-6 text-green-600" />
-            </div>
-            <h3 className="text-base font-black text-[#0a192f]">
-              {textoSeguro(mensajeExito.titulo)}
-            </h3>
-            <p className="text-xs text-gray-500 mt-1 px-2 leading-relaxed">
-              {textoSeguro(mensajeExito.descripcion)}
-            </p>
+      {modalActivo === "REPROGRAMAR" && eventoSeleccionado && (
+        <ModalBase onClose={cerrarModal} maxWidth="max-w-sm">
+          <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="font-black text-[#0a192f]">Reprogramar recordatorio</h2>
+            <button type="button" onClick={cerrarModal} className="text-gray-400"><X className="h-5 w-5" /></button>
+          </div>
+          <form onSubmit={confirmarReprogramacion} className="p-5 space-y-4">
+            <p className="text-sm font-bold text-gray-600">{eventoSeleccionado.titulo}</p>
+            <input
+              type="date"
+              required
+              value={nuevaFecha}
+              onChange={(event) => setNuevaFecha(event.target.value)}
+              className="w-full px-3 py-3 border border-gray-200 rounded-xl"
+            />
             <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full py-3 bg-purple-600 text-white rounded-xl font-black text-xs flex items-center justify-center disabled:opacity-50"
+            >
+              {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Confirmar nueva fecha
+            </button>
+          </form>
+        </ModalBase>
+      )}
+
+      {modalActivo === "WHATSAPP" && eventoSeleccionado && (
+        <ModalBase onClose={cerrarModal} maxWidth="max-w-lg">
+          <div className="p-4 md:p-5 bg-[#25D366] text-white flex items-center justify-between">
+            <h2 className="font-black flex items-center"><Smartphone className="h-5 w-5 mr-2" /> Gestión vía WhatsApp</h2>
+            <button type="button" onClick={cerrarModal}><X className="h-5 w-5" /></button>
+          </div>
+          <div className="p-4 md:p-5 space-y-4">
+            <div>
+              <label className="block text-[10px] font-black uppercase text-gray-400 mb-1">Cliente</label>
+              <p className="font-black text-[#0a192f]">{eventoSeleccionado.cliente}</p>
+            </div>
+            <input
+              type="text"
+              value={datosWhatsapp.telefono}
+              onChange={(event) => setDatosWhatsapp((anterior) => ({ ...anterior, telefono: event.target.value }))}
+              placeholder="Teléfono de 10 dígitos"
+              className="w-full px-3 py-3 border border-gray-200 rounded-xl"
+            />
+            <select
+              value={datosWhatsapp.plantilla}
+              onChange={(event) => {
+                const plantilla = event.target.value;
+                setDatosWhatsapp((anterior) => ({
+                  ...anterior,
+                  plantilla,
+                  mensaje: generarMensajeWA(plantilla, {
+                    cliente: eventoSeleccionado.cliente,
+                    folio: eventoSeleccionado.folio || "S/F",
+                    saldo_pendiente: eventoSeleccionado.monto,
+                    vencimiento: eventoSeleccionado.fechaClave,
+                  }),
+                }));
+              }}
+              className="w-full px-3 py-3 border border-gray-200 rounded-xl bg-white"
+            >
+              <option value="atrasado">Saldo vencido</option>
+              <option value="proximo">Vencimiento próximo</option>
+              <option value="manual">Seguimiento libre</option>
+            </select>
+            <textarea
+              rows="6"
+              value={datosWhatsapp.mensaje}
+              onChange={(event) => setDatosWhatsapp((anterior) => ({ ...anterior, mensaje: event.target.value }))}
+              className="w-full px-3 py-3 border border-gray-200 rounded-xl resize-none text-sm"
+            />
+            <button
+              type="button"
+              onClick={enviarWhatsapp}
+              disabled={isSubmitting || !datosWhatsapp.telefono}
+              className="w-full py-3 bg-[#25D366] text-white rounded-xl font-black text-xs flex items-center justify-center disabled:opacity-50"
+            >
+              {isSubmitting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Send className="h-4 w-4 mr-2" />}
+              Abrir WhatsApp
+            </button>
+          </div>
+        </ModalBase>
+      )}
+
+      {modalActivo === "EXITO" && (
+        <ModalBase onClose={cerrarModal} maxWidth="max-w-sm">
+          <div className="p-7 text-center">
+            <div className="h-14 w-14 rounded-full bg-green-100 text-green-600 flex items-center justify-center mx-auto mb-4">
+              <CheckCircle2 className="h-7 w-7" />
+            </div>
+            <h2 className="text-lg font-black text-[#0a192f]">Operación completada</h2>
+            <p className="text-sm text-gray-500 mt-2">{mensajeExito}</p>
+            <button
+              type="button"
               onClick={cerrarModal}
-              className="w-full mt-5 py-2 bg-green-600 text-white font-bold text-xs rounded-lg hover:bg-green-700 shadow-sm transition-colors"
+              className="w-full mt-5 py-3 bg-[#0a192f] text-white rounded-xl font-black text-xs"
             >
               Continuar
             </button>
           </div>
-        </div>
+        </ModalBase>
       )}
     </div>
   );

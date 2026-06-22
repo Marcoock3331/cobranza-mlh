@@ -1310,9 +1310,231 @@ export const facturasService = {
     }
   },
 
-  eliminarFactura: async () => ({
-    success: false,
-    error:
-      "La anulación directa requiere estorno financiero en cascada. En construcción.",
-  }),
+  eliminarFactura: async ({
+    idFactura,
+    userName,
+    actor_uid,
+  }) => {
+    if (!actor_uid) {
+      return {
+        success: false,
+        error: "No se identificó al usuario responsable.",
+      };
+    }
+
+    if (!idFactura) {
+      return {
+        success: false,
+        error: "No se identificó la factura que será eliminada.",
+      };
+    }
+
+    try {
+      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+
+      const resultado = await runTransaction(db, async (transaction) => {
+        const facturaSnap = await transaction.get(facturaRef);
+
+        if (!facturaSnap.exists()) {
+          throw new Error("La factura ya no existe en Firestore.");
+        }
+
+        const factura = {
+          id: facturaSnap.id,
+          ...facturaSnap.data(),
+        };
+
+        if (!factura.cliente_id) {
+          throw new Error(
+            "La factura no tiene cliente_id y no puede eliminarse de forma segura.",
+          );
+        }
+
+        const clienteRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          factura.cliente_id,
+        );
+
+        const clienteSnap = await transaction.get(clienteRef);
+
+        if (!clienteSnap.exists()) {
+          throw new Error(
+            "No se encontró el cliente enlazado a la factura.",
+          );
+        }
+
+        const cliente = clienteSnap.data();
+
+        const montoTotal = redondearMoneda(factura.monto_total);
+        const saldoPendiente = redondearMoneda(
+          factura.saldo_pendiente,
+        );
+        const montoPagado = redondearMoneda(
+          Number.isFinite(Number(factura.monto_pagado))
+            ? factura.monto_pagado
+            : Math.max(0, montoTotal - saldoPendiente),
+        );
+
+        const abonos = Array.isArray(factura.abonos)
+          ? factura.abonos
+          : [];
+
+        const totalAbonosRegistrados = redondearMoneda(
+          abonos.reduce(
+            (total, abono) => total + (Number(abono.monto) || 0),
+            0,
+          ),
+        );
+
+        const abonosMes = redondearMoneda(
+          abonos.reduce(
+            (total, abono) =>
+              total +
+              (esMismoMes(abono.fecha) ? Number(abono.monto) || 0 : 0),
+            0,
+          ),
+        );
+
+        const abonosSemana = redondearMoneda(
+          abonos.reduce(
+            (total, abono) =>
+              total +
+              (esMismaSemana(abono.fecha)
+                ? Number(abono.monto) || 0
+                : 0),
+            0,
+          ),
+        );
+
+        const estabaVencida =
+          saldoPendiente > 0 && esFacturaVencida(factura);
+        const estabaPagada = saldoPendiente === 0;
+        const estabaPendiente = saldoPendiente > 0;
+
+        const limiteCredito = redondearMoneda(cliente.limite_credito);
+        const deudaActual = redondearMoneda(cliente.deuda_actual);
+        const creditoDisponible = redondearMoneda(
+          cliente.credito_disponible,
+        );
+
+        const nuevaDeuda = Math.max(
+          0,
+          redondearMoneda(deudaActual - saldoPendiente),
+        );
+
+        const nuevoCreditoDisponible =
+          limiteCredito > 0
+            ? Math.min(
+                limiteCredito,
+                Math.max(
+                  0,
+                  redondearMoneda(
+                    creditoDisponible + saldoPendiente,
+                  ),
+                ),
+              )
+            : 0;
+
+        transaction.update(clienteRef, {
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoCreditoDisponible,
+          updatedAt: serverTimestamp(),
+        });
+
+        const statsUpdate = {
+          facturas_total: increment(-1),
+          total_facturado: increment(-montoTotal),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (saldoPendiente > 0) {
+          statsUpdate.cartera_total = increment(-saldoPendiente);
+        }
+
+        if (estabaPendiente) {
+          statsUpdate.facturas_pendientes = increment(-1);
+        }
+
+        if (estabaPagada) {
+          statsUpdate.facturas_pagadas = increment(-1);
+          statsUpdate.total_liquidado = increment(-montoTotal);
+        }
+
+        if (estabaVencida) {
+          statsUpdate.facturas_vencidas = increment(-1);
+          statsUpdate.cartera_vencida = increment(-saldoPendiente);
+        }
+
+        if (montoPagado > 0) {
+          statsUpdate.cobrado_historico = increment(-montoPagado);
+        }
+
+        const totalAbonosARevertir =
+          totalAbonosRegistrados > 0
+            ? totalAbonosRegistrados
+            : montoPagado;
+
+        if (totalAbonosARevertir > 0) {
+          statsUpdate.abonos_registrados = increment(
+            -totalAbonosARevertir,
+          );
+        }
+
+        if (abonosMes > 0) {
+          statsUpdate.ingresos_mes = increment(-abonosMes);
+        }
+
+        if (abonosSemana > 0) {
+          statsUpdate.ingresos_semana = increment(-abonosSemana);
+        }
+
+        transaction.set(statsRef, statsUpdate, { merge: true });
+
+        transaction.set(auditRef, {
+          actor_uid,
+          usuario: userName || "SU",
+          modulo: "Facturación",
+          tipo: "Eliminación de Factura",
+          factura_id: idFactura,
+          folio: factura.folio || "S/F",
+          cliente: factura.cliente || cliente.nombre || "S/N",
+          cliente_id: factura.cliente_id,
+          valores_eliminados: {
+            folio: factura.folio || "",
+            cliente: factura.cliente || "",
+            cliente_id: factura.cliente_id || "",
+            monto_total: montoTotal,
+            monto_pagado: montoPagado,
+            saldo_pendiente: saldoPendiente,
+            estatus: factura.estatus || "",
+            abonos: abonos.length,
+          },
+          detalle: `El SU eliminó la factura ${factura.folio || "S/F"} de ${factura.cliente || cliente.nombre || "S/N"}. Se ajustaron saldo del cliente, crédito disponible, métricas globales y auditoría.`,
+          serverTime: serverTimestamp(),
+        });
+
+        transaction.delete(facturaRef);
+
+        return {
+          folio: factura.folio || "S/F",
+          cliente: factura.cliente || cliente.nombre || "S/N",
+        };
+      });
+
+      return {
+        success: true,
+        data: resultado,
+      };
+    } catch (error) {
+      console.error("Error al eliminar la factura:", error);
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
 };

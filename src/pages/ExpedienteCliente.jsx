@@ -6,7 +6,8 @@ import { clientesService } from "../services/clientesService";
 import { solicitudesService } from "../services/solicitudesService";
 import {
   ArrowLeft, Edit, FileText, User, CheckCircle, Pencil, X, XCircle, TrendingUp,
-  Shield, Mail, Tag, MessageSquare, StickyNote, ChevronLeft, ChevronRight, DollarSign
+  Shield, Mail, Tag, MessageSquare, StickyNote, ChevronLeft, ChevronRight, DollarSign,
+  Trash2, Loader2, AlertTriangle
 } from "lucide-react";
 
 const GRUPOS_CLIENTE = [
@@ -51,7 +52,12 @@ export default function ExpedienteCliente() {
   const navigate = useNavigate();
 
   const {
-    clientes, facturas, userRole, userName, currentUser
+    clientes,
+    facturas,
+    userRole,
+    userName,
+    currentUser,
+    eliminarFacturaEnNube,
   } = useContext(GlobalContext);
 
   const [filtroFacturas, setFiltroFacturas] = useState("Historial");
@@ -62,6 +68,8 @@ export default function ExpedienteCliente() {
   const [paginaFacturas, setPaginaFacturas] = useState(1);
   const [clienteForm, setClienteForm] = useState({});
   const [procesandoCredito, setProcesandoCredito] = useState(false);
+  const [procesandoEliminacionFactura, setProcesandoEliminacionFactura] =
+    useState(false);
   const facturasPorPagina = 8;
 
   const mostrarNotificacion = (titulo, descripcion, tipo = "exito") => {
@@ -140,6 +148,8 @@ export default function ExpedienteCliente() {
   const cliente = baseCombinada;
 
   const cerrarModal = () => {
+    if (procesandoEliminacionFactura) return;
+
     setModalActivo(null);
     setFacturaSeleccionada(null);
     setAumentoData({ monto: "", motivo: "" });
@@ -250,6 +260,71 @@ export default function ExpedienteCliente() {
       mostrarNotificacion("Cambios Guardados", "Los datos del cliente han sido actualizados en la nube con éxito.", "exito");
     } else {
       mostrarNotificacion("Error", respuesta.error || "Fallo de conexión al guardar en la nube.", "error");
+    }
+  };
+
+  const handleEliminarFactura = async () => {
+    if (procesandoEliminacionFactura) return;
+
+    if (userRole !== "SU") {
+      mostrarNotificacion(
+        "Acción no permitida",
+        "Solo el SU puede eliminar facturas.",
+        "error",
+      );
+      return;
+    }
+
+    if (!currentUser?.uid) {
+      mostrarNotificacion(
+        "Error",
+        "No se identificó al usuario responsable.",
+        "error",
+      );
+      return;
+    }
+
+    if (!facturaSeleccionada?.id) {
+      mostrarNotificacion(
+        "Error",
+        "No se identificó la factura que será eliminada.",
+        "error",
+      );
+      return;
+    }
+
+    setProcesandoEliminacionFactura(true);
+
+    try {
+      const respuesta = await eliminarFacturaEnNube(
+        facturaSeleccionada.id,
+      );
+
+      if (!respuesta?.success) {
+        mostrarNotificacion(
+          "Error",
+          respuesta?.error || "No se pudo eliminar la factura.",
+          "error",
+        );
+        return;
+      }
+
+      setFacturaSeleccionada(null);
+
+      mostrarNotificacion(
+        "Factura eliminada",
+        "Se eliminó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
+        "exito",
+      );
+    } catch (error) {
+      console.error("Error eliminando factura desde expediente:", error);
+      mostrarNotificacion(
+        "Error",
+        "Ocurrió un error inesperado al eliminar la factura.",
+        "error",
+      );
+    } finally {
+      setProcesandoEliminacionFactura(false);
     }
   };
 
@@ -548,6 +623,7 @@ export default function ExpedienteCliente() {
                   {modalActivo === "solicitarAumento" && <><TrendingUp className="h-5 w-5 md:h-4 md:w-4 mr-2 text-blue-600" /> Aumento de Crédito</>}
                   {modalActivo === "editarCliente" && <><Edit className="h-5 w-5 md:h-4 md:w-4 mr-2 text-blue-600" /> Editar Cliente</>}
                   {modalActivo === "verFactura" && <><FileText className="h-5 w-5 md:h-4 md:w-4 mr-2 text-gray-600" /> Factura: <span className="font-mono text-blue-600 ml-1">{facturaSeleccionada?.folio}</span></>}
+                  {modalActivo === "confirmarEliminarFactura" && <><AlertTriangle className="h-5 w-5 md:h-4 md:w-4 mr-2 text-red-600" /> Eliminar Factura</>}
                 </h2>
                 <button onClick={cerrarModal} className="text-gray-400 active:text-red-500 p-1 bg-gray-50 md:bg-transparent rounded-full"><X className="h-6 w-6 md:h-5 md:w-5" /></button>
               </div>
@@ -669,17 +745,94 @@ export default function ExpedienteCliente() {
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => navigate("/facturas", { state: { editarFactura: fac } })}
-                      className="w-full px-4 py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-amber-100 active:bg-amber-100 transition-colors"
-                    >
-                      <Edit className="h-4 w-4 mr-2" />
-                      Editar esta factura
-                    </button>
+                    <div className={`grid gap-3 ${userRole === "SU" ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1"}`}>
+                      <button
+                        type="button"
+                        onClick={() => navigate("/facturas", { state: { editarFactura: fac } })}
+                        className="w-full px-4 py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-amber-100 active:bg-amber-100 transition-colors"
+                      >
+                        <Edit className="h-4 w-4 mr-2" />
+                        Editar esta factura
+                      </button>
+
+                      {userRole === "SU" && (
+                        <button
+                          type="button"
+                          onClick={() => setModalActivo("confirmarEliminarFactura")}
+                          className="w-full px-4 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-red-100 active:bg-red-100 transition-colors"
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Eliminar factura
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })()}
+
+              {modalActivo === "confirmarEliminarFactura" && facturaSeleccionada && (
+                <div className="space-y-5">
+                  <div className="text-center space-y-3">
+                    <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center mx-auto ring-4 ring-red-50">
+                      <AlertTriangle className="h-8 w-8 text-red-600" />
+                    </div>
+
+                    <div>
+                      <h3 className="text-lg font-black text-[#0a192f]">
+                        ¿Eliminar esta factura?
+                      </h3>
+
+                      <p className="text-sm text-gray-600 mt-2 leading-relaxed">
+                        Se eliminará la factura{" "}
+                        <span className="font-black text-[#0a192f]">
+                          {facturaSeleccionada.folio}
+                        </span>{" "}
+                        de{" "}
+                        <span className="font-black text-[#0a192f]">
+                          {facturaSeleccionada.cliente}
+                        </span>
+                        .
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-xs text-red-700 leading-relaxed">
+                    Esta acción solo puede realizarla el SU. También se
+                    ajustará el saldo del cliente, el crédito disponible, las
+                    métricas globales y quedará registro en la bitácora.
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setModalActivo("verFactura")}
+                      disabled={procesandoEliminacionFactura}
+                      className="w-full px-4 py-3 bg-white text-gray-700 border border-gray-300 rounded-xl font-black text-xs hover:bg-gray-50 disabled:opacity-60"
+                    >
+                      Cancelar
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleEliminarFactura}
+                      disabled={procesandoEliminacionFactura}
+                      className="w-full px-4 py-3 bg-red-600 text-white rounded-xl font-black text-xs flex items-center justify-center hover:bg-red-700 disabled:opacity-60"
+                    >
+                      {procesandoEliminacionFactura ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Eliminando...
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Sí, eliminar
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {modalActivo === "editarCliente" && (
                 <form id="formEditarCliente" onSubmit={handleGuardarEdicionCliente} className="space-y-5 md:space-y-4 text-sm md:text-xs">
