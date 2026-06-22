@@ -41,8 +41,7 @@ const ordenarFacturas = (lista) =>
     return fechaSegunda - fechaPrimera;
   });
 
-const rutaNecesitaFacturasGlobales = (pathname) =>
-  pathname.startsWith("/clientes/");
+const rutaNecesitaFacturasGlobales = () => false;
 
 export const GlobalProvider = ({ children }) => {
   const authContextValue = useContext(AuthContext);

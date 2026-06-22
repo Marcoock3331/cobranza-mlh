@@ -28,21 +28,790 @@ The content is organized as follows:
 ## Notes
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: src/pages/Facturacion.jsx, src/pages/ExpedienteCliente.jsx, src/services/facturasService.js, src/context/GlobalProvider.jsx, firestore.rules
+- Only files matching these patterns are included: src/pages/ExpedienteCliente.jsx, src/context/GlobalProvider.jsx, src/services/facturasService.js, src/services/facturasConsultaService.js, src/hooks/useFacturasPaginadas.js, src/utils/normalizarFactura.js, src/utils/fechas.js, firestore.rules, firestore.indexes.json
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
 
 # Directory Structure
 ```
+firestore.indexes.json
 firestore.rules
 src/context/GlobalProvider.jsx
+src/hooks/useFacturasPaginadas.js
 src/pages/ExpedienteCliente.jsx
-src/pages/Facturacion.jsx
+src/services/facturasConsultaService.js
 src/services/facturasService.js
+src/utils/fechas.js
+src/utils/normalizarFactura.js
 ```
 
 # Files
+
+## File: src/hooks/useFacturasPaginadas.js
+```javascript
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { facturasConsultaService } from "../services/facturasConsultaService";
+
+export const useFacturasPaginadas = ({
+  pageSize = 25,
+  busqueda = "",
+  clienteId = "",
+  filtroEstatus = "Todas",
+  fechaInicio = "",
+  fechaFin = "",
+  enabled = true,
+}) => {
+  const [facturas, setFacturas] = useState([]);
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState("");
+  const [mensaje, setMensaje] = useState("");
+  const [pagina, setPagina] = useState(1);
+  const [haySiguiente, setHaySiguiente] = useState(false);
+  const [cursorSiguiente, setCursorSiguiente] = useState(null);
+  const [cursores, setCursores] = useState([null]);
+
+  const solicitudActiva = useRef(0);
+
+  const ejecutarConsulta = useCallback(
+    async ({ paginaDestino = 1, cursoresDestino = [null] } = {}) => {
+      if (!enabled) {
+        setFacturas([]);
+        setCargando(false);
+        return;
+      }
+
+      const numeroSolicitud = solicitudActiva.current + 1;
+      solicitudActiva.current = numeroSolicitud;
+      setCargando(true);
+      setError("");
+
+      const cursor = cursoresDestino[paginaDestino - 1] || null;
+      const respuesta = await facturasConsultaService.consultarPagina({
+        pageSize,
+        cursor,
+        busqueda,
+        clienteId,
+        filtroEstatus,
+        fechaInicio,
+        fechaFin,
+      });
+
+      if (numeroSolicitud !== solicitudActiva.current) {
+        return;
+      }
+
+      if (!respuesta.success) {
+        setFacturas([]);
+        setHaySiguiente(false);
+        setCursorSiguiente(null);
+        setMensaje("");
+        setError(respuesta.error || "No se pudieron cargar las facturas.");
+        setCargando(false);
+        return;
+      }
+
+      setFacturas(respuesta.facturas || []);
+      setHaySiguiente(Boolean(respuesta.haySiguiente));
+      setCursorSiguiente(respuesta.cursorSiguiente || null);
+      setMensaje(respuesta.mensaje || "");
+      setPagina(paginaDestino);
+      setCursores(cursoresDestino);
+      setCargando(false);
+    },
+    [
+      enabled,
+      pageSize,
+      busqueda,
+      clienteId,
+      filtroEstatus,
+      fechaInicio,
+      fechaFin,
+    ],
+  );
+
+  useEffect(() => {
+    const temporizador = window.setTimeout(() => {
+      ejecutarConsulta({ paginaDestino: 1, cursoresDestino: [null] });
+    }, 200);
+
+    return () => window.clearTimeout(temporizador);
+  }, [ejecutarConsulta]);
+
+  const siguientePagina = useCallback(async () => {
+    if (
+      cargando ||
+      !haySiguiente ||
+      !cursorSiguiente ||
+      facturas.length === 0
+    ) {
+      return false;
+    }
+
+    const nuevosCursores = [
+      ...cursores.slice(0, pagina),
+      cursorSiguiente,
+    ];
+
+    await ejecutarConsulta({
+      paginaDestino: pagina + 1,
+      cursoresDestino: nuevosCursores,
+    });
+
+    return true;
+  }, [
+    cargando,
+    haySiguiente,
+    cursorSiguiente,
+    facturas.length,
+    cursores,
+    pagina,
+    ejecutarConsulta,
+  ]);
+
+  const paginaAnterior = useCallback(async () => {
+    if (cargando || pagina <= 1) return false;
+
+    const nuevosCursores = cursores.slice(0, pagina - 1);
+
+    await ejecutarConsulta({
+      paginaDestino: pagina - 1,
+      cursoresDestino: nuevosCursores,
+    });
+
+    return true;
+  }, [cargando, pagina, cursores, ejecutarConsulta]);
+
+  const recargar = useCallback(async () => {
+    await ejecutarConsulta({
+      paginaDestino: pagina,
+      cursoresDestino: cursores,
+    });
+  }, [ejecutarConsulta, pagina, cursores]);
+
+  return {
+    facturas,
+    cargando,
+    error,
+    mensaje,
+    pagina,
+    hayAnterior: pagina > 1,
+    haySiguiente,
+    siguientePagina,
+    paginaAnterior,
+    recargar,
+  };
+};
+```
+
+## File: src/services/facturasConsultaService.js
+```javascript
+import {
+  collection,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  startAfter,
+  Timestamp,
+  where,
+} from "firebase/firestore";
+
+import { db } from "../config/firebase";
+import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
+
+const FACTURAS_COLLECTION = "facturas";
+const TAMANO_LOTE_LOCAL = 50;
+const MAX_DOCUMENTOS_ESCANEADOS = 300;
+
+const fechaInicioTimestamp = (fecha) => {
+  if (!fecha) return null;
+
+  const [anio, mes, dia] = fecha.split("-").map(Number);
+  return Timestamp.fromDate(new Date(anio, mes - 1, dia, 0, 0, 0, 0));
+};
+
+const fechaFinTimestamp = (fecha) => {
+  if (!fecha) return null;
+
+  const [anio, mes, dia] = fecha.split("-").map(Number);
+  return Timestamp.fromDate(new Date(anio, mes - 1, dia, 23, 59, 59, 999));
+};
+
+const inicioHoyTimestamp = () => {
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+  return Timestamp.fromDate(hoy);
+};
+
+const normalizarFolioBusqueda = (valor = "") =>
+  valor.toString().replace(/\s+/g, " ").trim().toUpperCase();
+
+const coincideFiltrosLocales = (
+  factura,
+  { filtroEstatus, fechaInicio, fechaFin },
+) => {
+  if (filtroEstatus !== "Todas" && factura.estatus !== filtroEstatus) {
+    return false;
+  }
+
+  if (fechaInicio && factura.emision < fechaInicio) {
+    return false;
+  }
+
+  if (fechaFin && factura.emision > fechaFin) {
+    return false;
+  }
+
+  return true;
+};
+
+const crearRestriccionesLocales = ({
+  clienteId,
+  prefijoFolio,
+  fechaInicio,
+  fechaFin,
+  cursor,
+  limiteLote,
+}) => {
+  const restricciones = [];
+
+  if (clienteId) {
+    restricciones.push(where("cliente_id", "==", clienteId));
+    restricciones.push(orderBy("emision", "desc"));
+  } else if (prefijoFolio) {
+    restricciones.push(where("folio", ">=", prefijoFolio));
+    restricciones.push(where("folio", "<=", `${prefijoFolio}\uf8ff`));
+    restricciones.push(orderBy("folio", "asc"));
+  } else {
+    const desde = fechaInicioTimestamp(fechaInicio);
+    const hasta = fechaFinTimestamp(fechaFin);
+
+    if (desde) {
+      restricciones.push(where("emision", ">=", desde));
+    }
+
+    if (hasta) {
+      restricciones.push(where("emision", "<=", hasta));
+    }
+
+    restricciones.push(orderBy("emision", "desc"));
+  }
+
+  if (cursor) {
+    restricciones.push(startAfter(cursor));
+  }
+
+  restricciones.push(limit(limiteLote));
+  return restricciones;
+};
+
+const consultarConFiltroLocal = async ({
+  pageSize,
+  cursor,
+  clienteId,
+  prefijoFolio,
+  filtroEstatus,
+  fechaInicio,
+  fechaFin,
+}) => {
+  const resultados = [];
+  let cursorLote = cursor;
+  let cursorSiguiente = null;
+  let documentosEscaneados = 0;
+  let quedanDocumentos = true;
+  let limiteAlcanzado = false;
+
+  while (
+    quedanDocumentos &&
+    resultados.length <= pageSize &&
+    documentosEscaneados < MAX_DOCUMENTOS_ESCANEADOS
+  ) {
+    const restricciones = crearRestriccionesLocales({
+      clienteId,
+      prefijoFolio,
+      fechaInicio,
+      fechaFin,
+      cursor: cursorLote,
+      limiteLote: TAMANO_LOTE_LOCAL,
+    });
+
+    const consulta = query(
+      collection(db, FACTURAS_COLLECTION),
+      ...restricciones,
+    );
+
+    const snapshot = await getDocs(consulta);
+
+    if (snapshot.empty) {
+      break;
+    }
+
+    for (const documento of snapshot.docs) {
+      documentosEscaneados += 1;
+      cursorLote = documento;
+
+      const factura = normalizarFacturaSnapshot(documento);
+      const coincide = coincideFiltrosLocales(factura, {
+        filtroEstatus,
+        fechaInicio,
+        fechaFin,
+      });
+
+      if (coincide) {
+        resultados.push({ factura, documento });
+
+        if (resultados.length === pageSize) {
+          cursorSiguiente = documento;
+        }
+
+        if (resultados.length > pageSize) {
+          break;
+        }
+      }
+
+      if (documentosEscaneados >= MAX_DOCUMENTOS_ESCANEADOS) {
+        limiteAlcanzado = true;
+        break;
+      }
+    }
+
+    if (resultados.length > pageSize) {
+      break;
+    }
+
+    if (snapshot.docs.length < TAMANO_LOTE_LOCAL) {
+      quedanDocumentos = false;
+    }
+  }
+
+  const haySiguiente =
+    resultados.length > pageSize ||
+    (limiteAlcanzado && Boolean(cursorLote));
+
+  if (!cursorSiguiente && haySiguiente) {
+    cursorSiguiente = cursorLote;
+  }
+
+  const facturas = resultados
+    .slice(0, pageSize)
+    .map((resultado) => resultado.factura);
+
+  let mensaje = "";
+
+  if (prefijoFolio) {
+    mensaje = facturas.length
+      ? `Mostrando folios que comienzan con “${prefijoFolio}”.`
+      : `No se encontraron folios que comiencen con “${prefijoFolio}”.`;
+  } else if (clienteId) {
+    mensaje = facturas.length
+      ? "Mostrando las facturas del cliente seleccionado."
+      : "El cliente seleccionado no tiene facturas con estos filtros.";
+  }
+
+  if (limiteAlcanzado) {
+    mensaje = `${mensaje ? `${mensaje} ` : ""}La búsqueda es muy amplia; escribe más caracteres para reducir resultados.`;
+  }
+
+  return {
+    facturas,
+    cursorSiguiente,
+    haySiguiente,
+    mensaje,
+  };
+};
+
+const crearRestriccionesEstado = ({
+  filtroEstatus,
+  fechaInicio,
+  fechaFin,
+  cursor,
+  pageSize,
+}) => {
+  const restricciones = [];
+  const hoy = inicioHoyTimestamp();
+  const desde = fechaInicioTimestamp(fechaInicio);
+  const hasta = fechaFinTimestamp(fechaFin);
+  const usaRangoEmision = Boolean(desde || hasta);
+
+  if (desde) {
+    restricciones.push(where("emision", ">=", desde));
+  }
+
+  if (hasta) {
+    restricciones.push(where("emision", "<=", hasta));
+  }
+
+  if (filtroEstatus === "Vencida") {
+    restricciones.push(where("vencimiento", "<", hoy));
+    restricciones.push(where("saldo_pendiente", ">", 0));
+
+    if (usaRangoEmision) {
+      restricciones.push(orderBy("emision", "desc"));
+    }
+
+    restricciones.push(orderBy("vencimiento", "desc"));
+    restricciones.push(orderBy("saldo_pendiente", "desc"));
+  } else if (filtroEstatus === "Pendiente") {
+    restricciones.push(where("vencimiento", ">=", hoy));
+    restricciones.push(where("saldo_pendiente", ">", 0));
+
+    if (usaRangoEmision) {
+      restricciones.push(orderBy("emision", "desc"));
+    }
+
+    restricciones.push(orderBy("vencimiento", "asc"));
+    restricciones.push(orderBy("saldo_pendiente", "desc"));
+  } else if (filtroEstatus === "Pagada") {
+    restricciones.push(where("saldo_pendiente", "==", 0));
+    restricciones.push(orderBy("emision", "desc"));
+  } else {
+    restricciones.push(orderBy("emision", "desc"));
+  }
+
+  if (cursor) {
+    restricciones.push(startAfter(cursor));
+  }
+
+  restricciones.push(limit(pageSize + 1));
+  return restricciones;
+};
+
+const consultarEstadoGlobal = async ({
+  pageSize,
+  cursor,
+  filtroEstatus,
+  fechaInicio,
+  fechaFin,
+}) => {
+  const restricciones = crearRestriccionesEstado({
+    filtroEstatus,
+    fechaInicio,
+    fechaFin,
+    cursor,
+    pageSize,
+  });
+
+  const consulta = query(
+    collection(db, FACTURAS_COLLECTION),
+    ...restricciones,
+  );
+
+  const snapshot = await getDocs(consulta);
+  const documentosVisibles = snapshot.docs.slice(0, pageSize);
+
+  return {
+    facturas: documentosVisibles.map(normalizarFacturaSnapshot),
+    cursorSiguiente:
+      documentosVisibles[documentosVisibles.length - 1] || null,
+    haySiguiente: snapshot.docs.length > pageSize,
+    mensaje: "",
+  };
+};
+
+export const facturasConsultaService = {
+  consultarPagina: async ({
+    pageSize = 25,
+    cursor = null,
+    busqueda = "",
+    clienteId = "",
+    filtroEstatus = "Todas",
+    fechaInicio = "",
+    fechaFin = "",
+  } = {}) => {
+    try {
+      const prefijoFolio = clienteId
+        ? ""
+        : normalizarFolioBusqueda(busqueda);
+
+      const requiereFiltroLocal = Boolean(clienteId || prefijoFolio);
+
+      const resultado = requiereFiltroLocal
+        ? await consultarConFiltroLocal({
+            pageSize,
+            cursor,
+            clienteId,
+            prefijoFolio,
+            filtroEstatus,
+            fechaInicio,
+            fechaFin,
+          })
+        : await consultarEstadoGlobal({
+            pageSize,
+            cursor,
+            filtroEstatus,
+            fechaInicio,
+            fechaFin,
+          });
+
+      return {
+        success: true,
+        ...resultado,
+      };
+    } catch (error) {
+      console.error("Error consultando facturas paginadas:", error);
+
+      return {
+        success: false,
+        facturas: [],
+        cursorSiguiente: null,
+        haySiguiente: false,
+        mensaje: "",
+        error:
+          error?.code === "failed-precondition"
+            ? "Firestore necesita un índice para esta combinación. Publica los índices nuevos de la Fase 4A.1 o abre el enlace de creación mostrado en la consola."
+            : error?.message || "No se pudieron consultar las facturas.",
+      };
+    }
+  },
+};
+```
+
+## File: src/utils/fechas.js
+```javascript
+export const calcularDiasVencidos = (fechaString) => {
+    if (!fechaString) return 0;
+    
+    let dia, mes, anio;
+
+    // Traductor Universal: Entiende YYYY-MM-DD o DD/MM/YYYY
+    if (fechaString.includes('-')) {
+        [anio, mes, dia] = fechaString.split('-');
+    } else if (fechaString.includes('/')) {
+        [dia, mes, anio] = fechaString.split('/');
+    } else {
+        return 0; // Formato desconocido
+    }
+
+    const fechaVencimiento = new Date(anio, mes - 1, dia);
+    
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0); // Normalizamos a la medianoche
+    
+    const diffTime = hoy - fechaVencimiento;
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    
+    return diffDays > 0 ? diffDays : 0;
+};
+```
+
+## File: src/utils/normalizarFactura.js
+```javascript
+const completarDosDigitos = (valor) => String(valor).padStart(2, "0");
+
+export const fechaAISO = (fecha) => {
+  if (!fecha) return "";
+
+  if (fecha?.toDate && typeof fecha.toDate === "function") {
+    const valor = fecha.toDate();
+    return `${valor.getFullYear()}-${completarDosDigitos(valor.getMonth() + 1)}-${completarDosDigitos(valor.getDate())}`;
+  }
+
+  if (fecha instanceof Date) {
+    return `${fecha.getFullYear()}-${completarDosDigitos(fecha.getMonth() + 1)}-${completarDosDigitos(fecha.getDate())}`;
+  }
+
+  const texto = String(fecha).trim().split(" ")[0];
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    return texto;
+  }
+
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(texto)) {
+    const [dia, mes, anio] = texto.split("/");
+    return `${anio}-${completarDosDigitos(mes)}-${completarDosDigitos(dia)}`;
+  }
+
+  return "";
+};
+
+const fechaComparable = (fecha) => {
+  const iso = fechaAISO(fecha);
+  if (!iso) return null;
+
+  const [anio, mes, dia] = iso.split("-").map(Number);
+  const valor = new Date(anio, mes - 1, dia);
+  valor.setHours(0, 0, 0, 0);
+  return valor;
+};
+
+export const calcularEstatusVisibleFactura = (factura = {}) => {
+  const saldoPendiente = Number(factura.saldo_pendiente) || 0;
+
+  if (saldoPendiente <= 0) {
+    return "Pagada";
+  }
+
+  const vencimiento = fechaComparable(factura.vencimiento);
+
+  if (!vencimiento) {
+    return factura.estatus || "Pendiente";
+  }
+
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
+
+  return vencimiento < hoy ? "Vencida" : "Pendiente";
+};
+
+const normalizarAbono = (abono = {}) => ({
+  ...abono,
+  fecha: abono.fecha?.toDate
+    ? abono.fecha.toDate().toLocaleString("es-MX")
+    : abono.fecha,
+});
+
+export const normalizarFacturaData = (id, data = {}) => {
+  const abonosRaw = Array.isArray(data.abonos) ? data.abonos : [];
+
+  return {
+    id,
+    ...data,
+    estatus: calcularEstatusVisibleFactura(data),
+    emision: fechaAISO(data.emision),
+    vencimiento: fechaAISO(data.vencimiento),
+    _abonos_raw: abonosRaw,
+    abonos: abonosRaw.map(normalizarAbono),
+  };
+};
+
+export const normalizarFacturaSnapshot = (documento) =>
+  normalizarFacturaData(documento.id, documento.data());
+```
+
+## File: firestore.indexes.json
+```json
+{
+  "indexes": [
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cliente_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "estatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "cliente_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "estatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "saldo_pendiente",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "vencimiento",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "saldo_pendiente",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "vencimiento",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "saldo_pendiente",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "vencimiento",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "saldo_pendiente",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "facturas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "emision",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "vencimiento",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "saldo_pendiente",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
+```
 
 ## File: firestore.rules
 ```
@@ -417,7 +1186,7 @@ service cloud.firestore {
         && clientesEdicionFacturaValidos()
         && auditoriaEdicionFacturaValida(facturaId);
 
-      allow delete: if false;
+      allow delete: if isSU();
     }
 
     match /solicitudes/{solicitudId} {
@@ -695,7 +1464,8 @@ import { clientesService } from "../services/clientesService";
 import { solicitudesService } from "../services/solicitudesService";
 import {
   ArrowLeft, Edit, FileText, User, CheckCircle, Pencil, X, XCircle, TrendingUp,
-  Shield, Mail, Tag, MessageSquare, StickyNote, ChevronLeft, ChevronRight, DollarSign
+  Shield, Mail, Tag, MessageSquare, StickyNote, ChevronLeft, ChevronRight, DollarSign,
+  Trash2, Loader2, AlertTriangle
 } from "lucide-react";
 
 const GRUPOS_CLIENTE = [
@@ -740,7 +1510,12 @@ export default function ExpedienteCliente() {
   const navigate = useNavigate();
 
   const {
-    clientes, facturas, userRole, userName, currentUser
+    clientes,
+    facturas,
+    userRole,
+    userName,
+    currentUser,
+    eliminarFacturaEnNube,
   } = useContext(GlobalContext);
 
   const [filtroFacturas, setFiltroFacturas] = useState("Historial");
@@ -751,6 +1526,8 @@ export default function ExpedienteCliente() {
   const [paginaFacturas, setPaginaFacturas] = useState(1);
   const [clienteForm, setClienteForm] = useState({});
   const [procesandoCredito, setProcesandoCredito] = useState(false);
+  const [procesandoEliminacionFactura, setProcesandoEliminacionFactura] =
+    useState(false);
   const facturasPorPagina = 8;
 
   const mostrarNotificacion = (titulo, descripcion, tipo = "exito") => {
@@ -829,6 +1606,8 @@ export default function ExpedienteCliente() {
   const cliente = baseCombinada;
 
   const cerrarModal = () => {
+    if (procesandoEliminacionFactura) return;
+
     setModalActivo(null);
     setFacturaSeleccionada(null);
     setAumentoData({ monto: "", motivo: "" });
@@ -939,6 +1718,71 @@ export default function ExpedienteCliente() {
       mostrarNotificacion("Cambios Guardados", "Los datos del cliente han sido actualizados en la nube con éxito.", "exito");
     } else {
       mostrarNotificacion("Error", respuesta.error || "Fallo de conexión al guardar en la nube.", "error");
+    }
+  };
+
+  const handleEliminarFactura = async () => {
+    if (procesandoEliminacionFactura) return;
+
+    if (userRole !== "SU") {
+      mostrarNotificacion(
+        "Acción no permitida",
+        "Solo el SU puede eliminar facturas.",
+        "error",
+      );
+      return;
+    }
+
+    if (!currentUser?.uid) {
+      mostrarNotificacion(
+        "Error",
+        "No se identificó al usuario responsable.",
+        "error",
+      );
+      return;
+    }
+
+    if (!facturaSeleccionada?.id) {
+      mostrarNotificacion(
+        "Error",
+        "No se identificó la factura que será eliminada.",
+        "error",
+      );
+      return;
+    }
+
+    setProcesandoEliminacionFactura(true);
+
+    try {
+      const respuesta = await eliminarFacturaEnNube(
+        facturaSeleccionada.id,
+      );
+
+      if (!respuesta?.success) {
+        mostrarNotificacion(
+          "Error",
+          respuesta?.error || "No se pudo eliminar la factura.",
+          "error",
+        );
+        return;
+      }
+
+      setFacturaSeleccionada(null);
+
+      mostrarNotificacion(
+        "Factura eliminada",
+        "Se eliminó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
+        "exito",
+      );
+    } catch (error) {
+      console.error("Error eliminando factura desde expediente:", error);
+      mostrarNotificacion(
+        "Error",
+        "Ocurrió un error inesperado al eliminar la factura.",
+        "error",
+      );
+    } finally {
+      setProcesandoEliminacionFactura(false);
     }
   };
 
@@ -1237,6 +2081,7 @@ export default function ExpedienteCliente() {
                   {modalActivo === "solicitarAumento" && <><TrendingUp className="h-5 w-5 md:h-4 md:w-4 mr-2 text-blue-600" /> Aumento de Crédito</>}
                   {modalActivo === "editarCliente" && <><Edit className="h-5 w-5 md:h-4 md:w-4 mr-2 text-blue-600" /> Editar Cliente</>}
                   {modalActivo === "verFactura" && <><FileText className="h-5 w-5 md:h-4 md:w-4 mr-2 text-gray-600" /> Factura: <span className="font-mono text-blue-600 ml-1">{facturaSeleccionada?.folio}</span></>}
+                  {modalActivo === "confirmarEliminarFactura" && <><AlertTriangle className="h-5 w-5 md:h-4 md:w-4 mr-2 text-red-600" /> Eliminar Factura</>}
                 </h2>
                 <button onClick={cerrarModal} className="text-gray-400 active:text-red-500 p-1 bg-gray-50 md:bg-transparent rounded-full"><X className="h-6 w-6 md:h-5 md:w-5" /></button>
               </div>
@@ -1358,17 +2203,94 @@ export default function ExpedienteCliente() {
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => navigate("/facturas", { state: { editarFactura: fac } })}
-                      className="w-full px-4 py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-amber-100 active:bg-amber-100 transition-colors"
-                    >
-                      <Edit className="h-4 w-4 mr-2" />
-                      Editar esta factura
-                    </button>
+                    <div className={`grid gap-3 ${userRole === "SU" ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1"}`}>
+                      <button
+                        type="button"
+                        onClick={() => navigate("/facturas", { state: { editarFactura: fac } })}
+                        className="w-full px-4 py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-amber-100 active:bg-amber-100 transition-colors"
+                      >
+                        <Edit className="h-4 w-4 mr-2" />
+                        Editar esta factura
+                      </button>
+
+                      {userRole === "SU" && (
+                        <button
+                          type="button"
+                          onClick={() => setModalActivo("confirmarEliminarFactura")}
+                          className="w-full px-4 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-red-100 active:bg-red-100 transition-colors"
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Eliminar factura
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })()}
+
+              {modalActivo === "confirmarEliminarFactura" && facturaSeleccionada && (
+                <div className="space-y-5">
+                  <div className="text-center space-y-3">
+                    <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center mx-auto ring-4 ring-red-50">
+                      <AlertTriangle className="h-8 w-8 text-red-600" />
+                    </div>
+
+                    <div>
+                      <h3 className="text-lg font-black text-[#0a192f]">
+                        ¿Eliminar esta factura?
+                      </h3>
+
+                      <p className="text-sm text-gray-600 mt-2 leading-relaxed">
+                        Se eliminará la factura{" "}
+                        <span className="font-black text-[#0a192f]">
+                          {facturaSeleccionada.folio}
+                        </span>{" "}
+                        de{" "}
+                        <span className="font-black text-[#0a192f]">
+                          {facturaSeleccionada.cliente}
+                        </span>
+                        .
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-xs text-red-700 leading-relaxed">
+                    Esta acción solo puede realizarla el SU. También se
+                    ajustará el saldo del cliente, el crédito disponible, las
+                    métricas globales y quedará registro en la bitácora.
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setModalActivo("verFactura")}
+                      disabled={procesandoEliminacionFactura}
+                      className="w-full px-4 py-3 bg-white text-gray-700 border border-gray-300 rounded-xl font-black text-xs hover:bg-gray-50 disabled:opacity-60"
+                    >
+                      Cancelar
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleEliminarFactura}
+                      disabled={procesandoEliminacionFactura}
+                      className="w-full px-4 py-3 bg-red-600 text-white rounded-xl font-black text-xs flex items-center justify-center hover:bg-red-700 disabled:opacity-60"
+                    >
+                      {procesandoEliminacionFactura ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Eliminando...
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Sí, eliminar
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {modalActivo === "editarCliente" && (
                 <form id="formEditarCliente" onSubmit={handleGuardarEdicionCliente} className="space-y-5 md:space-y-4 text-sm md:text-xs">
@@ -1877,16 +2799,30 @@ function GlobalDataProvider({ authData, children }) {
     [actorUid, userName],
   );
 
-  const eliminarFacturaEnNube = useCallback(async () => {
-    window.alert(
-      "La anulación de facturas requiere estorno de saldos. Se implementará en el módulo de Facturación.",
-    );
+  const eliminarFacturaEnNube = useCallback(
+    async (idFactura) => {
+      if (userRole !== "SU") {
+        return {
+          success: false,
+          error: "Solo el SU puede eliminar facturas.",
+        };
+      }
 
-    return {
-      success: false,
-      error: "La anulación de facturas no está habilitada.",
-    };
-  }, []);
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return facturasService.eliminarFactura({
+        idFactura,
+        userName,
+        actor_uid: actorUid,
+      });
+    },
+    [actorUid, userName, userRole],
+  );
 
   const eliminarClienteEnNube = useCallback(
     async (id, nombreCliente) => {
@@ -1959,1928 +2895,6 @@ function GlobalDataProvider({ authData, children }) {
     <GlobalContext.Provider value={contextValue}>
       {children}
     </GlobalContext.Provider>
-  );
-}
-```
-
-## File: src/pages/Facturacion.jsx
-```javascript
-import {
-  useState,
-  useMemo,
-  useContext,
-  useLayoutEffect,
-  useRef,
-} from "react";
-import { useLocation, useNavigate } from "react-router-dom";
-import { GlobalContext } from "../context/GlobalContext";
-import { useFacturas } from "../hooks/useFacturas";
-import { useFacturasPaginadas } from "../hooks/useFacturasPaginadas";
-import { calcularDiasVencidos } from "../utils/fechas";
-import { generarMensajeWA, normalizarTelefonoMX } from "../utils/whatsapp";
-import Select from "react-select";
-import {
-  Search,
-  Plus,
-  FileText,
-  DollarSign,
-  AlertTriangle,
-  Clock,
-  MoreVertical,
-  Trash2,
-  Edit,
-  MessageSquare,
-  CreditCard,
-  XCircle,
-  Check,
-  TrendingUp,
-  Calendar,
-  Send,
-  Smartphone,
-  FilterX,
-  ChevronLeft,
-  ChevronRight,
-  Loader2,
-  RefreshCw,
-  UserRound,
-  Hash,
-  X,
-} from "lucide-react";
-
-const FACTURAS_POR_PAGINA = 25;
-const GRUPOS_FACTURA = [
-  "Carpintería",
-  "Cruce",
-  "Familiares",
-  "General",
-  "Prioridad",
-  "IHB",
-  "RC Intercomerce",
-  "Torre Las Americas",
-  "Nuevo",
-];
-
-const normalizarGrupoFactura = (valor = "") => {
-  const normalizado = valor
-    .toString()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toUpperCase();
-
-  return (
-    GRUPOS_FACTURA.find(
-      (grupo) =>
-        grupo
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toUpperCase() === normalizado,
-    ) || "General"
-  );
-};
-
-const normalizarTextoBusqueda = (valor = "") =>
-  valor
-    .toString()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-
-const crearFormularioFactura = (factura = null) => {
-  if (!factura) {
-    return {
-      cliente_id: "",
-      cliente: "",
-      grupo: "General",
-      folio: "",
-      monto_total: "",
-      moneda: "MXN",
-      emision: "",
-      vencimiento: "",
-      observaciones: "",
-    };
-  }
-
-  return {
-    cliente_id: factura.cliente_id || "",
-    cliente: factura.cliente || "",
-    grupo: normalizarGrupoFactura(factura.grupo),
-    folio: factura.folio || "",
-    monto_total: factura.monto_total ?? "",
-    moneda: "MXN",
-    emision: factura.emision || "",
-    vencimiento: factura.vencimiento || "",
-    observaciones: factura.observaciones || "",
-  };
-};
-
-
-function TarjetaResumenFacturacion({
-  etiqueta,
-  valor,
-  descripcion,
-  icono: Icono,
-  variante = "azul",
-}) {
-  const estilos = {
-    azul: {
-      tarjeta: "border-blue-200 bg-blue-50/40",
-      etiqueta: "text-blue-700",
-      valor: "text-[#0a192f]",
-      icono: "bg-white/80 text-blue-600 border-blue-100",
-    },
-    rojo: {
-      tarjeta: "border-red-200 bg-red-50/40",
-      etiqueta: "text-red-700",
-      valor: "text-red-600",
-      icono: "bg-white/80 text-red-600 border-red-100",
-    },
-    verde: {
-      tarjeta: "border-green-200 bg-green-50/40",
-      etiqueta: "text-green-700",
-      valor: "text-green-700",
-      icono: "bg-white/80 text-green-600 border-green-100",
-    },
-  };
-
-  const configuracion = estilos[variante] || estilos.azul;
-
-  return (
-    <article
-      className={`p-4 md:p-5 rounded-xl border text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${configuracion.tarjeta}`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p
-            className={`text-[10px] md:text-xs uppercase font-black tracking-wide ${configuracion.etiqueta}`}
-          >
-            {etiqueta}
-          </p>
-          <strong
-            className={`text-xl md:text-3xl mt-2 block break-words ${configuracion.valor}`}
-          >
-            {valor}
-          </strong>
-        </div>
-
-        <span
-          className={`h-9 w-9 md:h-10 md:w-10 rounded-xl border flex items-center justify-center shrink-0 ${configuracion.icono}`}
-        >
-          <Icono className="h-4 w-4 md:h-5 md:w-5" />
-        </span>
-      </div>
-
-      <p className="text-[10px] md:text-xs text-gray-500 mt-2 leading-relaxed">
-        {descripcion}
-      </p>
-    </article>
-  );
-}
-
-export default function Facturacion() {
-  const {
-    stats,
-    userRole,
-    clientes,
-    crearFacturaEnNube,
-    modificarFacturaEnNube,
-    eliminarFacturaEnNube,
-    registrarAbonoEnNube,
-    eliminarAbonoEnNube,
-  } = useContext(GlobalContext);
-
-  const location = useLocation();
-  const navigate = useNavigate();
-
-  const parametrosURL = useMemo(
-    () => new URLSearchParams(location.search),
-    [location.search],
-  );
-
-  const estadoSolicitado = parametrosURL.get("estado");
-  const filtroEstatusInicial = [
-    "Todas",
-    "Pendiente",
-    "Vencida",
-    "Pagada",
-  ].includes(estadoSolicitado)
-    ? estadoSolicitado
-    : "Todas";
-
-  const facturaInicialEdicion = location.state?.editarFactura || null;
-  const facturaInicialGestion = location.state?.gestionarFactura || null;
-  const facturaInicial = facturaInicialGestion || facturaInicialEdicion;
-
-  const {
-    busqueda,
-    setBusqueda,
-    busquedaAplicada,
-    aplicarBusqueda,
-    limpiarBusquedaAplicada,
-    limpiarBusqueda,
-    filtroEstatus,
-    setFiltroEstatus,
-    fechaInicio,
-    setFechaInicio,
-    fechaFin,
-    setFechaFin,
-    kpis,
-    limpiarFiltros,
-  } = useFacturas(stats, { filtroEstatusInicial });
-
-  const [clienteBusqueda, setClienteBusqueda] = useState(null);
-  const [mostrarSugerencias, setMostrarSugerencias] = useState(false);
-  const contenedorTablaRef = useRef(null);
-  const paginaRenderizadaRef = useRef(1);
-
-  const {
-    facturas: facturasPaginadas,
-    cargando: cargandoFacturas,
-    error: errorFacturas,
-    mensaje: mensajeFacturas,
-    pagina: paginaActualFacturas,
-    hayAnterior,
-    haySiguiente,
-    siguientePagina,
-    paginaAnterior,
-    recargar: recargarFacturas,
-  } = useFacturasPaginadas({
-    pageSize: FACTURAS_POR_PAGINA,
-    busqueda: busquedaAplicada,
-    clienteId: clienteBusqueda?.id || "",
-    filtroEstatus,
-    fechaInicio,
-    fechaFin,
-  });
-
-  const [modalActivo, setModalActivo] = useState(() => {
-    if (facturaInicialGestion) return "opcionesFactura";
-    if (facturaInicialEdicion) return "editarFactura";
-    return null;
-  });
-  const [facturaSeleccionada, setFacturaSeleccionada] = useState(
-    facturaInicial,
-  );
-  const [notificacion, setNotificacion] = useState({
-    titulo: "",
-    descripcion: "",
-    tipo: "exito",
-  });
-
-  const [invoiceForm, setInvoiceForm] = useState(() =>
-    crearFormularioFactura(facturaInicialEdicion),
-  );
-
-  const [pagoForm, setPagoForm] = useState({ monto: "", metodo: "Efectivo" });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [itemAEliminar, setItemAEliminar] = useState(null);
-  const [datosWhatsapp, setDatosWhatsapp] = useState({
-    telefono: "",
-    plantilla: "atrasado",
-    mensaje: "",
-  });
-
-  const opcionesClientes = useMemo(() => {
-    if (!clientes) return [];
-
-    return [...clientes]
-      .filter((c) => c.activo !== false && c.estatus !== "Inactivo")
-      .sort((a, b) => a.nombre.localeCompare(b.nombre))
-      .map((c) => ({
-        value: c.id,
-        label: c.nombre + (c.numero_cliente ? " - #" + c.numero_cliente : ""),
-        cliente: c,
-      }));
-  }, [clientes]);
-
-
-  const clientesSugeridos = useMemo(() => {
-    const texto = normalizarTextoBusqueda(busqueda);
-
-    if (texto.length < 2 || clienteBusqueda) {
-      return [];
-    }
-
-    return (clientes || [])
-      .filter(
-        (cliente) =>
-          cliente.activo !== false && cliente.estatus !== "Inactivo",
-      )
-      .filter((cliente) => {
-        const nombre = normalizarTextoBusqueda(cliente.nombre);
-        const numero = normalizarTextoBusqueda(cliente.numero_cliente);
-        const rfc = normalizarTextoBusqueda(cliente.rfc);
-
-        return (
-          nombre.includes(texto) ||
-          numero.includes(texto) ||
-          rfc.includes(texto)
-        );
-      })
-      .sort((a, b) =>
-        (a.nombre || "").localeCompare(b.nombre || "", "es", {
-          sensitivity: "base",
-        }),
-      )
-      .slice(0, 8);
-  }, [busqueda, clienteBusqueda, clientes]);
-
-  useLayoutEffect(() => {
-    if (cargandoFacturas) return;
-
-    if (paginaRenderizadaRef.current === paginaActualFacturas) {
-      return;
-    }
-
-    paginaRenderizadaRef.current = paginaActualFacturas;
-
-    const contenedor = contenedorTablaRef.current;
-
-    if (!contenedor) return;
-
-    contenedor.scrollTop = 0;
-    contenedor.scrollLeft = 0;
-  }, [paginaActualFacturas, cargandoFacturas]);
-
-  const moverAInicioTabla = () => {
-    const contenedor = contenedorTablaRef.current;
-
-    if (!contenedor) return;
-
-    window.requestAnimationFrame(() => {
-      contenedor.scrollTo({
-        top: 0,
-        left: 0,
-        behavior: "smooth",
-      });
-    });
-  };
-
-  const handleCambioBusqueda = (valor) => {
-    setBusqueda(valor);
-    limpiarBusquedaAplicada();
-
-    if (clienteBusqueda && valor !== clienteBusqueda.nombre) {
-      setClienteBusqueda(null);
-    }
-
-    setMostrarSugerencias(valor.trim().length >= 2);
-  };
-
-  const seleccionarClienteBusqueda = (cliente) => {
-    setClienteBusqueda(cliente);
-    setBusqueda(cliente.nombre || "");
-    limpiarBusquedaAplicada();
-    setMostrarSugerencias(false);
-    moverAInicioTabla();
-  };
-
-  const buscarPorFolio = () => {
-    const folio = busqueda.trim();
-
-    if (!folio) {
-      setClienteBusqueda(null);
-      limpiarBusqueda();
-      setMostrarSugerencias(false);
-      return;
-    }
-
-    setClienteBusqueda(null);
-    aplicarBusqueda();
-    setMostrarSugerencias(false);
-    moverAInicioTabla();
-  };
-
-  const limpiarBusquedaCompleta = () => {
-    setClienteBusqueda(null);
-    limpiarBusqueda();
-    setMostrarSugerencias(false);
-    moverAInicioTabla();
-  };
-
-  const limpiarTodosLosFiltros = () => {
-    setClienteBusqueda(null);
-    limpiarFiltros();
-    setMostrarSugerencias(false);
-    moverAInicioTabla();
-  };
-
-  const abrirMenuOpciones = (factura) => {
-    setFacturaSeleccionada(factura);
-    setModalActivo("opcionesFactura");
-  };
-
-  const abrirFormulario = (tipo) => {
-    if (tipo === "nuevoPago") setPagoForm({ monto: "", metodo: "Efectivo" });
-    else if (tipo === "whatsapp") {
-      const clienteDB =
-        clientes?.find((c) => c.id === facturaSeleccionada?.cliente_id) ||
-        clientes?.find((c) => c.nombre === facturaSeleccionada?.cliente);
-
-      const telefonoAsignado =
-        clienteDB?.telefono || facturaSeleccionada?.telefono || "";
-      setDatosWhatsapp({
-        telefono: telefonoAsignado,
-        plantilla: "atrasado",
-        mensaje: generarMensajeWA("atrasado", facturaSeleccionada),
-      });
-    } else if (tipo === "nuevaFactura") {
-      setInvoiceForm(crearFormularioFactura());
-    } else if (tipo === "editarFactura" && facturaSeleccionada) {
-      setInvoiceForm(crearFormularioFactura(facturaSeleccionada));
-    }
-
-    setModalActivo(tipo);
-  };
-
-  const cerrarModal = () => {
-    setModalActivo(null);
-
-    if (
-      location.state?.editarFactura ||
-      location.state?.gestionarFactura
-    ) {
-      navigate(`${location.pathname}${location.search}`, {
-        replace: true,
-        state: null,
-      });
-    }
-    if (
-      [
-        "notificacion",
-        "opcionesFactura",
-        "confirmarEliminar",
-        "whatsapp",
-      ].includes(modalActivo)
-    ) {
-      setFacturaSeleccionada(null);
-      setItemAEliminar(null);
-    }
-  };
-
-  const mostrarNotificacion = (titulo, descripcion, tipo = "exito") => {
-    setNotificacion({ titulo, descripcion, tipo });
-    setModalActivo("notificacion");
-  };
-
-  const handleSaveFactura = async () => {
-    setIsSubmitting(true);
-
-    try {
-      const nuevoMonto = Number(invoiceForm.monto_total) || 0;
-
-      if (
-        !invoiceForm.cliente_id ||
-        !invoiceForm.folio?.trim() ||
-        !invoiceForm.emision ||
-        !invoiceForm.vencimiento ||
-        nuevoMonto <= 0
-      ) {
-        mostrarNotificacion(
-          "Campos incompletos",
-          "Selecciona cliente, folio, fechas y un monto válido para continuar.",
-          "error",
-        );
-        return;
-      }
-
-      if (invoiceForm.vencimiento < invoiceForm.emision) {
-        mostrarNotificacion(
-          "Fechas inválidas",
-          "La fecha de vencimiento no puede ser anterior a la fecha de emisión.",
-          "error",
-        );
-        return;
-      }
-
-      const clienteBD = clientes.find(
-        (cliente) => cliente.id === invoiceForm.cliente_id,
-      );
-
-      if (!clienteBD) {
-        mostrarNotificacion(
-          "Error",
-          "Selecciona un cliente comercial válido.",
-          "error",
-        );
-        return;
-      }
-
-      const payloadFactura = {
-        cliente_id: clienteBD.id,
-        cliente: clienteBD.nombre,
-        grupo: normalizarGrupoFactura(invoiceForm.grupo),
-        folio: invoiceForm.folio.trim(),
-        monto_total: nuevoMonto,
-        moneda: "MXN",
-        emision: invoiceForm.emision,
-        vencimiento: invoiceForm.vencimiento,
-        observaciones: invoiceForm.observaciones?.trim() || "",
-      };
-
-      if (modalActivo === "nuevaFactura") {
-        const limite = Number(clienteBD.limite_credito) || 0;
-        const deudaActual = Number(clienteBD.deuda_actual) || 0;
-        const disponibleGuardado = Number(clienteBD.credito_disponible);
-        const creditoDisponible = Number.isFinite(disponibleGuardado)
-          ? disponibleGuardado
-          : Math.max(0, limite - deudaActual);
-
-        if (limite <= 0) {
-          mostrarNotificacion(
-            "Línea de crédito no asignada",
-            `El cliente ${clienteBD.nombre} todavía no tiene una línea de crédito configurada.`,
-            "error",
-          );
-          return;
-        }
-
-        if (nuevoMonto > creditoDisponible) {
-          mostrarNotificacion(
-            "Límite de Crédito Excedido",
-            `El cliente ${clienteBD.nombre} solo tiene $${Math.max(0, creditoDisponible).toLocaleString("es-MX")} de crédito libre.`,
-            "error",
-          );
-          return;
-        }
-
-        const res = await crearFacturaEnNube(payloadFactura);
-
-        if (!res?.success) {
-          mostrarNotificacion(
-            "Error",
-            res?.error || "No se pudo crear la factura.",
-            "error",
-          );
-          return;
-        }
-
-        await recargarFacturas();
-
-        mostrarNotificacion(
-          "Factura Autorizada",
-          `Se ha generado el folio ${payloadFactura.folio} correctamente.`,
-        );
-        return;
-      }
-
-      if (modalActivo === "editarFactura") {
-        if (!facturaSeleccionada?.id) {
-          mostrarNotificacion(
-            "Error",
-            "No se identificó la factura que deseas editar.",
-            "error",
-          );
-          return;
-        }
-
-        const res = await modificarFacturaEnNube(
-          facturaSeleccionada.id,
-          payloadFactura,
-        );
-
-        if (!res?.success) {
-          mostrarNotificacion(
-            "No se pudo editar",
-            res?.error || "La modificación fue rechazada.",
-            "error",
-          );
-          return;
-        }
-
-        if (res.sinCambios) {
-          mostrarNotificacion(
-            "Sin cambios",
-            "La factura conserva los mismos datos; no se generó una entrada de auditoría.",
-          );
-          return;
-        }
-
-        await recargarFacturas();
-
-        mostrarNotificacion(
-          "Factura Modificada",
-          `Se actualizaron ${res.camposModificados?.length || 1} campo(s). Los saldos, límites y métricas fueron recalculados y la edición quedó registrada para el SU.`,
-        );
-      }
-    } catch (error) {
-      console.error("Error al facturar:", error);
-
-      mostrarNotificacion(
-        "Error inesperado",
-        "No se pudo completar la operación de facturación.",
-        "error",
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleSavePago = async () => {
-    setIsSubmitting(true);
-
-    try {
-      const response = await registrarAbonoEnNube(
-        facturaSeleccionada,
-        parseFloat(pagoForm.monto),
-        pagoForm.metodo,
-      );
-
-      if (response?.success) {
-        await recargarFacturas();
-        setPagoForm({ monto: "", metodo: "Efectivo" });
-        mostrarNotificacion(
-          "Abono Exitoso",
-          "Dinero ingresado y límite de crédito liberado.",
-        );
-      } else {
-        mostrarNotificacion(
-          "Error",
-          response?.error || "No se pudo registrar el abono.",
-          "error",
-        );
-      }
-    } catch (error) {
-      console.error(error);
-      mostrarNotificacion(
-        "Error",
-        "Ocurrió un error inesperado al registrar el pago.",
-        "error",
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const confirmarEliminacion = (tipo, data) => {
-    setItemAEliminar({ tipo, data });
-    setModalActivo("confirmarEliminar");
-  };
-
-  const ejecutarEliminacion = async () => {
-    try {
-      if (itemAEliminar?.tipo === "factura") {
-        const res = await eliminarFacturaEnNube(itemAEliminar.data.id);
-
-        if (!res?.success) {
-          mostrarNotificacion(
-            "Acción pendiente",
-            res?.error ||
-              "La eliminación/anulación de facturas aún no está habilitada.",
-            "error",
-          );
-          return;
-        }
-
-        mostrarNotificacion(
-          "Factura Eliminada",
-          "La factura fue procesada correctamente.",
-        );
-      } else if (itemAEliminar?.tipo === "abono") {
-        const res = await eliminarAbonoEnNube(
-          facturaSeleccionada.id,
-          itemAEliminar.data.id_abono,
-        );
-
-        if (!res?.success) {
-          mostrarNotificacion(
-            "Error",
-            res?.error || "No se pudo anular el abono.",
-            "error",
-          );
-          return;
-        }
-
-        await recargarFacturas();
-
-        mostrarNotificacion(
-          "Pago Anulado",
-          "Abono revertido. La deuda regresó al saldo del cliente.",
-        );
-      }
-    } catch (error) {
-      console.error(error);
-      mostrarNotificacion("Error", "Ocurrió un error inesperado.", "error");
-    } finally {
-      setItemAEliminar(null);
-    }
-  };
-
-  const handleMontoPago = (e) => {
-    const valor = parseFloat(e.target.value);
-    const maximo = facturaSeleccionada?.saldo_pendiente || 0;
-    if (valor > maximo) setPagoForm({ ...pagoForm, monto: maximo });
-    else setPagoForm({ ...pagoForm, monto: e.target.value });
-  };
-
-  const enviarWhatsApp = () => {
-    if (!datosWhatsapp.telefono) {
-      mostrarNotificacion(
-        "Teléfono requerido",
-        "Ingresa un número de teléfono para continuar.",
-        "error",
-      );
-      return;
-    }
-
-    const numeroLimpio = normalizarTelefonoMX(datosWhatsapp.telefono);
-
-    if (!numeroLimpio.startsWith("52") || numeroLimpio.length !== 12) {
-      mostrarNotificacion(
-        "Teléfono inválido",
-        "Revisa que el número mexicano tenga 10 dígitos.",
-        "error",
-      );
-      return;
-    }
-
-    const url = `https://wa.me/${numeroLimpio}?text=${encodeURIComponent(
-      datosWhatsapp.mensaje,
-    )}`;
-
-    window.open(url, "_blank", "noopener,noreferrer");
-    setModalActivo("opcionesFactura");
-  };
-
-  const BadgeEstatus = ({ estatus }) => {
-    const configs = {
-      Pagada: "bg-green-100 text-green-800 border-green-200",
-      Pendiente: "bg-blue-100 text-blue-800 border-blue-200",
-      Vencida: "bg-red-100 text-red-800 border-red-200",
-    };
-    return (
-      <span
-        className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border whitespace-nowrap ${configs[estatus]}`}
-      >
-        {estatus}
-      </span>
-    );
-  };
-
-  return (
-    <div className="flex flex-col space-y-4 md:space-y-6 relative pb-10 text-sm animate-fade-in">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-end mt-2 md:mt-4 gap-4">
-        <div className="w-full md:w-auto">
-          <h1 className="text-xl md:text-2xl font-bold text-[#0a192f] flex items-center">
-            <FileText className="h-5 w-5 md:h-6 md:w-6 mr-2 text-blue-600" />{" "}
-            Facturación y Cobranza
-          </h1>
-          <p className="text-xs md:text-sm text-gray-500 mt-1">
-            Control integral de facturas emitidas, saldos pendientes y pagos
-            con carga paginada y operaciones seguras.
-          </p>
-        </div>
-        <button
-          onClick={() => abrirFormulario("nuevaFactura")}
-          className="w-full md:w-auto px-5 py-3 md:py-2.5 bg-[#0a192f] text-white font-bold text-sm rounded-xl md:rounded-lg active:bg-[#1a2b45] hover:bg-[#1a2b45] flex items-center justify-center shadow-md transition-all"
-        >
-          <Plus className="h-4 w-4 mr-2" /> Capturar Factura
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
-        <TarjetaResumenFacturacion
-          etiqueta="Deuda activa"
-          valor={`$${kpis.deuda_activa.toLocaleString("es-MX")}`}
-          descripcion="Saldo total pendiente actualmente colocado."
-          icono={DollarSign}
-          variante="azul"
-        />
-
-        <TarjetaResumenFacturacion
-          etiqueta="Saldo vencido"
-          valor={`$${kpis.monto_vencido.toLocaleString("es-MX")}`}
-          descripcion="Cartera vencida que requiere seguimiento."
-          icono={AlertTriangle}
-          variante="rojo"
-        />
-
-        <TarjetaResumenFacturacion
-          etiqueta="Total liquidado"
-          valor={`$${(Number(kpis.total_liquidado) || 0).toLocaleString("es-MX")}`}
-          descripcion="Facturas cerradas mediante pagos registrados."
-          icono={TrendingUp}
-          variante="verde"
-        />
-      </div>
-
-      <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex flex-col space-y-4">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 w-full">
-          <div className="relative w-full md:max-w-xl">
-            <div className="flex w-full">
-              <div className="relative flex-1 min-w-0">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 md:h-4 md:w-4 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="Escribe un cliente o el inicio del folio..."
-                  value={busqueda}
-                  onChange={(e) => handleCambioBusqueda(e.target.value)}
-                  onFocus={() =>
-                    setMostrarSugerencias(
-                      busqueda.trim().length >= 2 && !clienteBusqueda,
-                    )
-                  }
-                  onBlur={() =>
-                    window.setTimeout(() => setMostrarSugerencias(false), 150)
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !clienteBusqueda) {
-                      e.preventDefault();
-                      buscarPorFolio();
-                    }
-                  }}
-                  className="w-full pl-10 pr-10 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-l-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors"
-                />
-
-                {(busqueda || clienteBusqueda) && (
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={limpiarBusquedaCompleta}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-red-500 rounded"
-                    aria-label="Limpiar búsqueda"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={buscarPorFolio}
-                disabled={Boolean(clienteBusqueda)}
-                className="px-4 py-2.5 bg-[#0a192f] text-white text-xs font-black rounded-r-lg hover:bg-[#112240] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center shrink-0"
-                title={
-                  clienteBusqueda
-                    ? "Quita el cliente seleccionado para buscar por folio"
-                    : "Buscar folio por inicio"
-                }
-              >
-                <Search className="h-4 w-4 mr-1.5" />
-                Buscar
-              </button>
-            </div>
-
-            {clienteBusqueda && (
-              <div className="mt-2 inline-flex max-w-full items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-[11px] font-bold text-blue-700">
-                <UserRound className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{clienteBusqueda.nombre}</span>
-                <button
-                  type="button"
-                  onClick={limpiarBusquedaCompleta}
-                  className="text-blue-400 hover:text-red-500"
-                  aria-label="Quitar cliente seleccionado"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            )}
-
-            {mostrarSugerencias && !clienteBusqueda && (
-              <div className="absolute left-0 right-0 top-full mt-2 z-30 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
-                {clientesSugeridos.length > 0 ? (
-                  <>
-                    <p className="px-3 py-2 text-[10px] font-black uppercase tracking-wider text-gray-400 bg-gray-50 border-b">
-                      Clientes encontrados
-                    </p>
-                    {clientesSugeridos.map((cliente) => (
-                      <button
-                        key={cliente.id}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => seleccionarClienteBusqueda(cliente)}
-                        className="w-full px-3 py-2.5 text-left hover:bg-blue-50 border-b border-gray-50 last:border-0 flex items-center gap-3"
-                      >
-                        <UserRound className="h-4 w-4 text-blue-500 shrink-0" />
-                        <span className="min-w-0">
-                          <span className="block text-xs font-bold text-[#0a192f] truncate">
-                            {cliente.nombre}
-                          </span>
-                          <span className="block text-[10px] text-gray-400 truncate">
-                            {cliente.numero_cliente || "Sin número"}
-                            {cliente.rfc ? ` • ${cliente.rfc}` : ""}
-                          </span>
-                        </span>
-                      </button>
-                    ))}
-                  </>
-                ) : (
-                  <p className="px-3 py-3 text-xs text-gray-500">
-                    No hay clientes coincidentes. Puedes buscar el texto como inicio de folio.
-                  </p>
-                )}
-
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={buscarPorFolio}
-                  className="w-full px-3 py-3 bg-gray-50 text-left text-xs font-bold text-blue-700 hover:bg-blue-50 flex items-center"
-                >
-                  <Hash className="h-4 w-4 mr-2" />
-                  Buscar folios que comiencen con “{busqueda.trim().toUpperCase()}”
-                </button>
-              </div>
-            )}
-
-            <p className="mt-2 text-[10px] text-gray-400 leading-relaxed">
-              Selecciona un cliente sugerido sin escribir su nombre completo, o escribe el inicio del folio y presiona Enter.
-            </p>
-          </div>
-          <div className="flex overflow-x-auto hide-scrollbar-mobile w-full md:w-auto bg-gray-50 p-1.5 md:p-1 rounded-xl md:rounded-lg border border-gray-200 gap-1 md:gap-0 shrink-0">
-            {[
-              { value: "Todas", label: "Todas" },
-              { value: "Pendiente", label: "Pendientes" },
-              { value: "Vencida", label: "Vencidas" },
-              { value: "Pagada", label: "Pagadas" },
-            ].map((opcion) => (
-              <button
-                key={opcion.value}
-                onClick={() => {
-                  setFiltroEstatus(opcion.value);
-                  moverAInicioTabla();
-                }}
-                className={`whitespace-nowrap px-4 py-2 md:py-1.5 text-xs font-bold rounded-lg md:rounded-md transition-colors flex-1 md:flex-none ${filtroEstatus === opcion.value ? "bg-white text-[#0a192f] shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
-              >
-                {opcion.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 border-t border-gray-50 pt-4 md:pt-3">
-          <div className="flex items-center space-x-2 w-full sm:w-auto">
-            <Calendar className="h-4 w-4 md:h-4 md:w-4 text-gray-400 hidden sm:block" />
-            <span className="text-[10px] md:text-xs font-bold text-gray-500 uppercase w-12 sm:w-auto">
-              Desde:
-            </span>
-            <input
-              type="date"
-              value={fechaInicio}
-              onChange={(e) => {
-                setFechaInicio(e.target.value);
-                moverAInicioTabla();
-              }}
-              className="flex-1 sm:flex-none px-3 md:px-2 py-2.5 md:py-1.5 border border-gray-200 rounded-lg md:rounded text-xs focus:ring-2 focus:ring-blue-500 text-gray-600 outline-none"
-            />
-          </div>
-          <div className="flex items-center space-x-2 w-full sm:w-auto">
-            <span className="text-[10px] md:text-xs font-bold text-gray-500 uppercase w-12 sm:w-auto">
-              Hasta:
-            </span>
-            <input
-              type="date"
-              value={fechaFin}
-              onChange={(e) => {
-                setFechaFin(e.target.value);
-                moverAInicioTabla();
-              }}
-              className="flex-1 sm:flex-none px-3 md:px-2 py-2.5 md:py-1.5 border border-gray-200 rounded-lg md:rounded text-xs focus:ring-2 focus:ring-blue-500 text-gray-600 outline-none"
-            />
-          </div>
-          {(fechaInicio ||
-            fechaFin ||
-            busqueda ||
-            clienteBusqueda ||
-            filtroEstatus !== "Todas") && (
-            <button
-              onClick={limpiarTodosLosFiltros}
-              className="flex items-center justify-center px-4 md:px-3 py-3 md:py-1.5 bg-red-50 text-red-600 text-xs font-bold rounded-lg hover:bg-red-100 transition-colors w-full sm:w-auto mt-2 sm:mt-0"
-            >
-              <FilterX className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1.5 md:mr-1" />{" "}
-              Limpiar Filtros
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={recargarFacturas}
-            disabled={cargandoFacturas}
-            className="flex items-center justify-center px-4 md:px-3 py-3 md:py-1.5 bg-blue-50 text-blue-700 text-xs font-bold rounded-lg hover:bg-blue-100 disabled:opacity-50 transition-colors w-full sm:w-auto mt-2 sm:mt-0"
-          >
-            {cargandoFacturas ? (
-              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-4 w-4 mr-1.5" />
-            )}
-            Actualizar
-          </button>
-        </div>
-
-        {(mensajeFacturas || errorFacturas) && (
-          <div
-            className={`rounded-lg border px-3 py-2 text-xs font-medium ${
-              errorFacturas
-                ? "border-red-200 bg-red-50 text-red-700"
-                : "border-amber-200 bg-amber-50 text-amber-700"
-            }`}
-          >
-            {errorFacturas || mensajeFacturas}
-          </div>
-        )}
-      </div>
-
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm flex flex-col flex-1 overflow-hidden">
-        <div
-          ref={contenedorTablaRef}
-          className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-350px)] pb-20 custom-scrollbar w-full"
-        >
-          <table className="w-full min-w-[1000px] text-left text-sm border-separate border-spacing-0">
-            <thead className="bg-[#0a192f] text-white uppercase text-[10px] font-bold tracking-wider sticky top-0 z-10">
-              <tr>
-                <th className="px-4 py-3 border-b border-gray-200 whitespace-nowrap">
-                  Folio / Cliente
-                </th>
-                <th className="px-4 py-3 text-center border-b border-gray-200 whitespace-nowrap">
-                  Fechas
-                </th>
-                <th className="px-4 py-3 text-right border-b border-gray-200 whitespace-nowrap">
-                  Monto Total
-                </th>
-                <th className="px-4 py-3 text-right border-b border-gray-200 whitespace-nowrap">
-                  Monto Pagado
-                </th>
-                <th className="px-4 py-3 text-right border-b border-gray-200 whitespace-nowrap">
-                  Saldo
-                </th>
-                <th className="px-4 py-3 text-center border-b border-gray-200 whitespace-nowrap">
-                  Estado
-                </th>
-                <th className="px-4 py-3 text-center border-b border-gray-200 whitespace-nowrap">
-                  Gestión
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 bg-white">
-              {cargandoFacturas ? (
-                Array.from({ length: 6 }).map((_, indice) => (
-                  <tr key={`skeleton-${indice}`} className="animate-pulse">
-                    {Array.from({ length: 7 }).map((__, columna) => (
-                      <td
-                        key={`skeleton-${indice}-${columna}`}
-                        className="px-4 py-4 bg-white"
-                      >
-                        <div className="h-4 bg-gray-100 rounded w-full" />
-                      </td>
-                    ))}
-                  </tr>
-                ))
-              ) : errorFacturas ? (
-                <tr>
-                  <td
-                    colSpan="7"
-                    className="px-6 py-10 text-center text-red-600 bg-red-50/30"
-                  >
-                    <AlertTriangle className="h-10 w-10 mx-auto mb-2 text-red-300" />
-                    <p className="font-bold">No se pudieron cargar las facturas.</p>
-                    <p className="text-xs mt-1">{errorFacturas}</p>
-                  </td>
-                </tr>
-              ) : facturasPaginadas.length > 0 ? (
-                facturasPaginadas.map((fac) => {
-                  const montoTotal = Number(fac.monto_total) || 0;
-                  const saldoPendiente = Number(fac.saldo_pendiente) || 0;
-                  const montoPagado = Math.max(0, montoTotal - saldoPendiente);
-
-                  return (
-                    <tr
-                      key={fac.id}
-                      className="hover:bg-blue-50/30 active:bg-blue-50/50 transition-colors group"
-                    >
-                      <td
-                        className="px-4 py-4 md:py-3 bg-white cursor-pointer"
-                        onClick={() => abrirMenuOpciones(fac)}
-                      >
-                        <div className="flex flex-col">
-                          <span className="font-black text-[#0a192f] text-base">
-                            {fac.folio}
-                          </span>
-                          <span
-                            className="text-gray-600 font-medium truncate max-w-[200px]"
-                            title={fac.cliente}
-                          >
-                            {fac.cliente}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-center text-xs text-gray-500 bg-white whitespace-nowrap">
-                        <p>
-                          Emisión:{" "}
-                          <span className="font-mono">{fac.emision}</span>
-                        </p>
-                        <p className="mt-0.5 font-bold text-gray-700">
-                          Vence:{" "}
-                          <span className="font-mono">{fac.vencimiento}</span>
-                        </p>
-                        {fac.estatus === "Vencida" && (
-                          <span className="block text-[11px] font-black text-red-500 mt-0.5">
-                            (Hace {calcularDiasVencidos(fac.vencimiento)} días)
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-right font-semibold text-gray-700 bg-white whitespace-nowrap">
-                        ${montoTotal.toLocaleString("es-MX")}
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-right font-semibold text-green-600 bg-white whitespace-nowrap">
-                        ${montoPagado.toLocaleString("es-MX")}
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-right bg-white whitespace-nowrap">
-                        <span
-                          className={`text-base font-black ${
-                            saldoPendiente > 0
-                              ? fac.estatus === "Vencida"
-                                ? "text-red-600"
-                                : "text-[#0a192f]"
-                              : "text-green-600"
-                          }`}
-                        >
-                          ${saldoPendiente.toLocaleString("es-MX")}
-                        </span>
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-center bg-white">
-                        <BadgeEstatus estatus={fac.estatus} />
-                      </td>
-                      <td className="px-4 py-4 md:py-3 text-center bg-white">
-                        <button
-                          onClick={() => abrirMenuOpciones(fac)}
-                          className="p-3 md:p-1.5 text-gray-400 active:text-blue-600 hover:text-blue-600 active:bg-blue-50 hover:bg-blue-50 rounded-full md:rounded-lg transition-colors border border-transparent"
-                          title="Ver Opciones"
-                        >
-                          <MoreVertical className="h-5 w-5 md:h-5 md:w-5 mx-auto" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td
-                    colSpan="7"
-                    className="px-6 py-10 text-center text-gray-400 bg-white"
-                  >
-                    <FileText className="h-10 w-10 mx-auto mb-2 text-gray-300" />
-                    <p>No se encontraron facturas con los filtros seleccionados.</p>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-gray-100 bg-gray-50">
-          <p className="text-xs font-medium text-gray-500">
-            {cargandoFacturas
-              ? "Consultando facturas..."
-              : `Mostrando ${facturasPaginadas.length} factura(s) en esta página`}
-          </p>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={paginaAnterior}
-              disabled={!hayAnterior || cargandoFacturas}
-              className="p-2 rounded-lg border border-gray-200 bg-white text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-100"
-              aria-label="Página anterior"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-
-            <span className="text-xs font-black text-[#0a192f] min-w-20 text-center">
-              Página {paginaActualFacturas}
-            </span>
-
-            <button
-              type="button"
-              onClick={siguientePagina}
-              disabled={!haySiguiente || cargandoFacturas}
-              className="p-2 rounded-lg border border-gray-200 bg-white text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-100"
-              aria-label="Página siguiente"
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {modalActivo && (
-        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm md:p-4">
-          {modalActivo === "opcionesFactura" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in m-auto md:m-0 pb-6 md:pb-0 max-h-[90vh]">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="flex justify-between items-center p-4 border-b border-gray-100 bg-white md:bg-gray-50 shrink-0">
-                <h2 className="text-sm font-black text-[#0a192f]">
-                  Gestión de Factura
-                </h2>
-                <button
-                  onClick={cerrarModal}
-                  className="text-gray-400 active:text-red-500 bg-gray-50 md:bg-transparent rounded-full p-1 md:p-0"
-                >
-                  <XCircle className="h-6 w-6 md:h-5 md:w-5" />
-                </button>
-              </div>
-              <div className="p-5 text-center border-b border-gray-100 bg-white">
-                <p className="text-2xl font-black text-[#0a192f] font-mono">
-                  {facturaSeleccionada?.folio}
-                </p>
-                <p className="text-sm font-bold text-gray-600 mt-1">
-                  {facturaSeleccionada?.cliente}
-                </p>
-                <p className="text-xs text-gray-400 mt-2">
-                  Saldo Actual:{" "}
-                  <span className="font-black text-[#0a192f] text-sm">
-                    $
-                    {facturaSeleccionada?.saldo_pendiente.toLocaleString(
-                      "es-MX",
-                    )}
-                  </span>
-                </p>
-              </div>
-              <div className="p-5 md:p-4 space-y-3 md:space-y-2 bg-gray-50/50 overflow-y-auto custom-scrollbar">
-                {facturaSeleccionada?.saldo_pendiente > 0 && (
-                  <button
-                    onClick={() => abrirFormulario("nuevoPago")}
-                    className="w-full p-3.5 md:p-3 bg-green-600 text-white active:bg-green-700 hover:bg-green-700 rounded-xl md:rounded-lg flex items-center justify-center font-black text-sm shadow-sm transition-colors"
-                  >
-                    <CreditCard className="h-4 w-4 md:h-4 md:w-4 mr-2" />{" "}
-                    Registrar Pago / Abono
-                  </button>
-                )}
-                <button
-                  onClick={() => abrirFormulario("historialPagos")}
-                  className="w-full p-3.5 md:p-3 bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded-xl md:rounded-lg flex items-center justify-center font-bold text-sm transition-colors"
-                >
-                  <Clock className="h-4 w-4 md:h-4 md:w-4 mr-2" /> Historial de
-                  Abonos ({facturaSeleccionada?.abonos?.length || 0})
-                </button>
-                <button
-                  onClick={() => abrirFormulario("whatsapp")}
-                  className="w-full p-3.5 md:p-3 bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200 rounded-xl md:rounded-lg flex items-center justify-center font-bold text-sm transition-colors"
-                >
-                  <MessageSquare className="h-4 w-4 md:h-4 md:w-4 mr-2 text-green-600" />{" "}
-                  Enviar Aviso WhatsApp
-                </button>
-                <div
-                  className={`mt-4 pt-4 border-t border-gray-200 grid gap-3 md:gap-2 ${
-                    userRole === "SU" ? "grid-cols-2" : "grid-cols-1"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => abrirFormulario("editarFactura")}
-                    className="p-3 md:p-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-amber-100 active:bg-amber-100 transition-colors"
-                  >
-                    <Edit className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Editar
-                  </button>
-                  {userRole === "SU" && (
-                    <button
-                      disabled
-                      title="La anulación financiera se implementará en un flujo separado"
-                      className="p-3 md:p-2 bg-gray-100 text-gray-400 border border-gray-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs cursor-not-allowed"
-                    >
-                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Anular
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {modalActivo === "whatsapp" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in max-h-[90vh] pb-6 md:pb-0 m-auto md:m-0">
-              <div className="w-12 h-1.5 bg-white/40 rounded-full mx-auto mt-3 md:hidden shrink-0 z-10 absolute left-0 right-0"></div>
-              <div className="pt-6 md:pt-4 pb-4 px-4 border-b border-gray-100 bg-[#25D366] text-white flex justify-between items-center shrink-0 relative">
-                <h2 className="text-base font-bold flex items-center">
-                  <Smartphone className="h-5 w-5 mr-2" /> Gestión vía WhatsApp
-                </h2>
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="text-green-100 hover:text-white transition-colors"
-                >
-                  <XCircle className="h-5 w-5" />
-                </button>
-              </div>
-              <div className="p-5 flex flex-col md:flex-row gap-5 overflow-y-auto custom-scrollbar">
-                <div className="flex-1 space-y-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-400 uppercase">
-                      Cliente a Contactar
-                    </label>
-                    <p className="font-bold text-[#0a192f] text-sm">
-                      {facturaSeleccionada?.cliente}
-                    </p>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                      Teléfono Destino
-                    </label>
-                    <input
-                      type="text"
-                      value={datosWhatsapp.telefono}
-                      onChange={(e) =>
-                        setDatosWhatsapp({
-                          ...datosWhatsapp,
-                          telefono: e.target.value,
-                        })
-                      }
-                      className="w-full px-3 py-2.5 md:py-1.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-[#25D366] font-mono text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="flex-[2] space-y-3">
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                      Plantilla de Abordaje
-                    </label>
-                    <select
-                      value={datosWhatsapp.plantilla}
-                      onChange={(e) =>
-                        setDatosWhatsapp({
-                          ...datosWhatsapp,
-                          plantilla: e.target.value,
-                          mensaje: generarMensajeWA(
-                            e.target.value,
-                            facturaSeleccionada,
-                          ),
-                        })
-                      }
-                      className="w-full px-3 py-2.5 md:py-1.5 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-[#25D366] bg-white text-sm font-medium"
-                    >
-                      <option value="atrasado">Cobro: Saldo Vencido</option>
-                      <option value="proximo">
-                        Aviso: Vencimiento Próximo
-                      </option>
-                      <option value="manual">Mensaje Personalizado</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">
-                      Vista Previa del Mensaje
-                    </label>
-                    <textarea
-                      value={datosWhatsapp.mensaje}
-                      onChange={(e) =>
-                        setDatosWhatsapp({
-                          ...datosWhatsapp,
-                          mensaje: e.target.value,
-                        })
-                      }
-                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-[#25D366] text-xs resize-none"
-                      rows="6"
-                    ></textarea>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 border-t border-gray-100 bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 shrink-0 md:rounded-b-xl">
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="w-full md:w-auto px-4 py-3.5 md:py-2 text-xs font-bold text-gray-600 bg-white md:bg-transparent border border-gray-300 md:border-transparent hover:bg-gray-200 rounded-lg transition-colors"
-                >
-                  Volver a Opciones
-                </button>
-                <button
-                  onClick={enviarWhatsApp}
-                  disabled={!datosWhatsapp.telefono}
-                  className="w-full md:w-auto px-5 py-3.5 md:py-2 bg-[#25D366] hover:bg-[#1DA851] active:bg-[#1DA851] text-white text-xs font-bold rounded-lg shadow-sm flex items-center justify-center transition-colors disabled:opacity-50"
-                >
-                  <Send className="h-3.5 w-3.5 mr-2" /> Enviar WhatsApp
-                </button>
-              </div>
-            </div>
-          )}
-
-          {(modalActivo === "nuevaFactura" ||
-            modalActivo === "editarFactura") && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in max-h-[90vh] pb-6 md:pb-0 m-auto md:m-0">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="p-4 md:p-4 border-b border-gray-100 bg-[#0a192f] text-white flex justify-between items-center shrink-0">
-                <h2 className="text-base md:text-lg font-bold flex items-center">
-                  {modalActivo === "nuevaFactura" ? (
-                    <>
-                      <FileText className="h-5 w-5 mr-2 text-blue-400" />{" "}
-                      Captura de Factura
-                    </>
-                  ) : (
-                    <>
-                      <Edit className="h-5 w-5 mr-2 text-amber-400" /> Editar
-                      Factura
-                    </>
-                  )}
-                </h2>
-                <button
-                  onClick={cerrarModal}
-                  className="text-gray-400 hover:text-white transition-colors bg-white/10 md:bg-transparent rounded-full p-1 md:p-0"
-                >
-                  <XCircle className="h-6 w-6" />
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-50/30 custom-scrollbar">
-                <div className="space-y-4 md:space-y-6">
-                  <div className="bg-white p-4 md:p-5 rounded-xl border border-gray-200 shadow-sm">
-                    <h3 className="text-xs md:text-sm font-black text-[#0a192f] mb-4 flex items-center border-b pb-2">
-                      <Search className="h-4 w-4 mr-2 text-blue-500" />{" "}
-                      Información Principal
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Nombre del Cliente
-                        </label>
-                        <Select
-                          options={opcionesClientes}
-                          value={
-                            opcionesClientes.find(
-                              (op) => op.value === invoiceForm.cliente_id,
-                            ) || null
-                          }
-                          onChange={(selected) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              cliente_id: selected ? selected.cliente.id : "",
-                              cliente: selected ? selected.cliente.nombre : "",
-                              grupo: selected
-                                ? normalizarGrupoFactura(selected.cliente.grupo)
-                                : invoiceForm.grupo,
-                            })
-                          }
-                          placeholder="Buscar cliente..."
-                          isClearable
-                          noOptionsMessage={() => "No se encontró el cliente"}
-                          styles={{
-                            control: (base, state) => ({
-                              ...base,
-                              borderRadius: "0.5rem",
-                              borderColor: state.isFocused
-                                ? "#ffd700"
-                                : "#d1d5db",
-                              boxShadow: state.isFocused
-                                ? "0 0 0 2px rgba(255, 215, 0, 0.3)"
-                                : "none",
-                              backgroundColor: state.isFocused
-                                ? "#ffffff"
-                                : "#f9fafb",
-                              padding: "2px",
-                              minHeight: "42px",
-                              cursor: "text",
-                            }),
-                            menu: (base) => ({
-                              ...base,
-                              zIndex: 9999,
-                            }),
-                          }}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Grupo
-                        </label>
-                        <select
-                          value={invoiceForm.grupo}
-                          onChange={(e) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              grupo: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] bg-gray-50 focus:bg-white font-medium text-sm"
-                        >
-                          {GRUPOS_FACTURA.map((grupo) => (
-                            <option key={grupo} value={grupo}>
-                              {grupo}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          No. de Factura
-                        </label>
-                        <input
-                          type="text"
-                          value={invoiceForm.folio}
-                          onChange={(e) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              folio: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] font-mono text-sm uppercase bg-gray-50 focus:bg-white"
-                          placeholder="Ej. F-1035"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Monto Total
-                        </label>
-                        <div className="relative">
-                          <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0.01"
-                            value={invoiceForm.monto_total}
-                            onChange={(e) =>
-                              setInvoiceForm({
-                                ...invoiceForm,
-                                monto_total: e.target.value,
-                              })
-                            }
-                            className="w-full pl-9 pr-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] font-bold text-[#0a192f] bg-gray-50 focus:bg-white"
-                            placeholder="0.00"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Moneda
-                        </label>
-                        <input
-                          type="text"
-                          value="MXN"
-                          readOnly
-                          className="w-full px-3 py-3 md:py-2 border border-gray-200 rounded-xl md:rounded-lg bg-gray-100 text-gray-500 font-bold cursor-not-allowed text-center text-sm"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white p-4 md:p-5 rounded-xl border border-gray-200 shadow-sm">
-                    <h3 className="text-xs md:text-sm font-black text-[#0a192f] mb-4 flex items-center border-b pb-2">
-                      <Calendar className="h-4 w-4 mr-2 text-blue-500" /> Fechas
-                      de la Factura
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Fecha de Emisión
-                        </label>
-                        <input
-                          type="date"
-                          value={invoiceForm.emision}
-                          onChange={(e) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              emision: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm bg-gray-50 focus:bg-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Fecha de Vencimiento
-                        </label>
-                        <input
-                          type="date"
-                          value={invoiceForm.vencimiento}
-                          onChange={(e) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              vencimiento: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm bg-gray-50 focus:bg-white"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white p-4 md:p-5 rounded-xl border border-gray-200 shadow-sm">
-                    <h3 className="text-xs md:text-sm font-black text-[#0a192f] mb-4 flex items-center border-b pb-2">
-                      <FileText className="h-4 w-4 mr-2 text-blue-500" /> Extras
-                    </h3>
-                    <div>
-                      <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                        Observaciones
-                      </label>
-                      <textarea
-                        value={invoiceForm.observaciones}
-                        onChange={(e) =>
-                          setInvoiceForm({
-                            ...invoiceForm,
-                            observaciones: e.target.value,
-                          })
-                        }
-                        className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm bg-gray-50 focus:bg-white resize-none"
-                        rows="3"
-                        placeholder="Escribe aquí notas adicionales..."
-                      ></textarea>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 md:p-4 border-t border-gray-200 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-2 shrink-0 md:rounded-b-xl">
-                <button
-                  onClick={cerrarModal}
-                  className="w-full md:w-auto px-4 py-3.5 md:py-2.5 text-sm md:text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-xl md:rounded-lg active:bg-gray-50 transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={handleSaveFactura}
-                  disabled={isSubmitting}
-                  className="w-full md:w-auto px-6 py-3.5 md:py-2.5 bg-[#ffd700] text-[#0a192f] text-sm md:text-xs font-black rounded-xl md:rounded-lg shadow-sm active:bg-[#e6c200] transition-colors flex items-center justify-center disabled:opacity-50"
-                >
-                  {isSubmitting
-                    ? "Guardando..."
-                    : modalActivo === "editarFactura"
-                      ? "Guardar Cambios"
-                      : "Guardar Factura"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {modalActivo === "confirmarEliminar" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in mt-auto mb-auto md:mt-10 pb-6 md:pb-0">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="p-6 text-center space-y-4">
-                <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center mx-auto ring-4 ring-red-50">
-                  <AlertTriangle className="h-8 w-8 text-red-600" />
-                </div>
-                <div>
-                  <h3 className="text-xl md:text-lg font-black text-[#0a192f]">
-                    {itemAEliminar?.tipo === "factura"
-                      ? "¿Eliminar Factura?"
-                      : "¿Eliminar Abono?"}
-                  </h3>
-                  <p className="text-sm md:text-sm text-gray-600 mt-2">
-                    {itemAEliminar?.tipo === "factura" ? (
-                      <>
-                        Estás a punto de eliminar permanentemente la factura{" "}
-                        <span className="font-bold text-[#0a192f]">
-                          {itemAEliminar.data?.folio}
-                        </span>{" "}
-                        de{" "}
-                        <span className="font-bold text-[#0a192f]">
-                          {itemAEliminar.data?.cliente}
-                        </span>
-                        .
-                      </>
-                    ) : (
-                      <>
-                        Estás a punto de eliminar un abono de{" "}
-                        <span className="font-bold text-[#0a192f]">
-                          ${itemAEliminar.data?.monto?.toLocaleString("es-MX")}
-                        </span>{" "}
-                        de la factura{" "}
-                        <span className="font-bold text-[#0a192f]">
-                          {facturaSeleccionada?.folio}
-                        </span>
-                        .
-                      </>
-                    )}
-                  </p>
-                </div>
-                <div className="bg-red-50 p-3 rounded-lg border border-red-100 text-xs text-red-700 font-medium text-left">
-                  <p>
-                    <strong>Atención:</strong>{" "}
-                    {itemAEliminar?.tipo === "factura"
-                      ? `Esta acción borrará la factura y todo su historial de abonos.`
-                      : "El saldo de la factura se recalculará automáticamente."}{" "}
-                    Esta acción es irreversible.
-                  </p>
-                </div>
-              </div>
-              <div className="p-4 md:p-3 border-t border-gray-100 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-2 md:rounded-b-xl">
-                <button
-                  onClick={() => {
-                    if (itemAEliminar?.tipo === "abono")
-                      setModalActivo("historialPagos");
-                    else setModalActivo("opcionesFactura");
-                  }}
-                  className="w-full md:w-auto px-4 py-3.5 md:py-2 text-sm md:text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-xl md:rounded-lg active:bg-gray-50 transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={ejecutarEliminacion}
-                  className="w-full md:w-auto px-5 py-3.5 md:py-2 text-sm md:text-xs font-black text-white bg-red-600 active:bg-red-700 rounded-xl md:rounded-lg shadow-sm flex items-center justify-center transition-colors"
-                >
-                  <Trash2 className="h-4 w-4 mr-1.5 md:mr-1" /> Sí, Eliminar
-                </button>
-              </div>
-            </div>
-          )}
-
-          {modalActivo === "nuevoPago" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in m-auto md:m-0 pb-6 md:pb-0 max-h-[90vh]">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="p-4 border-b border-gray-100 bg-white md:bg-green-50 flex justify-between items-center shrink-0">
-                <h2 className="text-sm md:text-base font-black text-green-800 flex items-center">
-                  <CreditCard className="h-5 w-5 md:h-5 md:w-5 mr-2" /> Ingreso
-                  de Pago
-                </h2>
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="text-gray-400 active:text-gray-700 bg-gray-50 md:bg-transparent rounded-full p-1 md:p-0"
-                >
-                  <XCircle className="h-6 w-6 md:h-5 md:w-5" />
-                </button>
-              </div>
-              <div className="p-6 md:p-6 space-y-5 md:space-y-4 overflow-y-auto custom-scrollbar">
-                <div className="bg-gray-50 p-4 md:p-3 rounded-xl md:rounded-lg text-center border border-gray-200 flex flex-col items-center">
-                  <p className="text-[10px] md:text-xs text-gray-500 uppercase font-bold">
-                    Saldo Pendiente (Máximo Permitido)
-                  </p>
-                  <p className="text-3xl md:text-2xl font-black text-[#0a192f] mt-1">
-                    $
-                    {facturaSeleccionada?.saldo_pendiente.toLocaleString(
-                      "es-MX",
-                    )}
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                    Monto a abonar ($)
-                  </label>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 md:h-4 md:w-4 text-gray-400" />
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={pagoForm.monto}
-                      onChange={handleMontoPago}
-                      className="w-full pl-10 pr-3 py-3 md:py-2 border border-gray-200 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 font-bold text-xl md:text-lg bg-gray-50 focus:bg-white"
-                      placeholder="0.00"
-                    />
-                  </div>
-                  <p className="text-[9px] text-gray-400 mt-1">
-                    El monto no puede superar la deuda actual.
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                    Método de Pago
-                  </label>
-                  <select
-                    value={pagoForm.metodo}
-                    onChange={(e) =>
-                      setPagoForm({ ...pagoForm, metodo: e.target.value })
-                    }
-                    className="w-full px-4 py-3 md:py-2 border border-gray-200 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 bg-gray-50 focus:bg-white font-bold text-sm"
-                  >
-                    <option>Efectivo</option>
-                    <option>Transferencia</option>
-                    <option>Cheque</option>
-                  </select>
-                </div>
-              </div>
-              <div className="p-4 md:p-4 border-t border-gray-100 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-2 shrink-0 md:rounded-b-xl">
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="w-full md:w-auto px-4 py-3.5 md:py-2 text-sm md:text-sm font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 transition-colors"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={handleSavePago}
-                  disabled={
-                    !pagoForm.monto ||
-                    parseFloat(pagoForm.monto) <= 0 ||
-                    isSubmitting
-                  }
-                  className="w-full md:w-auto px-6 py-3.5 md:py-2 bg-green-600 text-white font-black text-sm md:text-sm rounded-xl md:rounded-lg shadow-sm active:bg-green-700 disabled:opacity-50 flex items-center justify-center transition-colors"
-                >
-                  Guardar Abono
-                </button>
-              </div>
-            </div>
-          )}
-
-          {modalActivo === "historialPagos" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in m-auto md:m-0 pb-6 md:pb-0 max-h-[90vh]">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="p-4 border-b border-gray-100 bg-white md:bg-blue-50 flex justify-between items-center shrink-0">
-                <h2 className="text-sm md:text-base font-black text-blue-800 flex items-center">
-                  <Clock className="h-5 w-5 md:h-5 md:w-5 mr-2" /> Historial de
-                  Abonos
-                </h2>
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="text-gray-400 active:text-gray-700 bg-gray-50 md:bg-transparent rounded-full p-1 md:p-0"
-                >
-                  <XCircle className="h-6 w-6 md:h-5 md:w-5" />
-                </button>
-              </div>
-              <div className="p-0 flex-1 overflow-y-auto custom-scrollbar">
-                {facturaSeleccionada?.abonos?.length > 0 ? (
-                  <div className="divide-y divide-gray-100">
-                    {facturaSeleccionada.abonos.map((abono) => (
-                      <div
-                        key={abono.id_abono}
-                        className="p-5 md:p-4 flex justify-between items-center active:bg-gray-50 hover:bg-gray-50 transition-colors"
-                      >
-                        <div className="flex flex-col flex-1 pr-4">
-                          <div className="flex justify-between items-start mb-1.5 md:mb-1">
-                            <p className="font-black text-[#0a192f] text-lg md:text-base">
-                              ${abono.monto.toLocaleString("es-MX")}{" "}
-                              <span className="text-[10px] md:text-xs text-gray-500 font-bold uppercase ml-1">
-                                Abonado
-                              </span>
-                            </p>
-                            <span className="text-[10px] md:text-[11px] font-bold text-gray-500 uppercase">
-                              {abono.fecha}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 md:gap-y-1 mt-1 text-[11px] md:text-[11px]">
-                            <p className="text-gray-600">
-                              <span className="font-black text-gray-400 uppercase tracking-wider">
-                                Cajero:
-                              </span>{" "}
-                              <span className="font-bold">
-                                {abono.registrado_por}
-                              </span>
-                            </p>
-                            <p className="text-gray-600">
-                              <span className="font-black text-gray-400 uppercase tracking-wider">
-                                Método:
-                              </span>{" "}
-                              <span className="font-bold">{abono.metodo}</span>
-                            </p>
-                            <p className="text-gray-600">
-                              <span className="font-black text-gray-400 uppercase tracking-wider">
-                                Saldo Ant:
-                              </span>{" "}
-                              <span className="font-bold">
-                                ${abono.saldo_anterior?.toLocaleString("es-MX")}
-                              </span>
-                            </p>
-                            <p className="text-gray-600">
-                              <span className="font-black text-gray-400 uppercase tracking-wider">
-                                Restante:
-                              </span>{" "}
-                              <span className="font-bold">
-                                ${abono.saldo_restante?.toLocaleString("es-MX")}
-                              </span>
-                            </p>
-                          </div>
-                        </div>
-                        {userRole === "SU" && (
-                          <button
-                            onClick={() => confirmarEliminacion("abono", abono)}
-                            className="p-3 md:p-2 shrink-0 text-red-400 active:text-red-600 hover:text-red-600 active:bg-red-50 hover:bg-red-50 rounded-xl md:rounded-lg transition-colors border border-transparent active:border-red-100 hover:border-red-100"
-                          >
-                            <Trash2 className="h-4 w-4 md:h-4 md:w-4" />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="p-10 text-center text-gray-400">
-                    <AlertTriangle className="h-10 w-10 mx-auto mb-2 opacity-50" />
-                    <p className="text-xs font-bold uppercase tracking-wider">
-                      No se han registrado abonos a esta factura.
-                    </p>
-                  </div>
-                )}
-              </div>
-              <div className="p-4 md:p-3 border-t border-gray-100 bg-white md:bg-gray-50 flex justify-end shrink-0 md:rounded-b-xl">
-                <button
-                  onClick={() => setModalActivo("opcionesFactura")}
-                  className="w-full px-4 py-3.5 md:py-2 text-sm md:text-xs font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 transition-colors"
-                >
-                  Cerrar
-                </button>
-              </div>
-            </div>
-          )}
-
-          {modalActivo === "notificacion" && (
-            <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in mt-auto mb-auto pb-6 md:pb-0">
-              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-              <div className="p-6 md:p-6 text-center">
-                <div
-                  className={`h-16 w-16 rounded-full flex items-center justify-center mx-auto mb-4 ring-4 ${notificacion.tipo === "error" ? "bg-red-100 ring-red-50 text-red-600" : "bg-green-100 ring-green-50 text-green-600"}`}
-                >
-                  {notificacion.tipo === "error" ? (
-                    <XCircle className="h-8 w-8" />
-                  ) : (
-                    <Check className="h-8 w-8" />
-                  )}
-                </div>
-                <h3 className="text-xl md:text-lg font-black text-[#0a192f] mb-2">
-                  {notificacion.titulo}
-                </h3>
-                <p className="text-sm md:text-xs text-gray-600 leading-relaxed font-medium">
-                  {notificacion.descripcion}
-                </p>
-                <button
-                  onClick={cerrarModal}
-                  className={`w-full mt-6 px-5 py-3.5 md:py-2.5 text-sm md:text-sm font-black text-[#0a192f] rounded-xl md:rounded-lg transition-colors shadow-sm ${notificacion.tipo === "error" ? "bg-red-50 hover:bg-red-100 border border-red-200" : "bg-[#ffd700] hover:bg-[#e6c200]"}`}
-                >
-                  Aceptar y Continuar
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
   );
 }
 ```
@@ -5199,10 +4213,232 @@ export const facturasService = {
     }
   },
 
-  eliminarFactura: async () => ({
-    success: false,
-    error:
-      "La anulación directa requiere estorno financiero en cascada. En construcción.",
-  }),
+  eliminarFactura: async ({
+    idFactura,
+    userName,
+    actor_uid,
+  }) => {
+    if (!actor_uid) {
+      return {
+        success: false,
+        error: "No se identificó al usuario responsable.",
+      };
+    }
+
+    if (!idFactura) {
+      return {
+        success: false,
+        error: "No se identificó la factura que será eliminada.",
+      };
+    }
+
+    try {
+      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+
+      const resultado = await runTransaction(db, async (transaction) => {
+        const facturaSnap = await transaction.get(facturaRef);
+
+        if (!facturaSnap.exists()) {
+          throw new Error("La factura ya no existe en Firestore.");
+        }
+
+        const factura = {
+          id: facturaSnap.id,
+          ...facturaSnap.data(),
+        };
+
+        if (!factura.cliente_id) {
+          throw new Error(
+            "La factura no tiene cliente_id y no puede eliminarse de forma segura.",
+          );
+        }
+
+        const clienteRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          factura.cliente_id,
+        );
+
+        const clienteSnap = await transaction.get(clienteRef);
+
+        if (!clienteSnap.exists()) {
+          throw new Error(
+            "No se encontró el cliente enlazado a la factura.",
+          );
+        }
+
+        const cliente = clienteSnap.data();
+
+        const montoTotal = redondearMoneda(factura.monto_total);
+        const saldoPendiente = redondearMoneda(
+          factura.saldo_pendiente,
+        );
+        const montoPagado = redondearMoneda(
+          Number.isFinite(Number(factura.monto_pagado))
+            ? factura.monto_pagado
+            : Math.max(0, montoTotal - saldoPendiente),
+        );
+
+        const abonos = Array.isArray(factura.abonos)
+          ? factura.abonos
+          : [];
+
+        const totalAbonosRegistrados = redondearMoneda(
+          abonos.reduce(
+            (total, abono) => total + (Number(abono.monto) || 0),
+            0,
+          ),
+        );
+
+        const abonosMes = redondearMoneda(
+          abonos.reduce(
+            (total, abono) =>
+              total +
+              (esMismoMes(abono.fecha) ? Number(abono.monto) || 0 : 0),
+            0,
+          ),
+        );
+
+        const abonosSemana = redondearMoneda(
+          abonos.reduce(
+            (total, abono) =>
+              total +
+              (esMismaSemana(abono.fecha)
+                ? Number(abono.monto) || 0
+                : 0),
+            0,
+          ),
+        );
+
+        const estabaVencida =
+          saldoPendiente > 0 && esFacturaVencida(factura);
+        const estabaPagada = saldoPendiente === 0;
+        const estabaPendiente = saldoPendiente > 0;
+
+        const limiteCredito = redondearMoneda(cliente.limite_credito);
+        const deudaActual = redondearMoneda(cliente.deuda_actual);
+        const creditoDisponible = redondearMoneda(
+          cliente.credito_disponible,
+        );
+
+        const nuevaDeuda = Math.max(
+          0,
+          redondearMoneda(deudaActual - saldoPendiente),
+        );
+
+        const nuevoCreditoDisponible =
+          limiteCredito > 0
+            ? Math.min(
+                limiteCredito,
+                Math.max(
+                  0,
+                  redondearMoneda(
+                    creditoDisponible + saldoPendiente,
+                  ),
+                ),
+              )
+            : 0;
+
+        transaction.update(clienteRef, {
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoCreditoDisponible,
+          updatedAt: serverTimestamp(),
+        });
+
+        const statsUpdate = {
+          facturas_total: increment(-1),
+          total_facturado: increment(-montoTotal),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (saldoPendiente > 0) {
+          statsUpdate.cartera_total = increment(-saldoPendiente);
+        }
+
+        if (estabaPendiente) {
+          statsUpdate.facturas_pendientes = increment(-1);
+        }
+
+        if (estabaPagada) {
+          statsUpdate.facturas_pagadas = increment(-1);
+          statsUpdate.total_liquidado = increment(-montoTotal);
+        }
+
+        if (estabaVencida) {
+          statsUpdate.facturas_vencidas = increment(-1);
+          statsUpdate.cartera_vencida = increment(-saldoPendiente);
+        }
+
+        if (montoPagado > 0) {
+          statsUpdate.cobrado_historico = increment(-montoPagado);
+        }
+
+        const totalAbonosARevertir =
+          totalAbonosRegistrados > 0
+            ? totalAbonosRegistrados
+            : montoPagado;
+
+        if (totalAbonosARevertir > 0) {
+          statsUpdate.abonos_registrados = increment(
+            -totalAbonosARevertir,
+          );
+        }
+
+        if (abonosMes > 0) {
+          statsUpdate.ingresos_mes = increment(-abonosMes);
+        }
+
+        if (abonosSemana > 0) {
+          statsUpdate.ingresos_semana = increment(-abonosSemana);
+        }
+
+        transaction.set(statsRef, statsUpdate, { merge: true });
+
+        transaction.set(auditRef, {
+          actor_uid,
+          usuario: userName || "SU",
+          modulo: "Facturación",
+          tipo: "Eliminación de Factura",
+          factura_id: idFactura,
+          folio: factura.folio || "S/F",
+          cliente: factura.cliente || cliente.nombre || "S/N",
+          cliente_id: factura.cliente_id,
+          valores_eliminados: {
+            folio: factura.folio || "",
+            cliente: factura.cliente || "",
+            cliente_id: factura.cliente_id || "",
+            monto_total: montoTotal,
+            monto_pagado: montoPagado,
+            saldo_pendiente: saldoPendiente,
+            estatus: factura.estatus || "",
+            abonos: abonos.length,
+          },
+          detalle: `El SU eliminó la factura ${factura.folio || "S/F"} de ${factura.cliente || cliente.nombre || "S/N"}. Se ajustaron saldo del cliente, crédito disponible, métricas globales y auditoría.`,
+          serverTime: serverTimestamp(),
+        });
+
+        transaction.delete(facturaRef);
+
+        return {
+          folio: factura.folio || "S/F",
+          cliente: factura.cliente || cliente.nombre || "S/N",
+        };
+      });
+
+      return {
+        success: true,
+        data: resultado,
+      };
+    } catch (error) {
+      console.error("Error al eliminar la factura:", error);
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
 };
 ```

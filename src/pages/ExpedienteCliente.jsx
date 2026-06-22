@@ -1,9 +1,10 @@
-import { useState, useContext, useMemo } from "react";
+import { useState, useContext } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { GlobalContext } from "../context/GlobalContext";
 import { calcularDiasVencidos } from "../utils/fechas";
 import { clientesService } from "../services/clientesService";
 import { solicitudesService } from "../services/solicitudesService";
+import { useFacturasCliente } from "../hooks/useFacturasCliente";
 import {
   ArrowLeft, Edit, FileText, User, CheckCircle, Pencil, X, XCircle, TrendingUp,
   Shield, Mail, Tag, MessageSquare, StickyNote, ChevronLeft, ChevronRight, DollarSign,
@@ -53,7 +54,6 @@ export default function ExpedienteCliente() {
 
   const {
     clientes,
-    facturas,
     userRole,
     userName,
     currentUser,
@@ -65,7 +65,6 @@ export default function ExpedienteCliente() {
   const [facturaSeleccionada, setFacturaSeleccionada] = useState(null);
   const [aumentoData, setAumentoData] = useState({ monto: "", motivo: "" });
   const [notificacion, setNotificacion] = useState({ titulo: "", descripcion: "", tipo: "exito" });
-  const [paginaFacturas, setPaginaFacturas] = useState(1);
   const [clienteForm, setClienteForm] = useState({});
   const [procesandoCredito, setProcesandoCredito] = useState(false);
   const [procesandoEliminacionFactura, setProcesandoEliminacionFactura] =
@@ -79,54 +78,41 @@ export default function ExpedienteCliente() {
 
   const clienteBase = clientes.find((c) => c.id === id) || null;
 
-  // Filtro robusto blindado por ID con soporte para historial antiguo
-  const facturasCliente = useMemo(() => {
-    if (!clienteBase?.id) return [];
-
-    return facturas.filter((f) => {
-      if (f.cliente_id) {
-        return f.cliente_id === clienteBase.id;
-      }
-      return f.cliente === clienteBase.nombre;
-    });
-  }, [facturas, clienteBase]);
-
-  const facturasFiltradasTab = useMemo(() => {
-    return facturasCliente.filter((fac) => {
-      const esVencida = fac.estatus === "Vencida";
-      const esPagada = (fac.saldo_pendiente || 0) <= 0;
-      if (filtroFacturas === "Vencidas" && !esVencida) return false;
-      if (filtroFacturas === "Pagadas" && !esPagada) return false;
-      return true;
-    });
-  }, [facturasCliente, filtroFacturas]);
-
-  const totalPaginas = Math.ceil(facturasFiltradasTab.length / facturasPorPagina);
-  const facturasPaginadas = useMemo(() => {
-    const inicio = (paginaFacturas - 1) * facturasPorPagina;
-    return facturasFiltradasTab.slice(inicio, inicio + facturasPorPagina);
-  }, [facturasFiltradasTab, paginaFacturas]);
+  const {
+    facturas: facturasPaginadas,
+    resumen: resumenFacturasCliente,
+    cargando: cargandoFacturasCliente,
+    cargandoResumen: cargandoResumenFacturas,
+    error: errorFacturasCliente,
+    mensaje: mensajeFacturasCliente,
+    pagina: paginaFacturas,
+    hayAnterior: hayPaginaAnterior,
+    haySiguiente: hayPaginaSiguiente,
+    siguientePagina,
+    paginaAnterior,
+    recargar: recargarFacturasCliente,
+  } = useFacturasCliente({
+    clienteId: clienteBase?.id || "",
+    filtroFacturas,
+    pageSize: facturasPorPagina,
+    enabled: Boolean(clienteBase?.id),
+  });
 
   const cambiarFiltroFacturas = (tab) => {
     setFiltroFacturas(tab);
-    setPaginaFacturas(1);
   };
 
-  const cambiarPagina = (direccion) => {
-    setPaginaFacturas((prev) => prev + direccion);
+  const cambiarPagina = async (direccion) => {
+    if (direccion > 0) {
+      await siguientePagina();
+      return;
+    }
+
+    await paginaAnterior();
   };
 
-  const deudaReal = useMemo(() => {
-    return facturasCliente
-      .filter((f) => f.estatus !== "Pagada" && f.estatus !== "Cancelada")
-      .reduce((acc, curr) => acc + (Number(curr.saldo_pendiente) || 0), 0);
-  }, [facturasCliente]);
-
-  const saldoVencidoReal = useMemo(() => {
-    return facturasCliente
-      .filter((f) => f.estatus === "Vencida")
-      .reduce((acc, curr) => acc + (Number(curr.saldo_pendiente) || 0), 0);
-  }, [facturasCliente]);
+  const deudaReal = Number(clienteBase?.deuda_actual) || 0;
+  const saldoVencidoReal = Number(resumenFacturasCliente?.saldoVencido) || 0;
 
   const limiteCredito = Number(clienteBase?.limite_credito) || 0;
   const tieneLineaCredito = limiteCredito > 0;
@@ -310,6 +296,7 @@ export default function ExpedienteCliente() {
       }
 
       setFacturaSeleccionada(null);
+      await recargarFacturasCliente();
 
       mostrarNotificacion(
         "Factura eliminada",
@@ -525,16 +512,22 @@ export default function ExpedienteCliente() {
             <h3 className="font-bold text-[#0a192f] flex items-center">
               <FileText className="h-5 w-5 mr-2 text-blue-600" /> Historial de Facturas
             </h3>
-            <div className="flex bg-gray-100 p-1 rounded-xl md:rounded-lg border border-gray-200 w-full sm:w-auto overflow-x-auto hide-scrollbar-mobile shrink-0">
-              {["Historial", "Vencidas", "Pagadas"].map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => cambiarFiltroFacturas(tab)}
-                  className={`flex-1 sm:flex-none whitespace-nowrap px-4 md:px-3 py-2 md:py-1 text-xs md:text-[11px] font-bold rounded-lg md:rounded-md transition-colors ${filtroFacturas === tab ? "bg-white text-[#0a192f] shadow-sm" : "text-gray-500 hover:text-[#0a192f] active:bg-gray-200"}`}
-                >
-                  {tab}
-                </button>
-              ))}
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="flex bg-gray-100 p-1 rounded-xl md:rounded-lg border border-gray-200 w-full sm:w-auto overflow-x-auto hide-scrollbar-mobile shrink-0">
+                {["Historial", "Vencidas", "Pagadas"].map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => cambiarFiltroFacturas(tab)}
+                    className={`flex-1 sm:flex-none whitespace-nowrap px-4 md:px-3 py-2 md:py-1 text-xs md:text-[11px] font-bold rounded-lg md:rounded-md transition-colors ${filtroFacturas === tab ? "bg-white text-[#0a192f] shadow-sm" : "text-gray-500 hover:text-[#0a192f] active:bg-gray-200"}`}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+
+              {(cargandoFacturasCliente || cargandoResumenFacturas) && (
+                <Loader2 className="h-4 w-4 text-blue-600 animate-spin shrink-0" />
+              )}
             </div>
           </div>
 
@@ -591,21 +584,51 @@ export default function ExpedienteCliente() {
                   })
                 ) : (
                   <tr>
-                    <td colSpan="5" className="text-center py-8 text-gray-400 font-medium text-sm">No se encontraron facturas.</td>
+                    <td colSpan="5" className="text-center py-8 text-gray-400 font-medium text-sm">
+                      {cargandoFacturasCliente
+                        ? "Cargando facturas del expediente..."
+                        : errorFacturasCliente || "No se encontraron facturas para este filtro."}
+                    </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
 
-          {totalPaginas > 1 && (
+          {(hayPaginaAnterior || hayPaginaSiguiente || facturasPaginadas.length > 0 || cargandoFacturasCliente) && (
             <div className="p-3 bg-gray-50 border-t border-gray-100 flex justify-between items-center px-4 shrink-0">
-              <span className="text-[11px] font-medium text-gray-500">
-                Página <strong className="text-gray-700">{paginaFacturas}</strong> de {totalPaginas}
-              </span>
-              <div className="flex space-x-2 md:space-x-1">
-                <button onClick={() => cambiarPagina(-1)} disabled={paginaFacturas === 1} className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all"><ChevronLeft className="h-5 w-5 md:h-4 md:w-4" /></button>
-                <button onClick={() => cambiarPagina(1)} disabled={paginaFacturas === totalPaginas} className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all"><ChevronRight className="h-5 w-5 md:h-4 md:w-4" /></button>
+              <div className="min-w-0">
+                <span className="text-[11px] font-medium text-gray-500 block">
+                  Página <strong className="text-gray-700">{paginaFacturas}</strong>
+                  {resumenFacturasCliente?.totalFacturas > 0 && (
+                    <> · {resumenFacturasCliente.totalFacturas} factura(s) del cliente</>
+                  )}
+                </span>
+                {mensajeFacturasCliente && (
+                  <span className="text-[10px] text-blue-600 font-bold block mt-0.5">
+                    {mensajeFacturasCliente}
+                  </span>
+                )}
+              </div>
+              <div className="flex space-x-2 md:space-x-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => cambiarPagina(-1)}
+                  disabled={!hayPaginaAnterior || cargandoFacturasCliente}
+                  className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Página anterior"
+                >
+                  <ChevronLeft className="h-5 w-5 md:h-4 md:w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cambiarPagina(1)}
+                  disabled={!hayPaginaSiguiente || cargandoFacturasCliente}
+                  className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  aria-label="Página siguiente"
+                >
+                  <ChevronRight className="h-5 w-5 md:h-4 md:w-4" />
+                </button>
               </div>
             </div>
           )}
