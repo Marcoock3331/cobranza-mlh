@@ -29,3 +29,22 @@ textarea {
 .safe-area-bottom {
   padding-bottom: env(safe-area-inset-bottom);
 }
+
+/* Corrige el fondo blanco del autocompletado en Chrome / Brave / Edge */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #ffffff !important;
+  box-shadow: 0 0 0 1000px rgba(24, 38, 81, 0.92) inset !important;
+  -webkit-box-shadow: 0 0 0 1000px rgba(24, 38, 81, 0.92) inset !important;
+  border-color: rgba(252, 219, 50, 0.9) !important;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* Mantiene el texto del autocompletado con tamaño correcto */
+input:-webkit-autofill::first-line {
+  color: #ffffff !important;
+  font-size: 14px;
+}
