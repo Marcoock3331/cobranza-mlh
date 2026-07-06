@@ -12,6 +12,7 @@ import { useLocation } from "react-router-dom";
 import { db } from "../config/firebase";
 import { clientesService } from "../services/clientesService";
 import { facturasService } from "../services/facturasService";
+import { solicitudesService } from "../services/solicitudesService";
 import { usuariosService } from "../services/usuariosService";
 import { formatearFechaSegura } from "../utils/normalizadores";
 import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
@@ -25,6 +26,7 @@ const STATS_COLLECTION = "metricas_globales";
 const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
 const SOLICITUDES_COLLECTION = "solicitudes";
+const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
 
 const ordenarFacturas = (lista) =>
   [...lista].sort((primera, segunda) => {
@@ -65,11 +67,13 @@ export const GlobalProvider = ({ children }) => {
         total_liquidado: 0,
         cobrado_historico: 0,
         abonos_registrados: 0,
+        total_notas_credito: 0,
       },
       clientes: [],
       facturas: [],
       actividad: [],
       solicitudes: [],
+      solicitudesNotasCredito: [],
       usuarios: [],
     }),
     [authData],
@@ -99,6 +103,7 @@ function GlobalDataProvider({ authData, children }) {
   const [clientes, setClientes] = useState([]);
   const [facturasGlobales, setFacturasGlobales] = useState([]);
   const [solicitudes, setSolicitudes] = useState([]);
+  const [solicitudesNotasCredito, setSolicitudesNotasCredito] = useState([]);
   const [actividad, setActividad] = useState([]);
   const [usuarios, setUsuarios] = useState([]);
   const [statsDB, setStatsDB] = useState({
@@ -115,6 +120,7 @@ function GlobalDataProvider({ authData, children }) {
     total_liquidado: 0,
     cobrado_historico: 0,
     abonos_registrados: 0,
+    total_notas_credito: 0,
   });
 
   useEffect(() => {
@@ -216,11 +222,41 @@ function GlobalDataProvider({ authData, children }) {
       },
     );
 
+    const qSolicitudesNotasCredito = query(
+      collection(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION),
+      orderBy("createdAt", "desc"),
+      limit(100),
+    );
+
+    const unsubSolicitudesNotasCredito = onSnapshot(
+      qSolicitudesNotasCredito,
+      (snap) => {
+        const dataNormalizada = snap.docs.map((documento) => {
+          const data = documento.data();
+
+          return {
+            id: documento.id,
+            ...data,
+            fecha: formatearFechaSegura(
+              data.createdAt || data.fecha,
+              "Sin fecha",
+            ),
+          };
+        });
+
+        setSolicitudesNotasCredito(dataNormalizada);
+      },
+      (error) => {
+        console.error("Error escuchando solicitudes de notas de crédito:", error);
+      },
+    );
+
     return () => {
       unsubClientes();
       unsubStats();
       unsubActividad();
       unsubSolicitudes();
+      unsubSolicitudesNotasCredito();
       unsubUsuarios();
     };
   }, [actorUid, userRole]);
@@ -275,6 +311,7 @@ function GlobalDataProvider({ authData, children }) {
       total_liquidado: Number(statsDB.total_liquidado) || 0,
       cobrado_historico: Number(statsDB.cobrado_historico) || 0,
       abonos_registrados: Number(statsDB.abonos_registrados) || 0,
+      total_notas_credito: Number(statsDB.total_notas_credito) || 0,
     };
   }, [clientes, statsDB]);
 
@@ -337,6 +374,91 @@ function GlobalDataProvider({ authData, children }) {
     [actorUid, userName],
   );
 
+
+  const aplicarNotaCreditoEnNube = useCallback(
+    async (factura, montoNota, motivo, observaciones = "") => {
+      if (userRole !== "SU") {
+        return {
+          success: false,
+          error: "Solo el SU puede aplicar notas de crédito.",
+        };
+      }
+
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return facturasService.aplicarNotaCredito({
+        factura,
+        montoNota,
+        motivo,
+        observaciones,
+        userName,
+        actor_uid: actorUid,
+      });
+    },
+    [actorUid, userName, userRole],
+  );
+
+
+  const solicitarNotaCreditoEnNube = useCallback(
+    async (factura, montoNota, motivo, observaciones = "") => {
+      if (userRole !== "ADMIN") {
+        return {
+          success: false,
+          error: "Solo el ADMIN puede solicitar notas de crédito.",
+        };
+      }
+
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return solicitudesService.crearSolicitudNotaCredito({
+        factura,
+        montoNota,
+        motivo,
+        observaciones,
+        solicitado_por_uid: actorUid,
+        solicitado_por_nombre: userName || "ADMIN",
+      });
+    },
+    [actorUid, userName, userRole],
+  );
+
+  const cancelarNotaCreditoEnNube = useCallback(
+    async (factura, idNota, motivoCancelacion = "") => {
+      if (userRole !== "SU") {
+        return {
+          success: false,
+          error: "Solo el SU puede cancelar notas de crédito.",
+        };
+      }
+
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return facturasService.cancelarNotaCredito({
+        factura,
+        idNota,
+        motivoCancelacion,
+        userName,
+        actor_uid: actorUid,
+      });
+    },
+    [actorUid, userName, userRole],
+  );
+
   const modificarFacturaEnNube = useCallback(
     async (idFactura, formData) => {
       if (!actorUid) {
@@ -382,7 +504,7 @@ function GlobalDataProvider({ authData, children }) {
   );
 
   const eliminarClienteEnNube = useCallback(
-    async (id, nombreCliente) => {
+    async (id, nombreCliente, motivo) => {
       if (!actorUid) {
         return {
           success: false,
@@ -395,6 +517,27 @@ function GlobalDataProvider({ authData, children }) {
         nombreCliente,
         userName,
         actorUid,
+        motivo,
+      );
+    },
+    [actorUid, userName],
+  );
+
+  const reactivarClienteEnNube = useCallback(
+    async (id, nombreCliente, motivo) => {
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return clientesService.reactivarCliente(
+        id,
+        nombreCliente,
+        userName,
+        actorUid,
+        motivo,
       );
     },
     [actorUid, userName],
@@ -418,6 +561,7 @@ function GlobalDataProvider({ authData, children }) {
       clientes,
       setClientes,
       eliminarClienteEnNube,
+      reactivarClienteEnNube,
       facturas,
       setFacturas: setFacturasGlobales,
       crearFacturaEnNube,
@@ -425,10 +569,15 @@ function GlobalDataProvider({ authData, children }) {
       eliminarFacturaEnNube,
       registrarAbonoEnNube,
       eliminarAbonoEnNube,
+      aplicarNotaCreditoEnNube,
+      solicitarNotaCreditoEnNube,
+      cancelarNotaCreditoEnNube,
       actividad: actividadVisible,
       setActividad,
       solicitudes,
       setSolicitudes,
+      solicitudesNotasCredito,
+      setSolicitudesNotasCredito,
       usuarios: usuariosVisibles,
     }),
     [
@@ -436,14 +585,19 @@ function GlobalDataProvider({ authData, children }) {
       stats,
       clientes,
       eliminarClienteEnNube,
+      reactivarClienteEnNube,
       facturas,
       crearFacturaEnNube,
       modificarFacturaEnNube,
       eliminarFacturaEnNube,
       registrarAbonoEnNube,
       eliminarAbonoEnNube,
+      aplicarNotaCreditoEnNube,
+      solicitarNotaCreditoEnNube,
+      cancelarNotaCreditoEnNube,
       actividadVisible,
       solicitudes,
+      solicitudesNotasCredito,
       usuariosVisibles,
     ],
   );

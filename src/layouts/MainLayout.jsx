@@ -1,38 +1,62 @@
-import { useContext } from "react";
+import { useContext, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { signOut } from "firebase/auth";
 import {
-  Home,
-  Users,
-  FileText,
   Calendar,
+  FileText,
+  Home,
   LogOut,
+  Menu,
   Shield,
+  Users,
+  X,
 } from "lucide-react";
 
 import { auth } from "../config/firebase";
 import { GlobalContext } from "../context/GlobalContext";
 import logoMLH from "../assets/MLH LOGO1.png";
 
+function BotonSalir({ onClick, mobile = false }) {
+  if (mobile) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label="Cerrar sesión"
+        className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm font-black text-red-100 transition active:scale-[0.98] active:bg-red-500/20"
+      >
+        <LogOut className="h-4 w-4" />
+        Cerrar sesión
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Cerrar sesión"
+      title="Cerrar sesión"
+      className="group relative flex h-11 w-11 cursor-pointer items-center justify-start overflow-hidden rounded-full border border-red-400/40 bg-red-500/10 shadow-sm transition-all duration-200 hover:w-32 hover:rounded-xl hover:border-red-300/60 hover:bg-red-500/15 active:translate-x-1 active:translate-y-1"
+    >
+      <div className="flex w-full items-center justify-center transition-all duration-300 group-hover:justify-start group-hover:px-3">
+        <LogOut className="h-4 w-4 text-red-300" />
+      </div>
+
+      <span className="absolute right-5 translate-x-full text-sm font-black text-red-200 opacity-0 transition-all duration-300 group-hover:translate-x-0 group-hover:opacity-100">
+        Salir
+      </span>
+    </button>
+  );
+}
+
 export default function MainLayout() {
   const navigate = useNavigate();
-
   const { userName, userRole, stats } = useContext(GlobalContext);
+  const [menuAbierto, setMenuAbierto] = useState(false);
 
-  const facturasPendientesCount =
-    Number(stats?.facturas_pendientes) || 0;
-
-  const handleCerrarSesion = async () => {
-    try {
-      await signOut(auth);
-      navigate("/login", { replace: true });
-    } catch (error) {
-      console.error(
-        "Error al cerrar sesión:",
-        error,
-      );
-    }
-  };
+  const facturasPendientesCount = Number(stats?.facturas_pendientes) || 0;
+  const esSU = userRole === "SU";
 
   const navItems = [
     {
@@ -46,17 +70,17 @@ export default function MainLayout() {
       icon: Users,
     },
     {
-      name: "Facturas",
+      name: "Facturación",
       path: "/facturas",
       icon: FileText,
       badge: facturasPendientesCount,
     },
     {
-      name: "Agenda",
+      name: "Calendario",
       path: "/calendario",
       icon: Calendar,
     },
-    ...(userRole === "SU"
+    ...(esSU
       ? [
           {
             name: "Panel SU",
@@ -67,182 +91,170 @@ export default function MainLayout() {
       : []),
   ];
 
-  const obtenerNombreVisible = (itemName) => {
-    if (itemName === "Facturas") {
-      return "Facturación y Pagos";
+  const handleCerrarSesion = async () => {
+    try {
+      setMenuAbierto(false);
+      await signOut(auth);
+      navigate("/login", { replace: true });
+    } catch (error) {
+      console.error("Error al cerrar sesión:", error);
     }
-
-    if (itemName === "Agenda") {
-      return "Calendario";
-    }
-
-    return itemName;
   };
 
-  return (
-    <div className="flex h-screen w-full overflow-hidden bg-[#f4f6f8] font-sans relative">
-      <aside className="hidden md:flex w-64 bg-[#0a192f] flex-col flex-shrink-0 z-20 shadow-xl">
-        <div className="h-28 flex items-center justify-center p-4 shrink-0">
-          <img
-            src={logoMLH}
-            alt="MLH Cobranza"
-            className="max-h-full object-contain"
+  const renderNavLink = (item, modo = "desktop") => (
+    <NavLink
+      key={item.path}
+      to={item.path}
+      end={item.path === "/"}
+      onClick={() => setMenuAbierto(false)}
+      className={({ isActive }) => {
+        if (modo === "mobile") {
+          return `group relative flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-black transition-all duration-150 active:scale-[0.98] ${
+            isActive
+              ? "bg-white/10 text-[#ffd700]"
+              : "text-gray-300 active:bg-white/5"
+          }`;
+        }
+
+        return `group relative flex h-14 items-center gap-2 px-3 text-sm font-black transition-all duration-200 hover:scale-[1.04] active:scale-[0.97] ${
+          isActive ? "text-[#ffd700]" : "text-gray-300 hover:text-[#ffd700]"
+        }`;
+      }}
+    >
+      {({ isActive }) => (
+        <>
+          <item.icon
+            className={`shrink-0 transition-all duration-200 ${
+              modo === "mobile" ? "h-5 w-5" : "h-4 w-4"
+            } ${
+              isActive
+                ? "text-[#ffd700]"
+                : "text-gray-400 group-hover:text-[#ffd700]"
+            }`}
           />
-        </div>
 
-        <nav className="flex-1 overflow-y-auto px-3 py-6 space-y-1 custom-scrollbar">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              end={item.path === "/"}
-              className={({ isActive }) =>
-                `flex items-center px-3 py-2.5 rounded-md transition-all ${
-                  isActive
-                    ? "bg-[#ffd700] text-[#0a192f] font-bold shadow-md shadow-[#ffd700]/10"
-                    : "text-gray-300 hover:bg-[#112240] hover:text-white"
-                }`
-              }
+          <span className="min-w-0 truncate whitespace-nowrap">{item.name}</span>
+
+          {Number(item.badge) > 0 && (
+            <span
+              className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-black transition-all duration-200 ${
+                isActive
+                  ? "bg-[#ffd700] text-[#0a192f]"
+                  : "bg-[#112240] text-gray-200 group-hover:bg-[#ffd700] group-hover:text-[#0a192f]"
+              }`}
             >
-              {({ isActive }) => (
-                <>
-                  <item.icon
-                    className={`h-5 w-5 mr-3 shrink-0 ${
-                      isActive
-                        ? "text-[#0a192f]"
-                        : "text-gray-400"
-                    }`}
-                  />
+              {item.badge}
+            </span>
+          )}
 
-                  <span className="flex-1 text-sm">
-                    {obtenerNombreVisible(item.name)}
-                  </span>
+          <span
+            className={`absolute bottom-1 left-1/2 h-[2px] -translate-x-1/2 rounded-full bg-[#ffd700] transition-all duration-300 ${
+              isActive && modo !== "mobile" ? "w-[72%]" : "w-0"
+            }`}
+          />
+        </>
+      )}
+    </NavLink>
+  );
 
-                  {Number(item.badge) > 0 && (
-                    <span
-                      className={`px-2 py-0.5 text-[10px] rounded-full font-black ${
-                        isActive
-                          ? "bg-[#0a192f] text-[#ffd700]"
-                          : "bg-[#112240] text-gray-300"
-                      }`}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
-                </>
-              )}
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="p-4 border-t border-[#112240] shrink-0 bg-black/10">
+  return (
+    <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#e8e8e8] font-sans">
+      <header className="shrink-0 bg-transparent px-3 pb-2 pt-[calc(0.5rem+env(safe-area-inset-top))] md:px-5 md:py-3">
+        <div className="flex min-h-[58px] items-center justify-between rounded-[1.75rem] bg-[#0a192f] px-3 shadow-[0_10px_24px_rgba(10,25,47,0.14)] md:min-h-[72px] md:px-6">
           <button
             type="button"
-            onClick={handleCerrarSesion}
-            className="flex items-center justify-center w-full px-3 py-3 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-md transition-colors uppercase tracking-wider font-bold text-xs"
+            onClick={() => navigate("/")}
+            className="flex min-w-0 items-center transition-transform duration-200 hover:scale-[1.03] active:scale-[0.98]"
+            aria-label="Ir al inicio"
           >
-            <LogOut className="h-4 w-4 mr-2 shrink-0" />
-            <span>Cerrar Sesión</span>
-          </button>
-        </div>
-      </aside>
-
-      <main className="flex-1 flex flex-col overflow-hidden min-w-0 bg-[#f4f6f8]">
-        <header className="h-20 md:h-16 bg-white border-b border-gray-200 flex items-center justify-between md:justify-end px-4 md:px-8 shrink-0 shadow-sm z-10">
-          <div className="flex md:hidden items-center">
             <img
               src={logoMLH}
               alt="MLH Cobranza"
-              className="h-12 sm:h-14 object-contain"
+              className="h-14 w-auto object-contain md:h-16"
             />
-          </div>
+          </button>
 
-          <div className="flex items-center space-x-3 md:space-x-4">
-            <div className="text-right flex flex-col justify-center">
-              <span className="text-sm font-black text-[#0a192f] leading-none">
-                {userName || "Usuario"}
-              </span>
+          <nav className="hidden items-center gap-4 lg:flex">
+            {navItems.map((item) => renderNavLink(item))}
+          </nav>
 
-              <span
-                className={`text-[9px] font-black uppercase tracking-widest mt-1.5 md:mt-1 w-fit ml-auto px-1.5 py-0.5 rounded border ${
-                  userRole === "SU"
-                    ? "bg-amber-50 text-amber-600 border-amber-200 shadow-sm"
-                    : "bg-blue-50 text-blue-600 border-blue-200 shadow-sm"
+          <div className="hidden items-center gap-4 lg:flex">
+            <div className="text-right">
+              <p className="text-sm font-black leading-none text-white">
+                {userName || "Usuario MLH"}
+              </p>
+
+              <p
+                className={`mt-1 text-[10px] font-black uppercase tracking-[0.22em] ${
+                  esSU ? "text-[#ffd700]" : "text-blue-300"
                 }`}
               >
-                {userRole === "SU"
-                  ? "SÚPER USUARIO"
-                  : userRole || "ADMIN"}
-              </span>
+                {esSU ? "Súper Usuario" : userRole || "Admin"}
+              </p>
+            </div>
+
+            <BotonSalir onClick={handleCerrarSesion} />
+          </div>
+
+          <div className="flex min-w-0 items-center gap-2 lg:hidden">
+            <div className="hidden min-w-0 text-right sm:block">
+              <p className="truncate text-xs font-black leading-none text-white">
+                {userName || "Usuario MLH"}
+              </p>
+
+              <p
+                className={`mt-1 text-[9px] font-black uppercase tracking-[0.18em] ${
+                  esSU ? "text-[#ffd700]" : "text-blue-300"
+                }`}
+              >
+                {esSU ? "SU" : userRole || "Admin"}
+              </p>
             </div>
 
             <button
               type="button"
-              onClick={handleCerrarSesion}
-              aria-label="Cerrar sesión"
-              title="Cerrar sesión"
-              className="md:hidden ml-1 p-2.5 rounded-xl bg-red-50 text-red-500 active:bg-red-100 transition-colors"
+              onClick={() => setMenuAbierto((prev) => !prev)}
+              aria-label={menuAbierto ? "Cerrar menú" : "Abrir menú"}
+              aria-expanded={menuAbierto}
+              className="rounded-full border border-white/10 bg-white/5 p-3 text-white transition-all duration-150 active:scale-[0.96] active:bg-white/10"
             >
-              <LogOut className="h-5 w-5" />
+              {menuAbierto ? (
+                <X className="h-5 w-5" />
+              ) : (
+                <Menu className="h-5 w-5" />
+              )}
             </button>
           </div>
-        </header>
-
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-8 pb-24 md:pb-8 custom-scrollbar">
-          <Outlet />
         </div>
+
+        {menuAbierto && (
+          <div className="mt-2 max-h-[calc(100dvh-84px)] overflow-y-auto rounded-[1.5rem] bg-[#0a192f] p-3 shadow-[0_16px_35px_rgba(10,25,47,0.20)] lg:hidden">
+            <div className="mb-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+              <p className="truncate text-sm font-black text-white">
+                {userName || "Usuario MLH"}
+              </p>
+
+              <p
+                className={`mt-1 text-[10px] font-black uppercase tracking-[0.22em] ${
+                  esSU ? "text-[#ffd700]" : "text-blue-300"
+                }`}
+              >
+                {esSU ? "Súper Usuario" : userRole || "Admin"}
+              </p>
+            </div>
+
+            <nav className="space-y-1">
+              {navItems.map((item) => renderNavLink(item, "mobile"))}
+            </nav>
+
+            <BotonSalir onClick={handleCerrarSesion} mobile />
+          </div>
+        )}
+      </header>
+
+      <main className="custom-scrollbar min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden bg-[#e8e8e8] px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2 md:p-8 md:pt-4">
+        <Outlet />
       </main>
-
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-[#0a192f] shadow-[0_-4px_15px_rgba(0,0,0,0.15)] z-40 flex justify-around items-center px-1 safe-area-pb">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            end={item.path === "/"}
-            className={({ isActive }) =>
-              `flex flex-col items-center justify-center w-full h-full space-y-1 relative transition-colors ${
-                isActive
-                  ? "text-[#ffd700]"
-                  : "text-gray-400 hover:text-gray-200"
-              }`
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <div className="relative">
-                  <item.icon
-                    className={`h-5 w-5 transition-transform duration-200 ${
-                      isActive
-                        ? "scale-110"
-                        : "scale-100"
-                    }`}
-                  />
-
-                  {Number(item.badge) > 0 && (
-                    <span className="absolute -top-1.5 -right-2 bg-red-500 text-white text-[9px] font-black px-1.5 rounded-full border-2 border-[#0a192f]">
-                      {item.badge}
-                    </span>
-                  )}
-                </div>
-
-                <span
-                  className={`text-[9px] font-bold tracking-wider uppercase transition-all ${
-                    isActive
-                      ? "opacity-100"
-                      : "opacity-70"
-                  }`}
-                >
-                  {item.name}
-                </span>
-
-                {isActive && (
-                  <div className="absolute bottom-0 w-8 h-0.5 bg-[#ffd700] rounded-t-full" />
-                )}
-              </>
-            )}
-          </NavLink>
-        ))}
-      </nav>
     </div>
   );
 }

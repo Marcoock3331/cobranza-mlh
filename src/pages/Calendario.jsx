@@ -141,9 +141,9 @@ function ContadorCategoria({ categoria, cantidad, onClick, compacto = false }) {
 
 function ModalBase({ children, onClose, maxWidth = "max-w-2xl" }) {
   return (
-    <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-sm flex items-end md:items-center justify-center md:p-4">
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-black/55 p-3 backdrop-blur-sm md:items-center md:p-4">
       <div
-        className={`bg-white w-full ${maxWidth} max-h-[94vh] rounded-t-3xl md:rounded-2xl shadow-2xl overflow-hidden flex flex-col`}
+        className={`flex max-h-[92dvh] w-full ${maxWidth} flex-col overflow-hidden rounded-t-3xl bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl md:rounded-2xl md:pb-0`}
       >
         <div className="md:hidden h-1.5 w-12 bg-gray-200 rounded-full mx-auto mt-3 shrink-0" />
         <button

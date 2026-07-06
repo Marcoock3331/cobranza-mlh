@@ -2,10 +2,16 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
+import {
+  doc,
+  onSnapshot,
+  serverTimestamp,
+  updateDoc,
+} from "firebase/firestore";
 import { auth, db } from "../config/firebase";
 import { AuthContext } from "./AuthContext";
 
@@ -15,8 +21,10 @@ export const AuthProvider = ({ children }) => {
   const [userName, setUserName] = useState("");
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const ultimoAccesoRegistradoRef = useRef(null);
 
   const limpiarContexto = useCallback(() => {
+    ultimoAccesoRegistradoRef.current = null;
     setCurrentUser(null);
     setUserRole(null);
     setUserName("");
@@ -59,6 +67,22 @@ export const AuthProvider = ({ children }) => {
       await logoutSesion();
     };
 
+    const registrarUltimaEntrada = (userRef, uid) => {
+      if (ultimoAccesoRegistradoRef.current === uid) {
+        return;
+      }
+
+      ultimoAccesoRegistradoRef.current = uid;
+
+      updateDoc(userRef, {
+        ultima_entrada: serverTimestamp(),
+        ultimoLogin: serverTimestamp(),
+        fecha_actualizacion: serverTimestamp(),
+      }).catch((error) => {
+        console.warn("No se pudo registrar la última entrada:", error);
+      });
+    };
+
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       detenerEscuchaPerfil();
 
@@ -99,6 +123,8 @@ export const AuthProvider = ({ children }) => {
             );
             return;
           }
+
+          registrarUltimaEntrada(userRef, user.uid);
 
           setCurrentUser(user);
           setUserRole(rolNormalizado);

@@ -1,9 +1,8 @@
-import { useContext, useMemo, useState } from "react";
+import { useContext, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpDown,
   CheckCircle,
-  ChevronLeft,
   ChevronRight,
   Loader2,
   MoreVertical,
@@ -18,6 +17,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { GlobalContext } from "../context/GlobalContext";
 import { useClientes } from "../hooks/useClientes";
+import PaginacionGlobal from "../components/ui/PaginacionGlobal";
 
 const CLIENTES_POR_PAGINA = 12;
 
@@ -60,14 +60,13 @@ const OPCIONES_ORDEN = [
 ];
 
 const FILTROS_RAPIDOS = [
-  { value: "todos", label: "Todos", descripcion: "Activos" },
   { value: "con-deuda", label: "Con deuda", descripcion: "Saldo pendiente" },
   {
     value: "contacto-incompleto",
     label: "Contacto incompleto",
-    descripcion: "Con deuda y sin teléfono",
+    descripcion: "Sin teléfono o correo",
   },
-  { value: "sin-telefono", label: "Sin teléfono", descripcion: "Teléfono inválido" },
+  { value: "inactivos", label: "Inactivos", descripcion: "Clientes dados de baja" },
 ];
 
 const ESTADO_INICIAL = {
@@ -79,9 +78,12 @@ const ESTADO_INICIAL = {
   direccion: "",
   ultima_fecha_pago: "",
   limite_credito: "",
+  linea_credito_autorizado_por: "",
+  linea_credito_motivo: "",
   segmentacion: "Nuevo",
   grupo: "GENERAL",
   dias_mensaje: "",
+  pagare_inicial: "",
   pagare_monto: 0,
   pagare_fecha: "",
   notas: "",
@@ -173,18 +175,32 @@ const telefonoValido = (telefono = "") => {
 
 const clienteTieneDeuda = (cliente) => Number(cliente?.deuda_actual) > 0;
 
-const clienteContactoIncompleto = (cliente) =>
-  clienteTieneDeuda(cliente) && !telefonoValido(cliente?.telefono);
+const correoValido = (correo = "") =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(correo || "").trim());
 
-const clienteSinTelefono = (cliente) => !telefonoValido(cliente?.telefono);
+const clienteContactoIncompleto = (cliente) =>
+  !telefonoValido(cliente?.telefono) || !correoValido(cliente?.correo);
+
+const clienteInactivo = (cliente) =>
+  cliente?.activo === false || cliente?.estatus === "Inactivo";
 
 export default function Clientes() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const filtroRapido = searchParams.get("filtro") || "todos";
+  const [searchParams] = useSearchParams();
+  const filtroInicialUrl = searchParams.get("filtro") || "";
 
-  const { userRole, userName, clientes, eliminarClienteEnNube } =
-    useContext(GlobalContext);
+  const {
+    userRole,
+    userName,
+    clientes,
+    eliminarClienteEnNube,
+    reactivarClienteEnNube,
+  } = useContext(GlobalContext);
+
+  const rolActual = String(userRole || "").trim().toUpperCase();
+
+  const puedeGestionarEstadoCliente =
+    rolActual === "SU" || rolActual === "ADMIN";
 
   const { registrarNuevoCliente, isSubmitting } = useClientes();
 
@@ -199,25 +215,31 @@ export default function Clientes() {
   const [busqueda, setBusqueda] = useState("");
   const [ordenClientes, setOrdenClientes] = useState("nombre_asc");
   const [paginaActual, setPaginaActual] = useState(1);
+  const listaClientesRef = useRef(null);
+  const [filtrosRapidosActivos, setFiltrosRapidosActivos] = useState(() => {
+    if (["con-deuda", "contacto-incompleto", "inactivos"].includes(filtroInicialUrl)) {
+      return [filtroInicialUrl];
+    }
+
+    return [];
+  });
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [menuAbiertoId, setMenuAbiertoId] = useState(null);
 
-  const [clienteAInactivar, setClienteAInactivar] = useState(null);
+  const [clienteEstadoPendiente, setClienteEstadoPendiente] = useState(null);
+  const [accionEstadoCliente, setAccionEstadoCliente] = useState("inactivar");
+  const [motivoEstadoCliente, setMotivoEstadoCliente] = useState("");
   const [isInactivating, setIsInactivating] = useState(false);
 
   const [formData, setFormData] = useState(ESTADO_INICIAL);
 
   const cambiarFiltroRapido = (nuevoFiltro) => {
-    const params = new URLSearchParams(searchParams);
-
-    if (nuevoFiltro === "todos") {
-      params.delete("filtro");
-    } else {
-      params.set("filtro", nuevoFiltro);
-    }
-
-    setSearchParams(params, { replace: true });
+    setFiltrosRapidosActivos((previos) =>
+      previos.includes(nuevoFiltro)
+        ? previos.filter((filtro) => filtro !== nuevoFiltro)
+        : [...previos, nuevoFiltro],
+    );
     setPaginaActual(1);
   };
 
@@ -250,11 +272,9 @@ export default function Clientes() {
     );
 
     return {
-      todos: activos.length,
       "con-deuda": activos.filter(clienteTieneDeuda).length,
-      "contacto-incompleto": activos.filter(clienteContactoIncompleto)
-        .length,
-      "sin-telefono": activos.filter(clienteSinTelefono).length,
+      "contacto-incompleto": activos.filter(clienteContactoIncompleto).length,
+      inactivos: (Array.isArray(clientes) ? clientes : []).filter(clienteInactivo).length,
     };
   }, [clientes]);
 
@@ -263,10 +283,11 @@ export default function Clientes() {
 
     const lista = (Array.isArray(clientes) ? clientes : []).filter(
       (cliente) => {
-        if (
-          cliente?.activo === false ||
-          cliente?.estatus === "Inactivo"
-        ) {
+        const mostrarInactivos = filtrosRapidosActivos.includes("inactivos");
+
+        if (mostrarInactivos) {
+          if (!clienteInactivo(cliente)) return false;
+        } else if (clienteInactivo(cliente)) {
           return false;
         }
 
@@ -289,12 +310,15 @@ export default function Clientes() {
             textoBusqueda,
           );
 
-        const coincideFiltroRapido =
-          filtroRapido === "todos" ||
-          (filtroRapido === "con-deuda" && clienteTieneDeuda(cliente)) ||
-          (filtroRapido === "contacto-incompleto" &&
-            clienteContactoIncompleto(cliente)) ||
-          (filtroRapido === "sin-telefono" && clienteSinTelefono(cliente));
+        const coincideFiltroRapido = filtrosRapidosActivos.every((filtro) => {
+          if (filtro === "inactivos") return true;
+          if (filtro === "con-deuda") return clienteTieneDeuda(cliente);
+          if (filtro === "contacto-incompleto") {
+            return clienteContactoIncompleto(cliente);
+          }
+
+          return true;
+        });
 
         return coincideGrupo && coincideBusqueda && coincideFiltroRapido;
       },
@@ -346,7 +370,7 @@ export default function Clientes() {
         sensitivity: "base",
       });
     });
-  }, [clientes, grupoActivo, busqueda, filtroRapido, ordenClientes]);
+  }, [clientes, grupoActivo, busqueda, filtrosRapidosActivos, ordenClientes]);
 
   const totalPaginas = Math.max(
     1,
@@ -363,13 +387,6 @@ export default function Clientes() {
   const cambiarPagina = (nuevaPagina) => {
     const destino = Math.min(Math.max(nuevaPagina, 1), totalPaginas);
     setPaginaActual(destino);
-
-    window.requestAnimationFrame(() => {
-      document.getElementById("lista-clientes")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
   };
 
   const handleInputChange = (event) => {
@@ -411,30 +428,46 @@ export default function Clientes() {
     );
   };
 
-  const confirmarInactivacion = async () => {
-    if (!clienteAInactivar) return;
+  const abrirCambioEstadoCliente = (cliente, accion) => {
+    setClienteEstadoPendiente(cliente);
+    setAccionEstadoCliente(accion);
+    setMotivoEstadoCliente("");
+    setMenuAbiertoId(null);
+  };
+
+  const confirmarCambioEstadoCliente = async () => {
+    if (!clienteEstadoPendiente || !motivoEstadoCliente.trim()) return;
 
     setIsInactivating(true);
 
     try {
-      const respuesta = await eliminarClienteEnNube(
-        clienteAInactivar.id,
-        clienteAInactivar.nombre,
+      const servicio =
+        accionEstadoCliente === "reactivar"
+          ? reactivarClienteEnNube
+          : eliminarClienteEnNube;
+
+      const respuesta = await servicio(
+        clienteEstadoPendiente.id,
+        clienteEstadoPendiente.nombre,
+        motivoEstadoCliente.trim(),
       );
 
       if (respuesta?.success) {
         mostrarNotificacion(
-          "Inactivado",
-          "Cliente inactivado correctamente.",
+          accionEstadoCliente === "reactivar" ? "Reactivado" : "Inactivado",
+          accionEstadoCliente === "reactivar"
+            ? "Cliente reactivado correctamente."
+            : "Cliente inactivado correctamente.",
         );
-        setClienteAInactivar(null);
+        setClienteEstadoPendiente(null);
+        setMotivoEstadoCliente("");
         return;
       }
 
       mostrarNotificacion(
         "Error",
         respuesta?.error ||
-          "No se pudo inactivar el expediente.",
+          `No se pudo ${accionEstadoCliente === "reactivar" ? "reactivar" : "inactivar"} el expediente.`,
         "error",
       );
     } finally {
@@ -498,7 +531,7 @@ export default function Clientes() {
     >
       {notificacion.visible && (
         <div
-          className={`fixed top-4 right-4 left-4 sm:left-auto z-[100] p-4 rounded-xl shadow-lg border flex items-start gap-3 sm:w-80 animate-slide-in-right ${
+          className={`fixed left-4 right-4 top-[calc(1rem+env(safe-area-inset-top))] sm:left-auto z-[100] p-4 rounded-xl shadow-lg border flex items-start gap-3 sm:w-80 animate-slide-in-right ${
             notificacion.tipo === "error"
               ? "bg-red-50 border-red-200 text-red-800"
               : "bg-green-50 border-green-200 text-green-800"
@@ -608,7 +641,7 @@ export default function Clientes() {
 
         <div className="flex gap-2 overflow-x-auto mt-3 pb-1 custom-scrollbar">
           {FILTROS_RAPIDOS.map((filtro) => {
-            const activo = filtroRapido === filtro.value;
+            const activo = filtrosRapidosActivos.includes(filtro.value);
             const cantidad = resumenFiltrosRapidos[filtro.value] || 0;
 
             return (
@@ -639,11 +672,11 @@ export default function Clientes() {
         </div>
 
         <p className="text-[10px] md:text-xs text-gray-400 mt-3">
-          {clientesFiltrados.length} cliente(s) visibles. Página {paginaSegura} de {totalPaginas}. La clasificación describe el comportamiento de pago, el grupo identifica la cartera comercial y el filtro Contacto incompleto muestra clientes con deuda sin teléfono válido.
+          {clientesFiltrados.length} cliente(s) visibles. El grupo superior inicia en Todos y los filtros rápidos se activan o desactivan manualmente.
         </p>
       </div>
 
-      <div id="lista-clientes" className="scroll-mt-24">
+      <div id="lista-clientes" ref={listaClientesRef} className="scroll-mt-24">
         <div className="md:hidden space-y-2.5">
           {clientesFiltrados.length === 0 ? (
             <div className="bg-white border border-gray-200 rounded-2xl p-7 text-center shadow-sm">
@@ -684,7 +717,7 @@ export default function Clientes() {
                       </p>
                     </button>
 
-                    {userRole === "SU" && (
+                    {puedeGestionarEstadoCliente && (
                       <div className="relative shrink-0">
                         <button
                           type="button"
@@ -706,13 +739,23 @@ export default function Clientes() {
                               type="button"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setClienteAInactivar(cliente);
-                                setMenuAbiertoId(null);
+                                abrirCambioEstadoCliente(
+                                  cliente,
+                                  clienteInactivo(cliente) ? "reactivar" : "inactivar",
+                                );
                               }}
-                              className="w-full px-3 py-2.5 text-xs font-bold text-red-600 active:bg-red-50 flex items-center"
+                              className={`w-full px-3 py-2.5 text-xs font-bold flex items-center ${
+                                clienteInactivo(cliente)
+                                  ? "text-green-600 active:bg-green-50"
+                                  : "text-red-600 active:bg-red-50"
+                              }`}
                             >
-                              <Trash2 className="h-3.5 w-3.5 mr-2" />
-                              Inactivar
+                              {clienteInactivo(cliente) ? (
+                                <CheckCircle className="h-3.5 w-3.5 mr-2" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5 mr-2" />
+                              )}
+                              {clienteInactivo(cliente) ? "Reactivar" : "Inactivar"}
                             </button>
                           </div>
                         )}
@@ -743,9 +786,9 @@ export default function Clientes() {
                       </span>
                     )}
 
-                    {clienteContactoIncompleto(cliente) && (
-                      <span className="inline-flex px-2 py-1 rounded-full text-[9px] font-black border bg-red-50 text-red-700 border-red-200">
-                        Contacto incompleto
+                    {clienteInactivo(cliente) && (
+                      <span className="inline-flex px-2 py-1 rounded-full text-[9px] font-black border bg-gray-100 text-gray-700 border-gray-200">
+                        Inactivo
                       </span>
                     )}
                   </div>
@@ -810,7 +853,7 @@ export default function Clientes() {
               <col className="w-[16%]" />
               <col className="w-[12%]" />
               <col className="w-[12%]" />
-              {userRole === "SU" && <col className="w-[4%]" />}
+              {puedeGestionarEstadoCliente && <col className="w-[4%]" />}
             </colgroup>
 
             <thead>
@@ -830,7 +873,7 @@ export default function Clientes() {
                 <th className="px-3 lg:px-4 py-3.5 text-right border-b border-[#0a192f] text-[10px] lg:text-xs">
                   Crédito
                 </th>
-                {userRole === "SU" && (
+                {puedeGestionarEstadoCliente && (
                   <th className="px-2 py-3.5 text-center border-b border-[#0a192f] rounded-tr-xl">
                     <span className="sr-only">Acciones</span>
                   </th>
@@ -842,7 +885,7 @@ export default function Clientes() {
               {clientesFiltrados.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={userRole === "SU" ? 6 : 5}
+                    colSpan={puedeGestionarEstadoCliente ? 6 : 5}
                     className="px-6 py-12 text-center text-gray-500 font-medium"
                   >
                     No hay clientes registrados o no coinciden con la búsqueda.
@@ -915,7 +958,7 @@ export default function Clientes() {
                       ${formatearMoneda(cliente.limite_credito, 0)}
                     </td>
 
-                    {userRole === "SU" && (
+                    {puedeGestionarEstadoCliente && (
                       <td className="px-1 py-3 text-center relative">
                         <button
                           type="button"
@@ -937,13 +980,23 @@ export default function Clientes() {
                               type="button"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setClienteAInactivar(cliente);
-                                setMenuAbiertoId(null);
+                                abrirCambioEstadoCliente(
+                                  cliente,
+                                  clienteInactivo(cliente) ? "reactivar" : "inactivar",
+                                );
                               }}
-                              className="w-full px-3 py-2.5 text-xs text-red-600 hover:bg-red-50 flex items-center transition-colors"
+                              className={`w-full px-3 py-2.5 text-xs flex items-center transition-colors ${
+                                clienteInactivo(cliente)
+                                  ? "text-green-600 hover:bg-green-50"
+                                  : "text-red-600 hover:bg-red-50"
+                              }`}
                             >
-                              <Trash2 className="h-3.5 w-3.5 mr-2" />
-                              Inactivar
+                              {clienteInactivo(cliente) ? (
+                                <CheckCircle className="h-3.5 w-3.5 mr-2" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5 mr-2" />
+                              )}
+                              {clienteInactivo(cliente) ? "Reactivar" : "Inactivar"}
                             </button>
                           </div>
                         )}
@@ -956,70 +1009,72 @@ export default function Clientes() {
           </table>
         </div>
 
-        {clientesFiltrados.length > 0 && totalPaginas > 1 && (
-          <div className="mt-3 bg-white border border-gray-100 rounded-xl shadow-sm px-3 py-2.5 flex items-center justify-between gap-3">
-            <p className="text-[10px] md:text-xs text-gray-500">
-              Mostrando {indiceInicial + 1}–{Math.min(
-                indiceInicial + CLIENTES_POR_PAGINA,
-                clientesFiltrados.length,
-              )} de {clientesFiltrados.length}
-            </p>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => cambiarPagina(paginaSegura - 1)}
-                disabled={paginaSegura <= 1}
-                className="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                aria-label="Página anterior"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-
-              <span className="min-w-20 text-center text-[10px] md:text-xs font-black text-[#0a192f]">
-                Página {paginaSegura} de {totalPaginas}
-              </span>
-
-              <button
-                type="button"
-                onClick={() => cambiarPagina(paginaSegura + 1)}
-                disabled={paginaSegura >= totalPaginas}
-                className="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                aria-label="Página siguiente"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        )}
+        <PaginacionGlobal
+          pagina={paginaSegura}
+          totalPaginas={totalPaginas}
+          totalRegistros={clientesFiltrados.length}
+          registrosPorPagina={CLIENTES_POR_PAGINA}
+          registrosEnPagina={clientesPagina.length}
+          etiquetaTotal="clientes"
+          scrollTargetRef={listaClientesRef}
+          onCambiarPagina={cambiarPagina}
+        />
       </div>
 
-      {clienteAInactivar && (
-        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm md:p-4 animate-fade-in">
-          <div className="bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full max-w-sm flex flex-col overflow-hidden animate-slide-up md:animate-fade-in pb-8 md:pb-0">
+      {clienteEstadoPendiente && (
+        <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-3 backdrop-blur-sm animate-fade-in md:items-center md:p-4">
+          <div className="flex max-h-[92dvh] w-full max-w-sm flex-col overflow-hidden rounded-t-3xl bg-white pb-[calc(1.5rem+env(safe-area-inset-bottom))] shadow-2xl animate-slide-up md:rounded-xl md:pb-0 md:animate-fade-in">
             <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden" />
 
             <div className="p-6 text-center">
-              <div className="mx-auto flex items-center justify-center h-16 w-16 md:h-14 md:w-14 rounded-full bg-red-100 mb-4 ring-4 ring-red-50">
-                <AlertTriangle className="h-8 w-8 md:h-7 md:w-7 text-red-600" />
+              <div
+                className={`mx-auto flex items-center justify-center h-16 w-16 md:h-14 md:w-14 rounded-full mb-4 ring-4 ${
+                  accionEstadoCliente === "reactivar"
+                    ? "bg-green-100 ring-green-50"
+                    : "bg-red-100 ring-red-50"
+                }`}
+              >
+                {accionEstadoCliente === "reactivar" ? (
+                  <CheckCircle className="h-8 w-8 md:h-7 md:w-7 text-green-600" />
+                ) : (
+                  <AlertTriangle className="h-8 w-8 md:h-7 md:w-7 text-red-600" />
+                )}
               </div>
 
               <h3 className="text-xl font-black text-[#0a192f] mb-2">
-                Inactivar Cliente
+                {accionEstadoCliente === "reactivar"
+                  ? "Reactivar Cliente"
+                  : "Inactivar Cliente"}
               </h3>
 
-              <p className="text-sm text-gray-600 mb-6 leading-relaxed">
-                ¿Está totalmente seguro de inactivar a{" "}
+              <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                Confirma el cambio de estado de{" "}
                 <span className="font-bold text-gray-900">
-                  {clienteAInactivar.nombre}
+                  {clienteEstadoPendiente.nombre}
                 </span>
-                ? El historial y las facturas se conservarán.
+                . El historial, facturas y abonos se conservarán.
               </p>
+
+              <textarea
+                value={motivoEstadoCliente}
+                onChange={(event) => setMotivoEstadoCliente(event.target.value)}
+                rows="3"
+                disabled={isInactivating}
+                placeholder={
+                  accionEstadoCliente === "reactivar"
+                    ? "Motivo de reactivación"
+                    : "Motivo de inactivación"
+                }
+                className="mb-4 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-semibold text-[#0a192f] outline-none transition focus:border-[#ffd700] focus:bg-white focus:ring-2 focus:ring-[#ffd700]/40 disabled:opacity-60"
+              />
 
               <div className="flex space-x-3">
                 <button
                   type="button"
-                  onClick={() => setClienteAInactivar(null)}
+                  onClick={() => {
+                    setClienteEstadoPendiente(null);
+                    setMotivoEstadoCliente("");
+                  }}
                   disabled={isInactivating}
                   className="flex-1 px-4 py-3 md:py-2 text-sm font-bold text-gray-700 bg-white border border-gray-300 rounded-xl md:rounded-lg active:bg-gray-50 hover:bg-gray-50 disabled:opacity-50 transition-colors"
                 >
@@ -1028,17 +1083,23 @@ export default function Clientes() {
 
                 <button
                   type="button"
-                  onClick={confirmarInactivacion}
-                  disabled={isInactivating}
-                  className="flex-1 px-4 py-3 md:py-2 text-sm font-bold text-white bg-red-600 rounded-xl md:rounded-lg active:bg-red-700 hover:bg-red-700 disabled:opacity-70 flex items-center justify-center transition-colors shadow-sm"
+                  onClick={confirmarCambioEstadoCliente}
+                  disabled={isInactivating || !motivoEstadoCliente.trim()}
+                  className={`flex-1 px-4 py-3 md:py-2 text-sm font-bold text-white rounded-xl md:rounded-lg disabled:opacity-70 flex items-center justify-center transition-colors shadow-sm ${
+                    accionEstadoCliente === "reactivar"
+                      ? "bg-green-600 active:bg-green-700 hover:bg-green-700"
+                      : "bg-red-600 active:bg-red-700 hover:bg-red-700"
+                  }`}
                 >
                   {isInactivating ? (
                     <>
                       <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Inactivando...
+                      Procesando...
                     </>
+                  ) : accionEstadoCliente === "reactivar" ? (
+                    "Reactivar"
                   ) : (
-                    "Sí, inactivar"
+                    "Inactivar"
                   )}
                 </button>
               </div>
@@ -1048,17 +1109,27 @@ export default function Clientes() {
       )}
 
       {isModalOpen && (
-        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm sm:p-4">
-          <div className="bg-white rounded-t-2xl md:rounded-xl shadow-2xl w-full max-w-4xl h-[95vh] md:h-auto md:max-h-[90vh] flex flex-col animate-slide-up md:animate-fade-in overflow-hidden">
-            <div className="flex justify-between items-center p-5 md:p-6 border-b border-gray-100 shrink-0 bg-white z-10">
-              <h2 className="text-xl font-black text-[#0a192f]">
-                Nuevo Cliente
-              </h2>
+        <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-3 backdrop-blur-sm md:items-center md:p-4">
+          <div className="bg-white rounded-t-3xl md:rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92dvh] md:max-h-[92vh] flex flex-col animate-slide-up md:animate-fade-in overflow-hidden">
+            <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0" />
+
+            <div className="flex items-start justify-between gap-4 px-5 py-5 md:px-6 md:py-5 border-b border-gray-100 shrink-0 bg-white">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-600">
+                  Alta de cliente
+                </p>
+                <h2 className="text-xl md:text-2xl font-black text-[#0a192f] mt-1">
+                  Nuevo cliente
+                </h2>
+                <p className="text-xs md:text-sm text-gray-500 mt-1 max-w-2xl">
+                  Registra la información obligatoria, la línea de crédito inicial y si cuenta con pagaré inicial.
+                </p>
+              </div>
 
               <button
                 type="button"
                 onClick={handleCerrarModalAlta}
-                className="text-gray-400 active:text-red-500 hover:text-red-500 bg-gray-50 p-2 rounded-full transition-colors disabled:opacity-50"
+                className="text-gray-400 active:text-red-500 hover:text-red-500 bg-gray-50 p-2 rounded-full transition-colors disabled:opacity-50 shrink-0"
                 disabled={isSubmitting}
                 aria-label="Cerrar formulario"
               >
@@ -1066,246 +1137,349 @@ export default function Clientes() {
               </button>
             </div>
 
-            <div className="p-5 md:p-6 overflow-y-auto flex-1 custom-scrollbar pb-24 md:pb-6">
-              <form
-                id="altaClienteForm"
-                onSubmit={handleSubmit}
-                className="space-y-6"
-              >
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      ID del Cliente (Opcional)
-                    </label>
-                    <input
-                      type="text"
-                      name="numero_cliente"
-                      value={formData.numero_cliente}
-                      onChange={handleInputChange}
-                      placeholder="ID de otro sistema"
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Razón Social{" "}
-                      <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      name="nombre"
-                      value={formData.nombre}
-                      onChange={handleInputChange}
-                      required
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      RFC
-                    </label>
-                    <input
-                      type="text"
-                      name="rfc"
-                      value={formData.rfc}
-                      onChange={handleInputChange}
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm uppercase"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Teléfono
-                    </label>
-                    <input
-                      type="tel"
-                      name="telefono"
-                      value={formData.telefono}
-                      onChange={handleInputChange}
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
-                    />
-                  </div>
-
-                  <div className="md:col-span-2">
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Correo Electrónico
-                    </label>
-                    <input
-                      type="email"
-                      name="correo"
-                      value={formData.correo}
-                      onChange={handleInputChange}
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6 border-t border-gray-100 pt-6">
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Grupo comercial
-                    </label>
-                    <select
-                      name="grupo"
-                      value={formData.grupo}
-                      onChange={handleInputChange}
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-medium"
-                    >
-                      {OPCIONES_GRUPO.map((grupo) => (
-                        <option key={grupo} value={grupo}>
-                          {formatearGrupo(grupo)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Clasificación del cliente
-                    </label>
-                    <select
-                      name="segmentacion"
-                      value={formData.segmentacion}
-                      onChange={handleInputChange}
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-medium"
-                    >
-                      {OPCIONES_CLASIFICACION.map((clasificacion) => (
-                        <option
-                          key={clasificacion}
-                          value={clasificacion}
-                        >
-                          {clasificacion}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Límite de Crédito
-                    </label>
-                    <input
-                      type="number"
-                      name="limite_credito"
-                      value={
-                        userRole === "SU"
-                          ? formData.limite_credito
-                          : 0
-                      }
-                      onChange={handleInputChange}
-                      placeholder="Ej. 6000"
-                      disabled={
-                        isSubmitting || userRole !== "SU"
-                      }
-                      className={`w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold ${
-                        userRole !== "SU"
-                          ? "text-gray-400 cursor-not-allowed"
-                          : "text-gray-900 focus:bg-white"
-                      }`}
-                    />
-
-                    <p className="text-[10px] text-gray-400 mt-1.5 leading-tight">
-                      {userRole === "SU"
-                        ? "Monto de apertura. Futuros aumentos requerirán autorización."
-                        : "Los perfiles operativos no pueden asignar crédito inicial."}
+            <form
+              id="altaClienteForm"
+              onSubmit={handleSubmit}
+              className="flex-1 overflow-y-auto custom-scrollbar bg-gray-50/50"
+            >
+              <div className="p-5 md:p-6 space-y-5 md:space-y-6 pb-28 md:pb-8">
+                <section className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+                  <div className="px-4 py-3 md:px-5 md:py-4 border-b border-gray-100 bg-[#0a192f] text-white">
+                    <h3 className="text-sm font-black">
+                      1. Identificación del cliente
+                    </h3>
+                    <p className="text-[11px] text-white/70 mt-0.5">
+                      Datos principales para localizar el expediente.
                     </p>
                   </div>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6 border-t border-gray-100 pt-6">
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Días de Mensaje (Aviso)
-                    </label>
-                    <input
-                      type="number"
-                      name="dias_mensaje"
-                      value={formData.dias_mensaje}
-                      onChange={handleInputChange}
-                      placeholder="Ej. 5"
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
-                    />
+                  <div className="p-4 md:p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Número de cliente <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        name="numero_cliente"
+                        value={formData.numero_cliente}
+                        onChange={handleInputChange}
+                        placeholder="Ej. C-001"
+                        required
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Nombre <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        name="nombre"
+                        value={formData.nombre}
+                        onChange={handleInputChange}
+                        placeholder="Nombre comercial o cliente"
+                        required
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        RFC <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        name="rfc"
+                        value={formData.rfc}
+                        onChange={handleInputChange}
+                        placeholder="RFC del cliente"
+                        required
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold uppercase"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Teléfono <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="tel"
+                        name="telefono"
+                        value={formData.telefono}
+                        onChange={handleInputChange}
+                        placeholder="10 dígitos"
+                        required
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Dirección <span className="text-red-500">*</span>
+                      </label>
+                      <textarea
+                        name="direccion"
+                        value={formData.direccion}
+                        onChange={handleInputChange}
+                        placeholder="Calle, número, colonia, ciudad o referencia de entrega"
+                        required
+                        disabled={isSubmitting}
+                        rows="3"
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm resize-none"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Correo electrónico
+                      </label>
+                      <input
+                        type="email"
+                        name="correo"
+                        value={formData.correo}
+                        onChange={handleInputChange}
+                        placeholder="correo@ejemplo.com"
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
+                      />
+                    </div>
+                  </div>
+                </section>
+
+                <section className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+                  <div className="px-4 py-3 md:px-5 md:py-4 border-b border-gray-100 bg-white">
+                    <h3 className="text-sm font-black text-[#0a192f]">
+                      2. Crédito y pagaré
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      Registra la línea autorizada y la persona que aprobó el límite.
+                    </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 bg-gray-50/50 p-4 rounded-xl border border-gray-200">
-                    <div className="col-span-2 md:col-span-1">
-                      <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                        Pagaré - Monto
+                  <div className="p-4 md:p-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4">
+                      <label className="block text-[11px] font-black uppercase text-blue-700 tracking-wider mb-1.5">
+                        Línea de crédito principal <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 font-black">
+                          $
+                        </span>
+                        <input
+                          type="number"
+                          name="limite_credito"
+                          value={formData.limite_credito}
+                          onChange={handleInputChange}
+                          placeholder="Ej. 10000"
+                          min="0"
+                          step="0.01"
+                          required
+                          disabled={isSubmitting}
+                          className="w-full pl-8 pr-4 py-3 bg-white border border-blue-100 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-black text-[#0a192f]"
+                        />
+                      </div>
+                      <p className="text-[10px] text-blue-700/70 mt-2 leading-relaxed">
+                        Esta línea debe venir autorizada desde el sistema principal. Aquí solo se registra y se audita.
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 lg:col-span-2">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
+                            Personal que autoriza
+                            {Number(formData.limite_credito) > 0 && (
+                              <span className="text-red-500"> *</span>
+                            )}
+                          </label>
+                          <input
+                            type="text"
+                            name="linea_credito_autorizado_por"
+                            value={formData.linea_credito_autorizado_por}
+                            onChange={handleInputChange}
+                            placeholder="Ej. Juan Pérez"
+                            required={Number(formData.limite_credito) > 0}
+                            disabled={isSubmitting}
+                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold text-[#0a192f]"
+                          />
+                        </div>
+
+                        <div className="md:col-span-2">
+                          <label className="block text-[11px] font-black uppercase text-slate-600 tracking-wider mb-1.5">
+                            Motivo o respaldo de línea
+                            {Number(formData.limite_credito) > 0 && (
+                              <span className="text-red-500"> *</span>
+                            )}
+                          </label>
+                          <textarea
+                            name="linea_credito_motivo"
+                            value={formData.linea_credito_motivo}
+                            onChange={handleInputChange}
+                            disabled={isSubmitting}
+                            rows="2"
+                            required={Number(formData.limite_credito) > 0}
+                            placeholder="Ej. Límite autorizado por administración."
+                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm resize-none"
+                          />
+                        </div>
+                      </div>
+
+                      <p className="text-[10px] text-slate-500 mt-3 leading-relaxed">
+                        Este registro crea un movimiento histórico de línea de crédito. No se elimina; si hay error, se corrige con un nuevo movimiento desde el expediente.
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+                      <label className="block text-[11px] font-black uppercase text-amber-700 tracking-wider mb-2">
+                        Cuenta con pagaré inicial? <span className="text-red-500">*</span>
+                      </label>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className={`cursor-pointer rounded-xl border p-3 text-center transition-all ${
+                          formData.pagare_inicial === "SI"
+                            ? "bg-[#0a192f] border-[#0a192f] text-white shadow-md"
+                            : "bg-white border-amber-200 text-gray-600 hover:border-amber-400"
+                        }`}>
+                          <input
+                            type="radio"
+                            name="pagare_inicial"
+                            value="SI"
+                            checked={formData.pagare_inicial === "SI"}
+                            onChange={handleInputChange}
+                            required
+                            disabled={isSubmitting}
+                            className="sr-only"
+                          />
+                          <span className="block text-sm font-black">Sí</span>
+                          <span className="block text-[10px] opacity-75 mt-0.5">
+                            Cuenta con respaldo
+                          </span>
+                        </label>
+
+                        <label className={`cursor-pointer rounded-xl border p-3 text-center transition-all ${
+                          formData.pagare_inicial === "NO"
+                            ? "bg-[#0a192f] border-[#0a192f] text-white shadow-md"
+                            : "bg-white border-amber-200 text-gray-600 hover:border-amber-400"
+                        }`}>
+                          <input
+                            type="radio"
+                            name="pagare_inicial"
+                            value="NO"
+                            checked={formData.pagare_inicial === "NO"}
+                            onChange={handleInputChange}
+                            required
+                            disabled={isSubmitting}
+                            className="sr-only"
+                          />
+                          <span className="block text-sm font-black">No</span>
+                          <span className="block text-[10px] opacity-75 mt-0.5">
+                            Sin pagaré inicial
+                          </span>
+                        </label>
+                      </div>
+
+                      <p className="text-[10px] text-amber-700/80 mt-2 leading-relaxed">
+                        Esta respuesta se mostrará dentro del expediente del cliente.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+                  <div className="px-4 py-3 md:px-5 md:py-4 border-b border-gray-100 bg-white">
+                    <h3 className="text-sm font-black text-[#0a192f]">
+                      3. Clasificación y seguimiento
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      Información operativa para organizar la cartera.
+                    </p>
+                  </div>
+
+                  <div className="p-4 md:p-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Grupo comercial
+                      </label>
+                      <select
+                        name="grupo"
+                        value={formData.grupo}
+                        onChange={handleInputChange}
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold"
+                      >
+                        {OPCIONES_GRUPO.map((grupo) => (
+                          <option key={grupo} value={grupo}>
+                            {formatearGrupo(grupo)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Clasificación
+                      </label>
+                      <select
+                        name="segmentacion"
+                        value={formData.segmentacion}
+                        onChange={handleInputChange}
+                        disabled={isSubmitting}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm font-bold"
+                      >
+                        {OPCIONES_CLASIFICACION.map((clasificacion) => (
+                          <option key={clasificacion} value={clasificacion}>
+                            {clasificacion}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Días de mensaje
                       </label>
                       <input
                         type="number"
-                        name="pagare_monto"
-                        value={formData.pagare_monto}
+                        name="dias_mensaje"
+                        value={formData.dias_mensaje}
                         onChange={handleInputChange}
+                        placeholder="Ej. 5"
+                        min="0"
                         disabled={isSubmitting}
-                        className="w-full px-4 py-3 md:py-2 bg-white border border-gray-200 rounded-xl md:rounded-md focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
                       />
                     </div>
 
-                    <div className="col-span-2 md:col-span-1">
-                      <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                        Pagaré - Fecha
+                    <div className="md:col-span-3">
+                      <label className="block text-[11px] font-black uppercase text-gray-500 tracking-wider mb-1.5">
+                        Notas internas
                       </label>
-                      <input
-                        type="date"
-                        name="pagare_fecha"
-                        value={formData.pagare_fecha}
+                      <textarea
+                        name="notas"
+                        value={formData.notas}
                         onChange={handleInputChange}
                         disabled={isSubmitting}
-                        className="w-full px-4 py-3 md:py-2 bg-white border border-gray-200 rounded-xl md:rounded-md focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm"
+                        rows="3"
+                        placeholder="Observaciones internas, referencias o acuerdos iniciales."
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm resize-none"
                       />
                     </div>
                   </div>
-                </div>
+                </section>
+              </div>
+            </form>
 
-                <div className="grid grid-cols-1 gap-5 md:gap-6 border-t border-gray-100 pt-6 pb-4">
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Dirección Completa
-                    </label>
-                    <textarea
-                      name="direccion"
-                      value={formData.direccion}
-                      onChange={handleInputChange}
-                      rows="2"
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-gray-50 border border-gray-200 rounded-xl md:rounded-md focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm resize-none"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-black uppercase text-gray-500 tracking-wider mb-1.5">
-                      Notas Internas
-                    </label>
-                    <textarea
-                      name="notas"
-                      value={formData.notas}
-                      onChange={handleInputChange}
-                      rows="2"
-                      disabled={isSubmitting}
-                      className="w-full px-4 py-3 md:py-2 bg-yellow-50/30 border border-yellow-200 rounded-xl md:rounded-md focus:bg-yellow-50 focus:outline-none focus:ring-2 focus:ring-[#ffd700] text-sm resize-none"
-                    />
-                  </div>
-                </div>
-              </form>
-            </div>
-
-            <div className="p-4 md:p-5 border-t border-gray-100 bg-white md:bg-gray-50 md:rounded-b-xl flex flex-col-reverse md:flex-row justify-end gap-3 shrink-0">
+            <div className="fixed bottom-0 left-0 right-0 z-[70] flex shrink-0 flex-col justify-end gap-3 border-t border-gray-100 bg-white/95 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] backdrop-blur md:static md:flex-row md:px-6 md:py-4">
               <button
                 type="button"
                 onClick={handleCerrarModalAlta}
                 disabled={isSubmitting}
-                className="w-full md:w-auto px-6 py-3.5 md:py-2.5 text-sm font-bold text-gray-600 bg-gray-100 border border-transparent rounded-xl md:rounded-lg active:bg-gray-200 hover:bg-gray-200 disabled:opacity-50 transition-colors"
+                className="w-full md:w-auto px-6 py-3 md:py-2.5 text-sm font-bold text-gray-600 bg-gray-100 border border-transparent rounded-xl active:bg-gray-200 hover:bg-gray-200 disabled:opacity-50 transition-colors"
               >
                 Cancelar
               </button>
@@ -1314,7 +1488,7 @@ export default function Clientes() {
                 type="submit"
                 form="altaClienteForm"
                 disabled={isSubmitting}
-                className="w-full md:w-auto px-8 py-3.5 md:py-2.5 text-sm font-black text-[#0a192f] bg-[#ffd700] rounded-xl md:rounded-lg active:bg-[#e6c200] hover:bg-[#ffed4a] disabled:opacity-70 flex items-center justify-center shadow-md transition-colors"
+                className="w-full md:w-auto px-8 py-3 md:py-2.5 text-sm font-black text-[#0a192f] bg-[#ffd700] rounded-xl active:bg-[#e6c200] hover:bg-[#ffed4a] disabled:opacity-70 flex items-center justify-center shadow-md transition-colors"
               >
                 {isSubmitting ? (
                   <>
@@ -1322,7 +1496,7 @@ export default function Clientes() {
                     Guardando...
                   </>
                 ) : (
-                  "Guardar Cliente"
+                  "Guardar cliente"
                 )}
               </button>
             </div>

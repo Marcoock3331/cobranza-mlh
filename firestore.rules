@@ -39,6 +39,20 @@ service cloud.firestore {
         && request.resource.data.actor_uid == request.auth.uid;
     }
 
+    function totalNotasCreditoActual() {
+      return resource.data.keys().hasAny(['total_notas_credito'])
+        && resource.data.total_notas_credito is number
+          ? resource.data.total_notas_credito
+          : 0;
+    }
+
+    function totalNotasCreditoNuevo() {
+      return request.resource.data.keys().hasAny(['total_notas_credito'])
+        && request.resource.data.total_notas_credito is number
+          ? request.resource.data.total_notas_credito
+          : 0;
+    }
+
     function auditoriaEdicionFacturaValida(facturaId) {
       let auditId = request.resource.data.ultima_edicion_audit_id;
       let auditPath = /databases/$(database)/documents/actividad/$(auditId);
@@ -95,6 +109,62 @@ service cloud.firestore {
         );
     }
 
+    function movimientoLineaPath(movimientoId) {
+      return /databases/$(database)/documents/lineas_credito_movimientos/$(movimientoId);
+    }
+
+    function movimientoLineaCreditoValido(clienteId) {
+      let movimientoId = request.resource.data.linea_credito_ultimo_movimiento;
+      let path = movimientoLineaPath(movimientoId);
+
+      return movimientoId is string
+        && movimientoId != ''
+        && existsAfter(path)
+        && getAfter(path).data.id == movimientoId
+        && getAfter(path).data.cliente_id == clienteId
+        && getAfter(path).data.actor_uid == request.auth.uid
+        && getAfter(path).data.registrado_por_uid == request.auth.uid
+        && getAfter(path).data.tipo_movimiento in [
+          'ALTA_INICIAL',
+          'AUMENTO',
+          'DISMINUCION',
+          'CORRECCION'
+        ];
+    }
+
+    match /login_aliases/{aliasId} {
+      allow get: if true;
+      allow list: if false;
+
+      allow create: if isSU()
+        && aliasId.matches('^[a-z0-9._-]+$')
+        && request.resource.data.keys().hasOnly([
+          'correo_auth',
+          'activo',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.correo_auth is string
+        && request.resource.data.correo_auth.matches('^[^ @]+@[^ @]+[.][^ @]+$')
+        && !(request.resource.data.correo_auth.matches('.*@mlh[.]local$'))
+        && request.resource.data.activo == true
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+
+      allow update: if isSU()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'activo',
+            'updatedAt'
+          ])
+        && request.resource.data.activo is bool
+        && request.resource.data.updatedAt is timestamp;
+
+      allow delete: if false;
+    }
+
     match /usuarios/{userId} {
       allow read: if (
         isAuthenticated() && request.auth.uid == userId
@@ -102,11 +172,55 @@ service cloud.firestore {
 
       allow create: if isSU()
         && userId != request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'nombre',
+          'correo',
+          'correo_auth',
+          'usuario_alias',
+          'rol',
+          'activo',
+          'proveedor_acceso',
+          'requiere_reset_password',
+          'fecha_creacion',
+          'fecha_actualizacion',
+          'ultima_entrada',
+          'creado_por',
+          'creado_por_uid'
+        ])
         && request.resource.data.nombre is string
+        && request.resource.data.nombre != ''
         && request.resource.data.correo is string
+        && request.resource.data.correo.matches('^[^ @]+@[^ @]+[.][^ @]+$')
+        && !(request.resource.data.correo.matches('.*@mlh[.]local$'))
+        && request.resource.data.correo_auth == request.resource.data.correo
+        && request.resource.data.usuario_alias is string
+        && request.resource.data.usuario_alias.matches('^[a-z0-9._-]+$')
         && request.resource.data.rol == 'ADMIN'
-        && request.resource.data.activo is bool
-        && request.resource.data.activo == true;
+        && request.resource.data.activo == true
+        && request.resource.data.proveedor_acceso == 'EMAIL_REAL_ALIAS'
+        && request.resource.data.requiere_reset_password is bool
+        && request.resource.data.fecha_creacion is timestamp
+        && request.resource.data.fecha_actualizacion is timestamp
+        && request.resource.data.creado_por is string
+        && request.resource.data.creado_por_uid == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias))
+        && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.correo_auth == request.resource.data.correo
+        && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.activo == true;
+
+      // Permite que cada usuario registre únicamente su propia última entrada.
+      allow update: if isAuthenticated()
+        && request.auth.uid == userId
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'ultima_entrada',
+            'ultimoLogin',
+            'fecha_actualizacion'
+          ])
+        && request.resource.data.ultima_entrada is timestamp
+        && request.resource.data.ultimoLogin is timestamp
+        && request.resource.data.fecha_actualizacion is timestamp;
 
       allow update: if isSU()
         && userId != request.auth.uid
@@ -128,8 +242,19 @@ service cloud.firestore {
     match /clientes/{clienteId} {
       allow read: if isStaff();
 
-      allow create: if isSU()
+      allow create: if isStaff()
         && request.resource.data.cliente_id == clienteId
+        && request.resource.data.nombre is string
+        && request.resource.data.nombre != ''
+        && request.resource.data.numero_cliente is string
+        && request.resource.data.numero_cliente != ''
+        && request.resource.data.rfc is string
+        && request.resource.data.rfc != ''
+        && request.resource.data.telefono is string
+        && request.resource.data.telefono != ''
+        && request.resource.data.direccion is string
+        && request.resource.data.direccion != ''
+        && request.resource.data.pagare_inicial is bool
         && request.resource.data.limite_credito is number
         && request.resource.data.limite_credito >= 0
         && request.resource.data.credito_disponible
@@ -137,18 +262,15 @@ service cloud.firestore {
         && request.resource.data.deuda_actual is number
         && request.resource.data.deuda_actual == 0
         && request.resource.data.activo == true
-        && request.resource.data.estatus == 'Activo';
-
-      allow create: if isADMIN()
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.limite_credito is number
-        && request.resource.data.limite_credito == 0
-        && request.resource.data.credito_disponible is number
-        && request.resource.data.credito_disponible == 0
-        && request.resource.data.deuda_actual is number
-        && request.resource.data.deuda_actual == 0
-        && request.resource.data.activo == true
-        && request.resource.data.estatus == 'Activo';
+        && request.resource.data.estatus == 'Activo'
+        && request.resource.data.linea_credito_estado in [
+          'Sin línea',
+          'Activa',
+          'Excedida'
+        ]
+        && request.resource.data.linea_credito_autorizado_por is string
+        && request.resource.data.linea_credito_ultimo_movimiento is string
+        && movimientoLineaCreditoValido(clienteId);
 
       allow update: if isStaff()
         && request.resource.data
@@ -164,6 +286,7 @@ service cloud.firestore {
             'grupo',
             'segmentacion',
             'dias_mensaje',
+            'pagare_inicial',
             'pagare_monto',
             'pagare_fecha',
             'notas_internas',
@@ -196,13 +319,19 @@ service cloud.firestore {
         && request.resource.data.credito_disponible
           <= request.resource.data.limite_credito;
 
-      allow update: if isSU()
+      allow update: if isStaff()
         && request.resource.data
           .diff(resource.data)
           .affectedKeys()
           .hasOnly([
             'limite_credito',
             'credito_disponible',
+            'linea_credito_estado',
+            'linea_credito_autorizado_por',
+            'linea_credito_ultimo_movimiento',
+            'linea_credito_actualizada_en',
+            'linea_credito_actualizada_por',
+            'linea_credito_actualizada_por_uid',
             'updatedAt'
           ])
         && request.resource.data.limite_credito is number
@@ -214,19 +343,65 @@ service cloud.firestore {
         && request.resource.data.deuda_actual
           == resource.data.deuda_actual
         && request.resource.data.activo
-          == resource.data.activo;
+          == resource.data.activo
+        && request.resource.data.estatus
+          == resource.data.estatus
+        && request.resource.data.linea_credito_estado in [
+          'Sin línea',
+          'Activa',
+          'Excedida'
+        ]
+        && request.resource.data.linea_credito_autorizado_por is string
+        && request.resource.data.linea_credito_autorizado_por != ''
+        && request.resource.data.linea_credito_actualizada_en is timestamp
+        && request.resource.data.linea_credito_actualizada_por is string
+        && request.resource.data.linea_credito_actualizada_por_uid
+          == request.auth.uid
+        && movimientoLineaCreditoValido(clienteId);
 
-      allow update: if isSU()
+      allow update: if isStaff()
         && request.resource.data
           .diff(resource.data)
           .affectedKeys()
           .hasOnly([
             'activo',
             'estatus',
+            'inactivo_motivo',
+            'inactivo_por',
+            'inactivo_por_uid',
+            'inactivo_at',
             'updatedAt'
           ])
+        && resource.data.activo == true
         && request.resource.data.activo == false
-        && request.resource.data.estatus == 'Inactivo';
+        && request.resource.data.estatus == 'Inactivo'
+        && request.resource.data.inactivo_motivo is string
+        && request.resource.data.inactivo_motivo != ''
+        && request.resource.data.inactivo_por is string
+        && request.resource.data.inactivo_por_uid == request.auth.uid
+        && request.resource.data.inactivo_at is timestamp;
+
+      allow update: if isStaff()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'activo',
+            'estatus',
+            'reactivado_motivo',
+            'reactivado_por',
+            'reactivado_por_uid',
+            'reactivado_at',
+            'updatedAt'
+          ])
+        && resource.data.activo == false
+        && request.resource.data.activo == true
+        && request.resource.data.estatus == 'Activo'
+        && request.resource.data.reactivado_motivo is string
+        && request.resource.data.reactivado_motivo != ''
+        && request.resource.data.reactivado_por is string
+        && request.resource.data.reactivado_por_uid == request.auth.uid
+        && request.resource.data.reactivado_at is timestamp;
 
       allow delete: if false;
     }
@@ -283,8 +458,10 @@ service cloud.firestore {
         && request.resource.data.monto_pagado >= 0
         && request.resource.data.monto_pagado
           <= resource.data.monto_total
+        && totalNotasCreditoNuevo() == totalNotasCreditoActual()
         && request.resource.data.saldo_pendiente
           + request.resource.data.monto_pagado
+          + totalNotasCreditoNuevo()
           == resource.data.monto_total
         && request.resource.data.abonos is list
         && request.resource.data.estatus in [
@@ -369,6 +546,55 @@ service cloud.firestore {
         && clientesEdicionFacturaValidos()
         && auditoriaEdicionFacturaValida(facturaId);
 
+
+      // Nota de crédito directa, autorización por SU o eliminación/reversión.
+      allow update: if isSU()
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'saldo_pendiente',
+            'estatus',
+            'notas_credito',
+            'total_notas_credito',
+            'ultima_accion',
+            'updatedAt'
+          ])
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.cliente_id == resource.data.cliente_id
+        && request.resource.data.cliente == resource.data.cliente
+        && request.resource.data.folio == resource.data.folio
+        && request.resource.data.monto_total == resource.data.monto_total
+        && request.resource.data.monto_pagado == resource.data.monto_pagado
+        && request.resource.data.abonos == resource.data.abonos
+        && request.resource.data.saldo_pendiente is number
+        && request.resource.data.saldo_pendiente >= 0
+        && request.resource.data.saldo_pendiente <= request.resource.data.monto_total
+        && request.resource.data.total_notas_credito is number
+        && request.resource.data.total_notas_credito >= 0
+        && request.resource.data.notas_credito is list
+        && request.resource.data.estatus in [
+          'Pendiente',
+          'Vencida',
+          'Pagada'
+        ]
+        && (
+          request.resource.data.saldo_pendiente
+            != resource.data.saldo_pendiente
+          || request.resource.data.total_notas_credito
+            != resource.data.total_notas_credito
+        )
+        && (
+          (
+            request.resource.data.saldo_pendiente == 0
+            && request.resource.data.estatus == 'Pagada'
+          ) || (
+            request.resource.data.saldo_pendiente > 0
+            && request.resource.data.estatus != 'Pagada'
+          )
+        );
+
       allow delete: if isSU();
     }
 
@@ -426,6 +652,165 @@ service cloud.firestore {
         && request.resource.data.resolvedBy is string
         && request.resource.data.resolvedByUid
           == request.auth.uid;
+
+      allow delete: if false;
+    }
+
+
+    match /solicitudes_notas_credito/{solicitudId} {
+      allow read: if isStaff();
+
+      allow create: if isADMIN()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'tipo_solicitud',
+          'factura_id',
+          'folio',
+          'cliente_id',
+          'cliente',
+          'monto_nota',
+          'saldo_actual',
+          'motivo',
+          'observaciones',
+          'estatus',
+          'solicitado_por_uid',
+          'solicitado_por_nombre',
+          'createdAt'
+        ])
+        && request.resource.data.id == solicitudId
+        && request.resource.data.tipo_solicitud == 'NOTA_CREDITO'
+        && request.resource.data.factura_id is string
+        && request.resource.data.factura_id != ''
+        && request.resource.data.folio is string
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente is string
+        && request.resource.data.monto_nota is number
+        && request.resource.data.monto_nota > 0
+        && request.resource.data.saldo_actual is number
+        && request.resource.data.saldo_actual > 0
+        && request.resource.data.monto_nota
+          <= request.resource.data.saldo_actual
+        && request.resource.data.motivo is string
+        && request.resource.data.motivo != ''
+        && request.resource.data.observaciones is string
+        && request.resource.data.estatus == 'Pendiente'
+        && request.resource.data.solicitado_por_uid
+          == request.auth.uid
+        && request.resource.data.solicitado_por_nombre is string
+        && request.resource.data.createdAt is timestamp;
+
+      allow update: if isSU()
+        && (
+          (
+            resource.data.estatus == 'Pendiente'
+            && request.resource.data.estatus in [
+              'Autorizado',
+              'Rechazado'
+            ]
+            && request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                'estatus',
+                'resolvedAt',
+                'resolvedBy',
+                'resolvedByUid',
+                'motivo_resolucion',
+                'nota_credito_id',
+                'saldo_restante'
+              ])
+            && request.resource.data.resolvedAt is timestamp
+            && request.resource.data.resolvedBy is string
+            && request.resource.data.resolvedByUid
+              == request.auth.uid
+          )
+          ||
+          (
+            resource.data.estatus in [
+              'Autorizado',
+              'Aprobado'
+            ]
+            && request.resource.data.estatus == 'Anulada'
+            && request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                'estatus',
+                'nota_anulada',
+                'anuladaAt',
+                'anuladaBy',
+                'anuladaByUid',
+                'motivo_anulacion'
+              ])
+            && request.resource.data.nota_anulada == true
+            && request.resource.data.anuladaAt is timestamp
+            && request.resource.data.anuladaBy is string
+            && request.resource.data.anuladaByUid
+              == request.auth.uid
+            && request.resource.data.motivo_anulacion is string
+          )
+        );
+
+      allow delete: if false;
+    }
+
+
+    match /notas_credito_resumen_clientes/{clienteId} {
+      allow read: if isSU();
+
+      allow create, update: if isStaff()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'cliente_id',
+          'cliente',
+          'total_solicitudes',
+          'pendientes',
+          'autorizadas',
+          'rechazadas',
+          'anuladas',
+          'monto_total_notas',
+          'ultimo_estado',
+          'ultimo_monto_nota',
+          'ultimo_folio',
+          'ultimo_movimiento_at',
+          'ultimo_solicitado_por',
+          'ultimo_resuelto_por',
+          'activo'
+        ])
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.cliente is string
+        && request.resource.data.cliente != ''
+        && (!request.resource.data.keys().hasAny(['total_solicitudes'])
+          || request.resource.data.total_solicitudes is number)
+        && (!request.resource.data.keys().hasAny(['pendientes'])
+          || request.resource.data.pendientes is number)
+        && (!request.resource.data.keys().hasAny(['autorizadas'])
+          || request.resource.data.autorizadas is number)
+        && (!request.resource.data.keys().hasAny(['rechazadas'])
+          || request.resource.data.rechazadas is number)
+        && (!request.resource.data.keys().hasAny(['anuladas'])
+          || request.resource.data.anuladas is number)
+        && (!request.resource.data.keys().hasAny(['monto_total_notas'])
+          || request.resource.data.monto_total_notas is number)
+        && request.resource.data.ultimo_estado in [
+          'Pendiente',
+          'Autorizado',
+          'Aprobado',
+          'Rechazado',
+          'Anulada'
+        ]
+        && (!request.resource.data.keys().hasAny(['ultimo_monto_nota'])
+          || request.resource.data.ultimo_monto_nota is number)
+        && (!request.resource.data.keys().hasAny(['ultimo_folio'])
+          || request.resource.data.ultimo_folio is string)
+        && request.resource.data.ultimo_movimiento_at is timestamp
+        && (!request.resource.data.keys().hasAny(['ultimo_solicitado_por'])
+          || request.resource.data.ultimo_solicitado_por is string)
+        && (!request.resource.data.keys().hasAny(['ultimo_resuelto_por'])
+          || request.resource.data.ultimo_resuelto_por is string)
+        && request.resource.data.activo is bool;
 
       allow delete: if false;
     }
@@ -571,6 +956,124 @@ service cloud.firestore {
       allow delete: if isSU();
     }
 
+    match /lineas_credito_movimientos/{movimientoId} {
+      allow read: if isStaff();
+
+      allow create: if isStaff()
+        && actorValido()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'actor_uid',
+          'cliente_id',
+          'cliente',
+          'tipo_movimiento',
+          'limite_anterior',
+          'limite_nuevo',
+          'diferencia',
+          'deuda_actual',
+          'credito_disponible_resultante',
+          'estado_resultante',
+          'personal_autoriza',
+          'motivo',
+          'registrado_por_uid',
+          'registrado_por_nombre',
+          'registrado_por_rol',
+          'createdAt'
+        ])
+        && request.resource.data.id == movimientoId
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente is string
+        && request.resource.data.tipo_movimiento in [
+          'ALTA_INICIAL',
+          'AUMENTO',
+          'DISMINUCION',
+          'CORRECCION'
+        ]
+        && request.resource.data.limite_anterior is number
+        && request.resource.data.limite_anterior >= 0
+        && request.resource.data.limite_nuevo is number
+        && request.resource.data.limite_nuevo >= 0
+        && request.resource.data.diferencia is number
+        && request.resource.data.deuda_actual is number
+        && request.resource.data.deuda_actual >= 0
+        && request.resource.data.credito_disponible_resultante is number
+        && request.resource.data.credito_disponible_resultante >= 0
+        && request.resource.data.estado_resultante in [
+          'Sin línea',
+          'Activa',
+          'Excedida'
+        ]
+        && request.resource.data.personal_autoriza is string
+        && request.resource.data.personal_autoriza != ''
+        && request.resource.data.motivo is string
+        && request.resource.data.motivo != ''
+        && request.resource.data.registrado_por_uid == request.auth.uid
+        && request.resource.data.registrado_por_nombre is string
+        && request.resource.data.registrado_por_rol in ['SU', 'ADMIN']
+        && request.resource.data.createdAt is timestamp;
+
+      allow update, delete: if false;
+    }
+
+    match /lineas_credito_resumen_clientes/{clienteId} {
+      allow read: if isSU();
+
+      allow create, update: if isStaff()
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'cliente_id',
+          'cliente',
+          'limite_actual',
+          'deuda_actual',
+          'credito_disponible_actual',
+          'estado_resultante',
+          'ultimo_tipo_movimiento',
+          'ultimo_personal_autoriza',
+          'ultimo_registrado_por',
+          'ultimo_registrado_por_uid',
+          'ultimo_registrado_por_rol',
+          'ultimo_movimiento_id',
+          'ultimo_movimiento_at',
+          'total_movimientos',
+          'activo'
+        ])
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.cliente is string
+        && request.resource.data.cliente != ''
+        && request.resource.data.limite_actual is number
+        && request.resource.data.limite_actual >= 0
+        && request.resource.data.deuda_actual is number
+        && request.resource.data.deuda_actual >= 0
+        && request.resource.data.credito_disponible_actual is number
+        && request.resource.data.credito_disponible_actual >= 0
+        && request.resource.data.estado_resultante in [
+          'Sin línea',
+          'Activa',
+          'Excedida'
+        ]
+        && request.resource.data.ultimo_tipo_movimiento in [
+          'ALTA_INICIAL',
+          'AUMENTO',
+          'DISMINUCION',
+          'CORRECCION'
+        ]
+        && request.resource.data.ultimo_personal_autoriza is string
+        && request.resource.data.ultimo_personal_autoriza != ''
+        && request.resource.data.ultimo_registrado_por is string
+        && request.resource.data.ultimo_registrado_por_uid == request.auth.uid
+        && request.resource.data.ultimo_registrado_por_rol in ['SU', 'ADMIN']
+        && request.resource.data.ultimo_movimiento_id is string
+        && request.resource.data.ultimo_movimiento_id != ''
+        && request.resource.data.ultimo_movimiento_at is timestamp
+        && request.resource.data.total_movimientos is number
+        && request.resource.data.total_movimientos >= 1
+        && request.resource.data.activo is bool;
+
+      allow delete: if false;
+    }
+
     match /actividad/{actividadId} {
       allow read: if isSU();
 
@@ -604,6 +1107,7 @@ service cloud.firestore {
           'total_liquidado',
           'cobrado_historico',
           'abonos_registrados',
+          'total_notas_credito',
           'updatedAt',
           'ultima_actualizacion'
         ]);
@@ -627,6 +1131,7 @@ service cloud.firestore {
             'total_liquidado',
             'cobrado_historico',
             'abonos_registrados',
+            'total_notas_credito',
             'updatedAt',
             'ultima_actualizacion'
           ]);

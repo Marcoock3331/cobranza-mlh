@@ -1,57 +1,87 @@
-import { useState, useContext, useMemo } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import {
+  Activity,
+  CreditCard,
+  Shield,
+  UserCheck,
+} from "lucide-react";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  startAfter,
+  where,
+} from "firebase/firestore";
+
 import { GlobalContext } from "../context/GlobalContext";
+import { db } from "../config/firebase";
 import { usuariosService } from "../services/usuariosService";
 import { solicitudesService } from "../services/solicitudesService";
-import { textoSeguro } from "../utils/normalizadores";
-
+import AuditoriaSU from "../components/su/AuditoriaSU";
+import ControlPersonalSU from "../components/su/ControlPersonalSU";
+import CreditoRiesgoSU from "../components/su/CreditoRiesgoSU";
+import ModalesSU from "../components/su/ModalesSU";
+import ResumenEjecutivoSU from "../components/su/ResumenEjecutivoSU";
 import {
-  Shield, UserPlus, Key, Power, AlertTriangle, CheckCircle, XCircle, Clock, Search,
-  User, Users, Check, X, Info, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
-  FilterX, Activity, Loader2
-} from "lucide-react";
+  MOVIMIENTOS_LINEA_POR_PAGINA,
+  NOTAS_CLIENTES_POR_PAGINA,
+  NOTAS_HISTORIAL_POR_PAGINA,
+  RESUMENES_LINEA_POR_PAGINA,
+  TABS_PANEL_SU,
+  ordenarSolicitudesOperativas,
+} from "../components/su/suUtils";
 
+const RESUMEN_LINEA_COLLECTION = "lineas_credito_resumen_clientes";
+const MOVIMIENTOS_LINEA_COLLECTION = "lineas_credito_movimientos";
+const RESUMEN_NOTAS_COLLECTION = "notas_credito_resumen_clientes";
+const SOLICITUDES_NOTAS_COLLECTION = "solicitudes_notas_credito";
 
-const ETIQUETAS_CAMBIOS_FACTURA = {
-  cliente_id: "Cliente",
-  grupo: "Grupo",
-  folio: "Folio",
-  monto_total: "Monto total",
-  emision: "Emisión",
-  vencimiento: "Vencimiento",
-  observaciones: "Observaciones",
+const normalizarTab = (tab = "") => {
+  if (tab === "solicitudes" || tab === "creditos") return "creditos";
+  if (tab === "usuarios") return "usuarios";
+  if (tab === "actividad") return "actividad";
+  return "resumen";
 };
 
-const formatearCambioFactura = (campo, valor) => {
-  if (campo === "monto_total") {
-    return `$${(Number(valor) || 0).toLocaleString("es-MX", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+const normalizarVistaCredito = (vista = "") =>
+  vista === "linea" ? "linea" : "notas";
+
+const normalizarFiltroNotaCredito = (filtro = "") => {
+  const filtroSeguro = String(filtro || "").trim();
+
+  if (["Pendiente", "Autorizado", "Rechazado", "Anulada"].includes(filtroSeguro)) {
+    return filtroSeguro;
   }
 
-  if (campo === "emision" || campo === "vencimiento") {
-    const fecha = String(valor || "");
-    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-      const [anio, mes, dia] = fecha.split("-");
-      return `${dia}/${mes}/${anio}`;
-    }
-  }
-
-  return textoSeguro(valor, "Sin datos") || "Sin datos";
+  return "TODAS";
 };
 
 export default function GestionUsuarios() {
-  // BLINDAJE: Extracción rigurosa para uso en servicios
   const {
     userRole,
     actividad,
-    solicitudes,
+    solicitudesNotasCredito,
     currentUser,
-    usuarios, 
-    userName
+    usuarios,
+    userName,
   } = useContext(GlobalContext);
 
-  const [tabActiva, setTabActiva] = useState("usuarios");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const tabActiva = normalizarTab(searchParams.get("tab"));
+  const vistaCredito = normalizarVistaCredito(searchParams.get("vista"));
+  const clienteLineaSeleccionadoId = searchParams.get("clienteLinea") || "";
+  const clienteNotaSeleccionadoId = searchParams.get("clienteNota") || "";
+  const filtroHistorialNotasCredito = normalizarFiltroNotaCredito(
+    searchParams.get("filtroNota"),
+  );
+
   const isSuperUser = userRole && userRole.trim().toUpperCase() === "SU";
   const usuarioResponsable = userName || "SU_Admin";
 
@@ -60,67 +90,641 @@ export default function GestionUsuarios() {
   const [actividadSeleccionada, setActividadSeleccionada] = useState(null);
   const [tempSolicitud, setTempSolicitud] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [notificacion, setNotificacion] = useState({ titulo: "", descripcion: "", tipo: "exito" });
-  
+  const [notificacion, setNotificacion] = useState({
+    titulo: "",
+    descripcion: "",
+    tipo: "exito",
+  });
+  const [motivoRechazoNota, setMotivoRechazoNota] = useState("");
   const [nuevoUsuario, setNuevoUsuario] = useState({
     nombre: "",
     usuario: "",
+    correo: "",
     password: "",
   });
-  const [solicitudesExpandidas, setSolicitudesExpandidas] = useState({});
 
-  const administradores = useMemo(() => {
-    return (usuarios || []).filter((u) => u.rol === "ADMIN");
-  }, [usuarios]);
+  const [resumenesLineaCredito, setResumenesLineaCredito] = useState([]);
+  const [clienteLineaSeleccionadoDetalle, setClienteLineaSeleccionadoDetalle] =
+    useState(null);
+  const [movimientosClienteLinea, setMovimientosClienteLinea] = useState([]);
+  const [cargandoMovimientosLinea, setCargandoMovimientosLinea] =
+    useState(false);
+  const [cargandoResumenesLineaCredito, setCargandoResumenesLineaCredito] =
+    useState(false);
+  const [errorResumenesLineaCredito, setErrorResumenesLineaCredito] =
+    useState("");
+  const [paginaLineaCredito, setPaginaLineaCredito] = useState(1);
+  const [cursoresLineaCredito, setCursoresLineaCredito] = useState([]);
+  const [haySiguienteLineaCredito, setHaySiguienteLineaCredito] =
+    useState(false);
 
-  const solicitudesPendientesCount = useMemo(() => {
-    return (solicitudes || []).filter((s) => s.estatus === "Pendiente").length;
-  }, [solicitudes]);
+  const [resumenesNotasCredito, setResumenesNotasCredito] = useState([]);
+  const [clienteNotaSeleccionadoDetalle, setClienteNotaSeleccionadoDetalle] =
+    useState(null);
+  const [historialNotasCliente, setHistorialNotasCliente] = useState([]);
+  const [cargandoResumenesNotasCredito, setCargandoResumenesNotasCredito] =
+    useState(false);
+  const [errorResumenesNotasCredito, setErrorResumenesNotasCredito] =
+    useState("");
+  const [cargandoHistorialNotasCredito, setCargandoHistorialNotasCredito] =
+    useState(false);
+  const [errorHistorialNotasCredito, setErrorHistorialNotasCredito] =
+    useState("");
+  const [paginaNotasCredito, setPaginaNotasCredito] = useState(1);
+  const [cursoresNotasCredito, setCursoresNotasCredito] = useState([]);
+  const [haySiguienteNotasCredito, setHaySiguienteNotasCredito] =
+    useState(false);
+  const [paginaHistorialNotasCredito, setPaginaHistorialNotasCredito] =
+    useState(1);
+  const [cursoresHistorialNotasCredito, setCursoresHistorialNotasCredito] =
+    useState([]);
+  const [haySiguienteHistorialNotasCredito, setHaySiguienteHistorialNotasCredito] =
+    useState(false);
+  const hayAnteriorLineaCredito = paginaLineaCredito > 1;
+  const hayAnteriorNotasCredito = paginaNotasCredito > 1;
+  const hayAnteriorHistorialNotasCredito = paginaHistorialNotasCredito > 1;
 
-  const [filtroActividad, setFiltroActividad] = useState({
-    busqueda: "", modulo: "Todos", tipo: "Todos", fecha: "",
-  });
-  const [paginaActividad, setPaginaActividad] = useState(1);
-  const registrosPorPaginaAct = 10;
+  const clienteLineaEnPagina = useMemo(
+    () =>
+      (resumenesLineaCredito || []).find(
+        (resumen) => resumen.cliente_id === clienteLineaSeleccionadoId,
+      ) || null,
+    [clienteLineaSeleccionadoId, resumenesLineaCredito],
+  );
 
-  const actividadFiltrada = useMemo(() => {
-    const busquedaLimpia = filtroActividad.busqueda.toLowerCase().trim();
-    return (actividad || []).filter((act) => {
-      const matchBusqueda =
-        (act.cliente || "").toLowerCase().includes(busquedaLimpia) ||
-        (act.detalle || "").toLowerCase().includes(busquedaLimpia) ||
-        (act.folio || "").toLowerCase().includes(busquedaLimpia);
-      const matchModulo = filtroActividad.modulo === "Todos" || act.modulo === filtroActividad.modulo;
-      const matchTipo = filtroActividad.tipo === "Todos" || act.tipo === filtroActividad.tipo;
+  const clienteLineaSeleccionadoParaVista = clienteLineaSeleccionadoId
+    ? clienteLineaEnPagina || clienteLineaSeleccionadoDetalle
+    : null;
 
-      let matchFecha = true;
-      if (filtroActividad.fecha) {
-        const [y, m, d] = filtroActividad.fecha.split("-");
-        const fechaCorta = `${d}/${m}/${y}`;
-        matchFecha = act.fechaHora?.startsWith(fechaCorta);
+  const clienteNotaEnPagina = useMemo(
+    () =>
+      (resumenesNotasCredito || []).find(
+        (resumen) => resumen.cliente_id === clienteNotaSeleccionadoId,
+      ) || null,
+    [clienteNotaSeleccionadoId, resumenesNotasCredito],
+  );
+
+  const clienteNotaSeleccionadoParaVista = clienteNotaSeleccionadoId
+    ? clienteNotaEnPagina || clienteNotaSeleccionadoDetalle
+    : null;
+
+  const actualizarParametros = (cambios = {}, borrar = []) => {
+    const nuevosParametros = new URLSearchParams(searchParams);
+
+    Object.entries(cambios).forEach(([clave, valor]) => {
+      if (valor === null || valor === undefined || valor === "") {
+        nuevosParametros.delete(clave);
+      } else {
+        nuevosParametros.set(clave, valor);
       }
-      return matchBusqueda && matchModulo && matchTipo && matchFecha;
     });
-  }, [actividad, filtroActividad]);
 
-  const actividadPaginada = useMemo(() => {
-    const inicio = (paginaActividad - 1) * registrosPorPaginaAct;
-    return actividadFiltrada.slice(inicio, inicio + registrosPorPaginaAct);
-  }, [actividadFiltrada, paginaActividad]);
+    borrar.forEach((clave) => nuevosParametros.delete(clave));
 
-  const totalPaginasAct = Math.ceil(actividadFiltrada.length / registrosPorPaginaAct);
+    setSearchParams(nuevosParametros);
+  };
 
-  const actualizarFiltroActividad = (campo, valor) => {
-    setFiltroActividad((prev) => ({ ...prev, [campo]: valor }));
-    setPaginaActividad(1);
+  const cambiarTab = (tab) => {
+    actualizarParametros(
+      {
+        tab,
+      },
+      tab === "creditos"
+        ? []
+        : ["vista", "solicitud", "clienteLinea", "clienteNota", "filtroNota"],
+    );
+  };
+
+  const cambiarVistaCredito = (vista) => {
+    actualizarParametros(
+      {
+        tab: "creditos",
+        vista,
+      },
+      vista === "linea"
+        ? ["solicitud", "clienteNota", "filtroNota"]
+        : ["clienteLinea"],
+    );
+  };
+
+  const administradores = useMemo(
+    () => (usuarios || []).filter((usuario) => usuario.rol === "ADMIN"),
+    [usuarios],
+  );
+
+  const solicitudesNotasOrdenadas = useMemo(
+    () => ordenarSolicitudesOperativas(solicitudesNotasCredito || []),
+    [solicitudesNotasCredito],
+  );
+
+  const solicitudesPendientesCount = useMemo(
+    () =>
+      solicitudesNotasOrdenadas.filter(
+        (solicitud) => solicitud.estatus === "Pendiente",
+      ).length,
+    [solicitudesNotasOrdenadas],
+  );
+
+  const cargarPaginaResumenesLineaCredito = useCallback(
+    async ({ paginaDestino = 1, cursor = null, reiniciarCursores = false } = {}) => {
+      if (!isSuperUser) return;
+
+      setCargandoResumenesLineaCredito(true);
+      setErrorResumenesLineaCredito("");
+
+      try {
+        const restricciones = [];
+
+        restricciones.push(orderBy("ultimo_movimiento_at", "desc"));
+
+        if (cursor) {
+          restricciones.push(startAfter(cursor));
+        }
+
+        restricciones.push(limit(RESUMENES_LINEA_POR_PAGINA + 1));
+
+        const qResumenes = query(
+          collection(db, RESUMEN_LINEA_COLLECTION),
+          ...restricciones,
+        );
+
+        const snap = await getDocs(qResumenes);
+        const documentosVisibles = snap.docs.slice(
+          0,
+          RESUMENES_LINEA_POR_PAGINA,
+        );
+
+        const data = documentosVisibles.map((documento) => ({
+          id: documento.id,
+          ...documento.data(),
+        }));
+
+        setResumenesLineaCredito(data);
+        setPaginaLineaCredito(paginaDestino);
+        setHaySiguienteLineaCredito(
+          snap.docs.length > RESUMENES_LINEA_POR_PAGINA,
+        );
+
+        setCursoresLineaCredito((cursoresActuales) => {
+          if (reiniciarCursores) {
+            return documentosVisibles.length > 0
+              ? [documentosVisibles[documentosVisibles.length - 1]]
+              : [];
+          }
+
+          const cursoresNuevos = cursoresActuales.slice(0, paginaDestino - 1);
+
+          if (documentosVisibles.length > 0) {
+            cursoresNuevos[paginaDestino - 1] =
+              documentosVisibles[documentosVisibles.length - 1];
+          }
+
+          return cursoresNuevos;
+        });
+      } catch (error) {
+        console.error("Error cargando resumen de línea de crédito:", error);
+        setResumenesLineaCredito([]);
+        setHaySiguienteLineaCredito(false);
+        setErrorResumenesLineaCredito(
+          error?.code === "failed-precondition"
+            ? "Firestore requiere un índice para este filtro. Crea el índice que Firebase indique en consola."
+            : "No se pudo cargar la página de líneas de crédito.",
+        );
+      } finally {
+        setCargandoResumenesLineaCredito(false);
+      }
+    },
+    [isSuperUser],
+  );
+
+  const cargarPaginaResumenesNotasCredito = useCallback(
+    async ({ paginaDestino = 1, cursor = null, reiniciarCursores = false } = {}) => {
+      if (!isSuperUser) return;
+
+      setCargandoResumenesNotasCredito(true);
+      setErrorResumenesNotasCredito("");
+
+      try {
+        const restricciones = [];
+
+        restricciones.push(orderBy("ultimo_movimiento_at", "desc"));
+
+        if (cursor) {
+          restricciones.push(startAfter(cursor));
+        }
+
+        restricciones.push(limit(NOTAS_CLIENTES_POR_PAGINA + 1));
+
+        const qResumenes = query(
+          collection(db, RESUMEN_NOTAS_COLLECTION),
+          ...restricciones,
+        );
+
+        const snap = await getDocs(qResumenes);
+        const documentosVisibles = snap.docs.slice(
+          0,
+          NOTAS_CLIENTES_POR_PAGINA,
+        );
+
+        const resumenesOptimizados = documentosVisibles.map((documento) => ({
+          id: documento.id,
+          ...documento.data(),
+        }));
+
+        setResumenesNotasCredito(resumenesOptimizados);
+        setPaginaNotasCredito(paginaDestino);
+        setHaySiguienteNotasCredito(
+          snap.docs.length > NOTAS_CLIENTES_POR_PAGINA,
+        );
+
+        setCursoresNotasCredito((cursoresActuales) => {
+          if (reiniciarCursores) {
+            return documentosVisibles.length > 0
+              ? [documentosVisibles[documentosVisibles.length - 1]]
+              : [];
+          }
+
+          const cursoresNuevos = cursoresActuales.slice(0, paginaDestino - 1);
+
+          if (documentosVisibles.length > 0) {
+            cursoresNuevos[paginaDestino - 1] =
+              documentosVisibles[documentosVisibles.length - 1];
+          }
+
+          return cursoresNuevos;
+        });
+      } catch (error) {
+        console.error("Error cargando resumen de notas de crédito:", error);
+        setResumenesNotasCredito([]);
+        setHaySiguienteNotasCredito(false);
+        setErrorResumenesNotasCredito(
+          error?.code === "failed-precondition"
+            ? "Firestore requiere un índice para cargar clientes con notas. Crea el índice que Firebase indique en consola."
+            : "No se pudo cargar la página de clientes con notas de crédito.",
+        );
+      } finally {
+        setCargandoResumenesNotasCredito(false);
+      }
+    },
+    [isSuperUser],
+  );
+
+  const cargarPaginaHistorialNotasCredito = useCallback(
+    async ({ paginaDestino = 1, cursor = null, reiniciarCursores = false } = {}) => {
+      if (!isSuperUser || !clienteNotaSeleccionadoId) return;
+
+      setCargandoHistorialNotasCredito(true);
+      setErrorHistorialNotasCredito("");
+
+      try {
+        const restricciones = [where("cliente_id", "==", clienteNotaSeleccionadoId)];
+
+        if (filtroHistorialNotasCredito === "Anulada") {
+          restricciones.push(where("nota_anulada", "==", true));
+        } else if (filtroHistorialNotasCredito !== "TODAS") {
+          restricciones.push(where("estatus", "==", filtroHistorialNotasCredito));
+        }
+
+        restricciones.push(orderBy("createdAt", "desc"));
+
+        if (cursor) {
+          restricciones.push(startAfter(cursor));
+        }
+
+        restricciones.push(limit(NOTAS_HISTORIAL_POR_PAGINA + 1));
+
+        const qHistorial = query(
+          collection(db, SOLICITUDES_NOTAS_COLLECTION),
+          ...restricciones,
+        );
+
+        const snap = await getDocs(qHistorial);
+        const documentosVisibles = snap.docs.slice(
+          0,
+          NOTAS_HISTORIAL_POR_PAGINA,
+        );
+
+        const data = documentosVisibles.map((documento) => ({
+          id: documento.id,
+          ...documento.data(),
+        }));
+
+        setHistorialNotasCliente(data);
+        setPaginaHistorialNotasCredito(paginaDestino);
+        setHaySiguienteHistorialNotasCredito(
+          snap.docs.length > NOTAS_HISTORIAL_POR_PAGINA,
+        );
+
+        setCursoresHistorialNotasCredito((cursoresActuales) => {
+          if (reiniciarCursores) {
+            return documentosVisibles.length > 0
+              ? [documentosVisibles[documentosVisibles.length - 1]]
+              : [];
+          }
+
+          const cursoresNuevos = cursoresActuales.slice(0, paginaDestino - 1);
+
+          if (documentosVisibles.length > 0) {
+            cursoresNuevos[paginaDestino - 1] =
+              documentosVisibles[documentosVisibles.length - 1];
+          }
+
+          return cursoresNuevos;
+        });
+      } catch (error) {
+        console.error("Error cargando historial de notas de crédito:", error);
+        setHistorialNotasCliente([]);
+        setHaySiguienteHistorialNotasCredito(false);
+        setErrorHistorialNotasCredito(
+          error?.code === "failed-precondition"
+            ? "Firestore requiere un índice para este historial. Crea el índice que Firebase indique en consola."
+            : "No se pudo cargar el historial de notas del cliente.",
+        );
+      } finally {
+        setCargandoHistorialNotasCredito(false);
+      }
+    },
+    [clienteNotaSeleccionadoId, filtroHistorialNotasCredito, isSuperUser],
+  );
+
+  useEffect(() => {
+    if (!isSuperUser) {
+      return undefined;
+    }
+
+    let cancelado = false;
+
+    const timeoutId = window.setTimeout(() => {
+      if (cancelado) return;
+
+      cargarPaginaResumenesLineaCredito({
+        paginaDestino: 1,
+        cursor: null,
+        reiniciarCursores: true,
+      });
+    }, 0);
+
+    return () => {
+      cancelado = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [cargarPaginaResumenesLineaCredito, isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser) {
+      return undefined;
+    }
+
+    let cancelado = false;
+
+    const timeoutId = window.setTimeout(() => {
+      if (cancelado) return;
+
+      cargarPaginaResumenesNotasCredito({
+        paginaDestino: 1,
+        cursor: null,
+        reiniciarCursores: true,
+      });
+    }, 0);
+
+    return () => {
+      cancelado = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [cargarPaginaResumenesNotasCredito, isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser || !clienteLineaSeleccionadoId || clienteLineaEnPagina) {
+      return undefined;
+    }
+
+    let cancelado = false;
+
+    const cargarDetalleSeleccionado = async () => {
+      try {
+        const resumenRef = doc(
+          db,
+          RESUMEN_LINEA_COLLECTION,
+          clienteLineaSeleccionadoId,
+        );
+        const resumenSnap = await getDoc(resumenRef);
+
+        if (cancelado) return;
+
+        if (resumenSnap.exists()) {
+          setClienteLineaSeleccionadoDetalle({
+            id: resumenSnap.id,
+            ...resumenSnap.data(),
+          });
+        } else {
+          setClienteLineaSeleccionadoDetalle(null);
+        }
+      } catch (error) {
+        console.error("Error cargando detalle de línea seleccionado:", error);
+
+        if (!cancelado) {
+          setClienteLineaSeleccionadoDetalle(null);
+        }
+      }
+    };
+
+    cargarDetalleSeleccionado();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [clienteLineaEnPagina, clienteLineaSeleccionadoId, isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser || !clienteNotaSeleccionadoId || clienteNotaEnPagina) {
+      return undefined;
+    }
+
+    let cancelado = false;
+
+    const cargarDetalleSeleccionado = async () => {
+      try {
+        const resumenRef = doc(
+          db,
+          RESUMEN_NOTAS_COLLECTION,
+          clienteNotaSeleccionadoId,
+        );
+        const resumenSnap = await getDoc(resumenRef);
+
+        if (cancelado) return;
+
+        setClienteNotaSeleccionadoDetalle(
+          resumenSnap.exists()
+            ? {
+                id: resumenSnap.id,
+                ...resumenSnap.data(),
+              }
+            : null,
+        );
+      } catch (error) {
+        console.error("Error cargando detalle de notas seleccionado:", error);
+
+        if (!cancelado) {
+          setClienteNotaSeleccionadoDetalle(null);
+        }
+      }
+    };
+
+    cargarDetalleSeleccionado();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [clienteNotaEnPagina, clienteNotaSeleccionadoId, isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser || !clienteNotaSeleccionadoId) {
+      return undefined;
+    }
+
+    let cancelado = false;
+
+    const timeoutId = window.setTimeout(() => {
+      if (cancelado) return;
+
+      cargarPaginaHistorialNotasCredito({
+        paginaDestino: 1,
+        cursor: null,
+        reiniciarCursores: true,
+      });
+    }, 0);
+
+    return () => {
+      cancelado = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [cargarPaginaHistorialNotasCredito, clienteNotaSeleccionadoId, isSuperUser]);
+
+  useEffect(() => {
+    if (!isSuperUser || !clienteLineaSeleccionadoId) {
+      return undefined;
+    }
+
+    const qMovimientos = query(
+      collection(db, MOVIMIENTOS_LINEA_COLLECTION),
+      where("cliente_id", "==", clienteLineaSeleccionadoId),
+      orderBy("createdAt", "desc"),
+      limit(MOVIMIENTOS_LINEA_POR_PAGINA),
+    );
+
+    const unsub = onSnapshot(
+      qMovimientos,
+      (snap) => {
+        const data = snap.docs.map((documento) => ({
+          id: documento.id,
+          ...documento.data(),
+        }));
+
+        setMovimientosClienteLinea(data);
+        setCargandoMovimientosLinea(false);
+      },
+      (error) => {
+        console.error("Error cargando historial de línea del cliente:", error);
+        setMovimientosClienteLinea([]);
+        setCargandoMovimientosLinea(false);
+      },
+    );
+
+    return () => unsub();
+  }, [isSuperUser, clienteLineaSeleccionadoId]);
+
+  const irSiguienteLineaCredito = () => {
+    if (cargandoResumenesLineaCredito || !haySiguienteLineaCredito) return;
+
+    const cursorActual = cursoresLineaCredito[paginaLineaCredito - 1];
+
+    if (!cursorActual) return;
+
+    cargarPaginaResumenesLineaCredito({
+      paginaDestino: paginaLineaCredito + 1,
+      cursor: cursorActual,
+    });
+  };
+
+  const irAnteriorLineaCredito = () => {
+    if (cargandoResumenesLineaCredito || paginaLineaCredito <= 1) return;
+
+    const paginaDestino = paginaLineaCredito - 1;
+    const cursorAnterior =
+      paginaDestino === 1 ? null : cursoresLineaCredito[paginaDestino - 2];
+
+    cargarPaginaResumenesLineaCredito({
+      paginaDestino,
+      cursor: cursorAnterior,
+    });
+  };
+
+  const irSiguienteNotasCredito = () => {
+    if (cargandoResumenesNotasCredito || !haySiguienteNotasCredito) return;
+
+    const cursorActual = cursoresNotasCredito[paginaNotasCredito - 1];
+
+    if (!cursorActual) return;
+
+    cargarPaginaResumenesNotasCredito({
+      paginaDestino: paginaNotasCredito + 1,
+      cursor: cursorActual,
+    });
+  };
+
+  const irAnteriorNotasCredito = () => {
+    if (cargandoResumenesNotasCredito || paginaNotasCredito <= 1) return;
+
+    const paginaDestino = paginaNotasCredito - 1;
+    const cursorAnterior =
+      paginaDestino === 1 ? null : cursoresNotasCredito[paginaDestino - 2];
+
+    cargarPaginaResumenesNotasCredito({
+      paginaDestino,
+      cursor: cursorAnterior,
+    });
+  };
+
+  const irSiguienteHistorialNotasCredito = () => {
+    if (cargandoHistorialNotasCredito || !haySiguienteHistorialNotasCredito) {
+      return;
+    }
+
+    const cursorActual = cursoresHistorialNotasCredito[paginaHistorialNotasCredito - 1];
+
+    if (!cursorActual) return;
+
+    cargarPaginaHistorialNotasCredito({
+      paginaDestino: paginaHistorialNotasCredito + 1,
+      cursor: cursorActual,
+    });
+  };
+
+  const irAnteriorHistorialNotasCredito = () => {
+    if (cargandoHistorialNotasCredito || paginaHistorialNotasCredito <= 1) {
+      return;
+    }
+
+    const paginaDestino = paginaHistorialNotasCredito - 1;
+    const cursorAnterior =
+      paginaDestino === 1
+        ? null
+        : cursoresHistorialNotasCredito[paginaDestino - 2];
+
+    cargarPaginaHistorialNotasCredito({
+      paginaDestino,
+      cursor: cursorAnterior,
+    });
   };
 
   const cerrarModal = () => {
     if (isSubmitting) return;
+
     setModalActivo(null);
     setUsuarioSeleccionado(null);
     setActividadSeleccionada(null);
     setTempSolicitud(null);
+    setMotivoRechazoNota("");
   };
 
   const mostrarNotificacion = (titulo, descripcion, tipo = "exito") => {
@@ -128,34 +732,105 @@ export default function GestionUsuarios() {
     setModalActivo("notificacion");
   };
 
-  const handleCrearUsuario = async (e) => {
-    e.preventDefault();
+  const handleCrearUsuario = async (event) => {
+    event.preventDefault();
+
     if (!currentUser?.uid) {
-        mostrarNotificacion("Error", "No se pudo identificar al Súper Usuario responsable.", "error");
-        return;
+      mostrarNotificacion(
+        "Error",
+        "No se pudo identificar al Súper Usuario responsable.",
+        "error",
+      );
+      return;
     }
 
     setIsSubmitting(true);
+
     const res = await usuariosService.crearAdmin({
-        nombre: nuevoUsuario.nombre,
-        usuario: nuevoUsuario.usuario,
-        password: nuevoUsuario.password,
-        userName: usuarioResponsable,
-        actor_uid: currentUser.uid
+      nombre: nuevoUsuario.nombre,
+      usuario: nuevoUsuario.usuario,
+      correo: nuevoUsuario.correo,
+      password: nuevoUsuario.password,
+      userName: usuarioResponsable,
+      actor_uid: currentUser.uid,
     });
+
     setIsSubmitting(false);
 
     if (res.success) {
-        mostrarNotificacion("Usuario Creado", `Las credenciales para ${nuevoUsuario.nombre} han sido generadas y registradas.`);
-        setNuevoUsuario({ nombre: "", usuario: "", password: "" });
-    } else {
-        mostrarNotificacion("Alerta", res.error, "error");
+      mostrarNotificacion(
+        "Usuario creado",
+        `El acceso para ${nuevoUsuario.nombre} fue generado con alias y correo real.`,
+      );
+
+      setNuevoUsuario({
+        nombre: "",
+        usuario: "",
+        correo: "",
+        password: "",
+      });
+      return;
     }
+
+    mostrarNotificacion("Alerta", res.error, "error");
   };
 
   const abrirConfirmacionEstado = (usuario) => {
     setUsuarioSeleccionado(usuario);
     setModalActivo("confirmarEstado");
+  };
+
+  const abrirConfirmacionResetPassword = (usuario) => {
+    setUsuarioSeleccionado(usuario);
+    setModalActivo("confirmarResetPassword");
+  };
+
+  const confirmarResetPassword = async () => {
+    if (!usuarioSeleccionado || !currentUser?.uid) {
+      mostrarNotificacion(
+        "Error",
+        "No se pudo identificar al usuario o al Súper Usuario responsable.",
+        "error",
+      );
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const res = await usuariosService.enviarRecuperacionPassword({
+        correoObjetivo: usuarioSeleccionado.correo,
+        usuarioAlias: usuarioSeleccionado.usuario_alias || usuarioSeleccionado.usuarioLimpio,
+        userName: usuarioResponsable,
+        actor_uid: currentUser.uid,
+      });
+
+      if (!res.success) {
+        mostrarNotificacion(
+          "Error",
+          res.error || "No se pudo enviar el correo de recuperación.",
+          "error",
+        );
+        return;
+      }
+
+      setUsuarioSeleccionado(null);
+
+      mostrarNotificacion(
+        "Recuperación enviada",
+        "Firebase envió el enlace de recuperación al correo real vinculado.",
+      );
+    } catch (error) {
+      console.error("Error enviando recuperación:", error);
+
+      mostrarNotificacion(
+        "Error crítico",
+        "Ocurrió un error inesperado al enviar la recuperación.",
+        "error",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const alternarEstadoUsuario = async () => {
@@ -176,6 +851,7 @@ export default function GestionUsuarios() {
         uid: usuarioSeleccionado.id,
         activo: nuevoEstado,
         correoObjetivo: usuarioSeleccionado.correo,
+        usuarioAlias: usuarioSeleccionado.usuario_alias || usuarioSeleccionado.usuarioLimpio,
         userName: usuarioResponsable,
         actor_uid: currentUser.uid,
       });
@@ -192,13 +868,14 @@ export default function GestionUsuarios() {
       setUsuarioSeleccionado(null);
 
       mostrarNotificacion(
-        nuevoEstado ? "Usuario Reactivado" : "Usuario Suspendido",
+        nuevoEstado ? "Usuario reactivado" : "Usuario suspendido",
         nuevoEstado
           ? "La cuenta fue reactivada correctamente."
           : "La cuenta fue suspendida correctamente.",
       );
     } catch (error) {
       console.error("Error actualizando el usuario:", error);
+
       mostrarNotificacion(
         "Error crítico",
         "Ocurrió un error inesperado al actualizar la cuenta.",
@@ -209,458 +886,331 @@ export default function GestionUsuarios() {
     }
   };
 
-  const toggleSolicitud = (id) => {
-    setSolicitudesExpandidas((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  const abrirEvaluarSolicitud = (solicitud, nuevoEstatus) => {
-    setTempSolicitud({ ...solicitud, nuevoEstatus });
+  const abrirEvaluarSolicitudNotaCredito = (solicitud, nuevoEstatus) => {
+    setMotivoRechazoNota("");
+    setTempSolicitud({
+      ...solicitud,
+      nuevoEstatus,
+      tipo_solicitud: "NOTA_CREDITO",
+    });
     setModalActivo("confirmarSolicitud");
   };
 
   const confirmarSolicitud = async () => {
     if (!tempSolicitud?.id || !currentUser?.uid) {
-        mostrarNotificacion("Error", "No se pudo identificar la solicitud o al Súper Usuario.", "error");
-        return;
+      mostrarNotificacion(
+        "Error",
+        "No se pudo identificar la solicitud o al Súper Usuario.",
+        "error",
+      );
+      return;
+    }
+
+    if (tempSolicitud.nuevoEstatus === "Rechazado" && !motivoRechazoNota.trim()) {
+      mostrarNotificacion(
+        "Motivo requerido",
+        "Ingresa el motivo del rechazo para que el ADMIN pueda consultarlo.",
+        "error",
+      );
+      return;
     }
 
     setIsSubmitting(true);
 
     try {
-        const res = await solicitudesService.resolverSolicitud({
-            solicitud_id: tempSolicitud.id,
-            decision: tempSolicitud.nuevoEstatus,
-            actor_uid: currentUser.uid,
-            actor_nombre: usuarioResponsable,
-        });
+      const res = await solicitudesService.resolverSolicitudNotaCredito({
+        solicitud_id: tempSolicitud.id,
+        decision: tempSolicitud.nuevoEstatus,
+        actor_uid: currentUser.uid,
+        actor_nombre: usuarioResponsable,
+        motivo_resolucion:
+          tempSolicitud.nuevoEstatus === "Rechazado"
+            ? motivoRechazoNota
+            : "",
+      });
 
-        if (!res.success) {
-            mostrarNotificacion("Error al resolver", res.error || "No se pudo procesar la solicitud.", "error");
-            return;
-        }
-
+      if (!res.success) {
         mostrarNotificacion(
-            tempSolicitud.nuevoEstatus === "Autorizado" ? "Solicitud Aprobada" : "Solicitud Rechazada",
-            tempSolicitud.nuevoEstatus === "Autorizado"
-                ? "El aumento fue aplicado al límite y al crédito disponible del cliente."
-                : "La solicitud fue rechazada sin modificar la línea de crédito."
+          "Error al resolver",
+          res.error || "No se pudo procesar la solicitud.",
+          "error",
         );
+        return;
+      }
 
-        setTempSolicitud(null);
+      mostrarNotificacion(
+        tempSolicitud.nuevoEstatus === "Autorizado"
+          ? "Solicitud aprobada"
+          : "Solicitud rechazada",
+        tempSolicitud.nuevoEstatus === "Autorizado"
+          ? "La nota de crédito fue aplicada a la factura y quedó registrada en auditoría."
+          : "La solicitud de nota de crédito fue rechazada sin modificar la factura.",
+      );
+
+      setTempSolicitud(null);
+      setMotivoRechazoNota("");
+
+      await cargarPaginaResumenesNotasCredito({
+        paginaDestino: paginaNotasCredito,
+        cursor: paginaNotasCredito === 1 ? null : cursoresNotasCredito[paginaNotasCredito - 2],
+        reiniciarCursores: paginaNotasCredito === 1,
+      });
+
+      if (clienteNotaSeleccionadoId) {
+        await cargarPaginaHistorialNotasCredito({
+          paginaDestino: 1,
+          cursor: null,
+          reiniciarCursores: true,
+        });
+      }
     } catch (error) {
-        console.error("Error resolviendo solicitud:", error);
-        mostrarNotificacion("Error crítico", "Ocurrió un error inesperado al resolver la solicitud.", "error");
+      console.error("Error resolviendo solicitud:", error);
+
+      mostrarNotificacion(
+        "Error crítico",
+        "Ocurrió un error inesperado al resolver la solicitud.",
+        "error",
+      );
     } finally {
-        setIsSubmitting(false);
+      setIsSubmitting(false);
     }
   };
 
+  const seleccionarClienteNota = (resumen) => {
+    const mismoElemento = clienteNotaSeleccionadoId === resumen.cliente_id;
+
+    if (mismoElemento) {
+      setClienteNotaSeleccionadoDetalle(null);
+      setHistorialNotasCliente([]);
+      setCargandoHistorialNotasCredito(false);
+    } else {
+      setClienteNotaSeleccionadoDetalle(resumen);
+      setHistorialNotasCliente([]);
+      setCargandoHistorialNotasCredito(true);
+    }
+
+    actualizarParametros(
+      {
+        tab: "creditos",
+        vista: "notas",
+        clienteNota: mismoElemento ? "" : resumen.cliente_id,
+        filtroNota: mismoElemento ? "" : "TODAS",
+      },
+      ["clienteLinea", "solicitud"],
+    );
+  };
+
+  const cambiarFiltroHistorialNotasCredito = (filtro) => {
+    actualizarParametros(
+      {
+        tab: "creditos",
+        vista: "notas",
+        filtroNota: filtro === "TODAS" ? "" : filtro,
+      },
+      ["clienteLinea", "solicitud"],
+    );
+  };
+
+  const seleccionarClienteLinea = (resumen) => {
+    const mismoElemento = clienteLineaSeleccionadoId === resumen.cliente_id;
+
+    if (mismoElemento) {
+      setClienteLineaSeleccionadoDetalle(null);
+      setMovimientosClienteLinea([]);
+      setCargandoMovimientosLinea(false);
+    } else {
+      setClienteLineaSeleccionadoDetalle(resumen);
+      setMovimientosClienteLinea([]);
+      setCargandoMovimientosLinea(true);
+    }
+
+    actualizarParametros(
+      {
+        tab: "creditos",
+        vista: "linea",
+        clienteLinea: mismoElemento ? "" : resumen.cliente_id,
+      },
+      ["solicitud", "clienteNota", "filtroNota"],
+    );
+  };
+
+  const abrirDetalleEdicionFactura = (actividadSeleccionadaNueva) => {
+    setActividadSeleccionada(actividadSeleccionadaNueva);
+    setModalActivo("detalleEdicionFactura");
+  };
+
+  if (!isSuperUser) {
+    return (
+      <div className="flex h-[60vh] flex-col items-center justify-center rounded-xl border border-gray-100 bg-white p-6 text-center shadow-sm animate-in zoom-in duration-300">
+        <div className="mb-4 rounded-full bg-red-50 p-4 text-red-500">
+          <Shield className="h-10 w-10" />
+        </div>
+
+        <h2 className="text-xl font-black text-[#0a192f]">
+          Área privada requerida
+        </h2>
+
+        <p className="mt-1 max-w-sm text-xs leading-relaxed text-gray-400">
+          No posees el rango maestro de Súper Usuario para modificar accesos o auditar operaciones financieras.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col space-y-4 md:space-y-6 animate-fade-in relative pb-10 text-sm">
-      {!isSuperUser ? (
-        <div className="h-[60vh] flex flex-col items-center justify-center text-center p-6 bg-white rounded-xl border border-gray-100 shadow-sm animate-in zoom-in duration-300">
-          <div className="bg-red-50 p-4 rounded-full text-red-500 mb-4"><Shield className="h-10 w-10" /></div>
-          <h2 className="text-xl font-black text-[#0a192f]">Área Privada Requerida</h2>
-          <p className="text-gray-400 max-w-sm text-xs mt-1 leading-relaxed">
-            No posees el rango maestro de SuperUsuario para modificar accesos de personal o auditar operaciones financieras.
+    <div className="relative flex flex-col space-y-4 pb-10 text-sm animate-fade-in md:space-y-6">
+      <div className="mt-2 flex flex-col items-start justify-between gap-2 md:mt-4 md:flex-row md:items-end md:gap-4">
+        <div>
+          <h1 className="flex items-center text-xl font-bold text-[#0a192f] md:text-2xl">
+            <Shield className="mr-2 h-5 w-5 text-amber-500 md:h-6 md:w-6" />
+            Panel de Control SU
+          </h1>
+
+          <p className="mt-1 text-xs text-gray-500 md:text-sm">
+            Centro ejecutivo de personal, gestión de créditos y auditoría global.
           </p>
         </div>
-      ) : (
-        <>
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-end mt-2 md:mt-4 gap-2 md:gap-4">
-            <div>
-              <h1 className="text-xl md:text-2xl font-bold text-[#0a192f] flex items-center">
-                <Shield className="h-5 w-5 md:h-6 md:w-6 mr-2 text-amber-500" /> Panel de Control SU
-              </h1>
-              <p className="text-xs md:text-sm text-gray-500 mt-1">Gestión interna de credenciales, bandeja de riesgo y monitor de actividad global.</p>
-            </div>
-          </div>
+      </div>
 
-          <div className="flex border-b border-gray-200 bg-white p-1.5 md:p-1 rounded-xl md:rounded-lg border w-full md:w-fit shadow-sm overflow-x-auto custom-scrollbar hide-scrollbar-mobile shrink-0">
-            <button onClick={() => setTabActiva("usuarios")} className={`whitespace-nowrap px-5 py-3 md:py-2 text-xs font-bold rounded-lg md:rounded-md transition-all flex-1 md:flex-none ${tabActiva === "usuarios" ? "bg-[#0a192f] text-white shadow-sm" : "text-gray-500 hover:text-[#0a192f] active:bg-gray-100"}`}>Control de Personal</button>
-            <button onClick={() => setTabActiva("solicitudes")} className={`whitespace-nowrap px-5 py-3 md:py-2 text-xs font-bold rounded-lg md:rounded-md transition-all flex items-center justify-center flex-1 md:flex-none ${tabActiva === "solicitudes" ? "bg-[#0a192f] text-white shadow-sm" : "text-gray-500 hover:text-[#0a192f] active:bg-gray-100"}`}>
-              Bandeja de Créditos
-              {solicitudesPendientesCount > 0 && <span className="ml-2 bg-red-500 text-white text-[10px] px-1.5 py-0.5 md:py-0.2 rounded-full font-mono">{solicitudesPendientesCount}</span>}
+      <div className="grid grid-cols-2 gap-2 rounded-2xl border border-white bg-white/55 p-2 shadow-sm md:grid-cols-4">
+        {TABS_PANEL_SU.map((tab) => {
+          const activa = tabActiva === tab.id;
+
+          const Icono =
+            tab.id === "resumen"
+              ? Shield
+              : tab.id === "usuarios"
+                ? UserCheck
+                : tab.id === "creditos"
+                  ? CreditCard
+                  : Activity;
+
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => cambiarTab(tab.id)}
+              className={`group flex min-h-[64px] items-center gap-2 rounded-xl border px-3 py-3 text-left transition-all duration-100 active:scale-[0.98] md:gap-3 md:px-4 ${
+                activa
+                  ? "border-[#0a192f] bg-[#0a192f] text-white shadow-sm"
+                  : "border-transparent text-gray-600 hover:-translate-y-0.5 hover:border-[#ffd700]/60 hover:bg-white hover:shadow-[0_10px_22px_rgba(10,25,47,0.10)]"
+              }`}
+            >
+              <Icono
+                className={`h-4 w-4 shrink-0 ${
+                  activa ? "text-[#ffd700]" : "text-gray-400 group-hover:text-[#ffd700]"
+                }`}
+              />
+
+              <span className="min-w-0">
+                <span className="block text-xs font-black">
+                  {tab.label}
+                  {tab.id === "creditos" && solicitudesPendientesCount > 0 && (
+                    <span className="ml-2 rounded-full bg-red-500 px-1.5 py-0.5 text-[9px] text-white">
+                      {solicitudesPendientesCount}
+                    </span>
+                  )}
+                </span>
+
+                <span
+                  className={`hidden text-[10px] font-semibold md:block ${
+                    activa ? "text-white/60" : "text-gray-400"
+                  }`}
+                >
+                  {tab.descripcion}
+                </span>
+              </span>
             </button>
-            <button onClick={() => setTabActiva("actividad")} className={`whitespace-nowrap px-5 py-3 md:py-2 text-xs font-bold rounded-lg md:rounded-md transition-all flex-1 md:flex-none ${tabActiva === "actividad" ? "bg-[#0a192f] text-white shadow-sm" : "text-gray-500 hover:text-[#0a192f] active:bg-gray-100"}`}>Actividad del Sistema</button>
-          </div>
+          );
+        })}
+      </div>
 
-          {tabActiva === "usuarios" && (
-            <div className="space-y-4 md:space-y-6">
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center bg-white p-4 md:p-4 rounded-xl shadow-sm border border-gray-100 gap-3">
-                <div className="flex items-center text-gray-600 text-xs font-bold uppercase tracking-wider">
-                  <Users className="h-4 w-4 mr-2 text-blue-600" />
-                  Operadores Registrados: <span className="font-black ml-1 text-[#0a192f] text-sm md:text-sm">{administradores.length}</span>
-                </div>
-                <button onClick={() => setModalActivo("nuevoUsuario")} className="w-full sm:w-auto px-4 py-3 md:py-2 bg-[#0a192f] text-white font-bold text-xs rounded-xl md:rounded-md hover:bg-[#1a2b45] active:bg-[#1a2b45] flex items-center justify-center shadow-sm">
-                  <UserPlus className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1.5" /> Crear Acceso Admin
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                {administradores.map((usuario) => (
-                  <div key={usuario.id} className={`bg-white rounded-xl shadow-sm border overflow-hidden transition-all ${!usuario.activo ? "border-red-100 opacity-75" : "border-gray-100 hover:shadow-md"}`}>
-                    <div className={`p-4 border-b flex justify-between items-start ${!usuario.activo ? "bg-red-50/20" : "bg-gray-50/40"}`}>
-                      <div className="flex items-center min-w-0">
-                        <div className={`h-10 w-10 md:h-9 md:w-9 rounded-full flex items-center justify-center font-black text-white shrink-0 text-sm bg-[#0a192f]`}>
-                          {textoSeguro(usuario.nombre).charAt(0).toUpperCase()}
-                        </div>
-                        <div className="ml-3 min-w-0">
-                          <p className="font-bold text-[#0a192f] text-base md:text-sm truncate">{textoSeguro(usuario.nombre)}</p>
-                          <p className="text-[11px] text-gray-400 font-mono mt-0.5 truncate">{textoSeguro(usuario.correo)}</p>
-                        </div>
-                      </div>
-                      <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 md:py-0.2 rounded border shrink-0 bg-blue-50 text-blue-700 border-blue-100`}>
-                        {textoSeguro(usuario.rol)}
-                      </span>
-                    </div>
-                    <div className="p-4 space-y-2 md:space-y-2 bg-white">
-                      <div className="flex items-center text-xs text-gray-500">
-                        <Clock className="h-4 w-4 md:h-3.5 md:w-3.5 mr-2 text-gray-400 shrink-0" />
-                        <span className="truncate">Última entrada: <strong className="text-gray-700 font-mono">{textoSeguro(usuario.ultima_entrada, "Nunca")}</strong></span>
-                      </div>
-                      <div className="flex items-center text-xs text-gray-500">
-                        <div className={`h-2 w-2 md:h-1.5 md:w-1.5 rounded-full mr-2.5 shrink-0 ${usuario.activo ? "bg-green-500" : "bg-red-500"}`}></div>
-                        <span>Estatus: <strong className={usuario.activo ? "text-green-700" : "text-red-600"}>{usuario.activo ? "OPERATIVO" : "SUSPENDIDO"}</strong></span>
-                      </div>
-                    </div>
-                    <div className="p-2 md:p-2 bg-gray-50 border-t border-gray-100 flex flex-col gap-2">
-                      <button
-                        onClick={() => abrirConfirmacionEstado(usuario)}
-                        className={`w-full flex items-center justify-center py-2.5 md:py-1.5 rounded-lg md:rounded text-xs font-bold transition-all ${usuario.activo ? "text-red-600 bg-white md:bg-transparent border border-gray-200 md:border-transparent active:bg-red-50 hover:bg-red-50" : "text-green-600 bg-white md:bg-transparent border border-gray-200 md:border-transparent active:bg-green-50 hover:bg-green-50"}`}
-                      >
-                        <Power className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1.5 md:mr-1" /> {usuario.activo ? "Suspender" : "Reactivar"}
-                      </button>
-                      
-                      <div className="w-full flex items-center justify-center py-2 text-xs font-bold text-gray-400 bg-gray-100/50 rounded-lg cursor-not-allowed border border-gray-200/50 select-none">
-                        <Key className="h-4 w-4 mr-1.5 opacity-50" /> Cambio manual
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {tabActiva === "solicitudes" && (
-            <div className="space-y-4">
-              <div className="bg-amber-50 border border-amber-100 p-4 md:p-3 rounded-xl flex items-start">
-                <AlertTriangle className="h-5 w-5 md:h-4 md:w-4 text-amber-600 mr-3 md:mr-2.5 mt-0.5 shrink-0" />
-                <p className="text-xs text-amber-800 font-medium leading-relaxed">Bandeja de riesgo activa. Las decisiones tomadas en este panel impactan de manera inmediata las carteras y líneas autorizadas.</p>
-              </div>
-              {(solicitudes || []).length === 0 ? (
-                <div className="text-center py-12 bg-white rounded-xl border border-gray-100 shadow-sm">
-                  <CheckCircle className="h-10 w-10 md:h-9 md:w-9 text-green-400 mx-auto mb-3 md:mb-2" />
-                  <p className="text-gray-400 font-medium text-xs">No existen trámites de crédito en espera.</p>
-                </div>
-              ) : (
-                <div className="grid gap-3 md:gap-3">
-                  {(solicitudes || []).map((solicitud) => {
-                    const estaExpandida = !!solicitudesExpandidas[solicitud.id];
-                    return (
-                      <div key={solicitud.id} className="bg-white rounded-xl border border-gray-100 overflow-hidden relative shadow-sm">
-                        <div className={`absolute left-0 top-0 bottom-0 w-1.5 md:w-1 ${solicitud.estatus === "Pendiente" ? "bg-amber-400" : solicitud.estatus === "Autorizado" ? "bg-green-500" : "bg-red-500"}`}></div>
-                        <div onClick={() => toggleSolicitud(solicitud.id)} className="p-4 md:p-4 pl-5 md:pl-5 flex justify-between items-center cursor-pointer active:bg-gray-50/50 hover:bg-gray-50/20 select-none">
-                          <div className="min-w-0 flex-1 pr-3">
-                            <div className="flex items-center space-x-2.5 mb-1.5 md:mb-1 flex-wrap gap-y-1.5">
-                              <span className={`text-[9px] font-black uppercase px-2 md:px-1.5 py-0.5 md:py-0.2 rounded border ${solicitud.estatus === "Pendiente" ? "bg-amber-50 text-amber-700 border-amber-200" : solicitud.estatus === "Autorizado" ? "bg-green-50 text-green-700 border-green-200" : "bg-red-50 text-red-700 border-red-200"}`}>
-                                {textoSeguro(solicitud.estatus)}
-                              </span>
-                              <span className="text-[11px] text-gray-400 flex items-center font-mono"><Clock className="h-3 w-3 mr-1" />{textoSeguro(solicitud.fecha, "Sin fecha")}</span>
-                            </div>
-                            <h3 className="font-bold text-sm md:text-sm text-[#0a192f] truncate">
-                              Aumento de Límite de Crédito <span className="font-normal text-gray-400 text-xs hidden sm:inline">— solicitado por {textoSeguro(solicitud.solicitado_por_nombre)}</span>
-                            </h3>
-                          </div>
-                          {estaExpandida ? <ChevronUp className="h-5 w-5 md:h-4 md:w-4 text-gray-400" /> : <ChevronDown className="h-5 w-5 md:h-4 md:w-4 text-gray-400" />}
-                        </div>
-                        {estaExpandida && (
-                          <div className="p-4 md:p-4 pl-5 md:pl-5 border-t border-gray-50 bg-gray-50/30 flex flex-col md:flex-row justify-between md:items-center gap-4 md:gap-4 animate-in fade-in duration-200">
-                            <div className="flex-1 text-xs md:text-xs">
-                              <p className="font-black text-gray-700 text-sm md:text-sm uppercase tracking-tight">{textoSeguro(solicitud.cliente)}</p>
-                              <div className="mt-2.5 md:mt-2 bg-white p-3 md:p-3 rounded-lg border border-gray-100 leading-relaxed text-gray-600 shadow-sm">
-                                <p><strong className="text-gray-800">Argumento de Alta:</strong> "{textoSeguro(solicitud.motivo)}"</p>
-                                <p className="mt-1.5 font-medium">
-                                  Límite actual: ${(Number(solicitud.limite_anterior) || 0).toLocaleString("es-MX")}
-                                  {" → "}
-                                  <strong className="text-blue-600 font-bold block sm:inline mt-0.5 sm:mt-0">
-                                    Nuevo límite: ${(Number(solicitud.nuevo_limite_propuesto) || 0).toLocaleString("es-MX")}
-                                  </strong>
-                                </p>
-                                <p className="mt-1 text-gray-500">
-                                  Incremento solicitado: <strong>${(Number(solicitud.monto_incremento) || 0).toLocaleString("es-MX")}</strong>
-                                </p>
-                              </div>
-                            </div>
-                            {solicitud.estatus === "Pendiente" && (
-                              <div className="flex md:flex-col gap-3 md:gap-2 shrink-0 w-full md:w-auto">
-                                <button onClick={() => abrirEvaluarSolicitud(solicitud, "Autorizado")} className="flex-1 px-4 py-3 md:py-2 bg-green-600 active:bg-green-700 hover:bg-green-700 text-white text-xs md:text-xs font-bold rounded-xl md:rounded shadow-sm flex items-center justify-center transition-colors"><Check className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1" /> Aprobar</button>
-                                <button onClick={() => abrirEvaluarSolicitud(solicitud, "Rechazado")} className="flex-1 px-4 py-3 md:py-2 bg-white border border-red-200 text-red-600 text-xs md:text-xs font-bold rounded-xl md:rounded active:bg-red-50 hover:bg-red-50 flex items-center justify-center transition-colors"><X className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1" /> Denegar</button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {tabActiva === "actividad" && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col overflow-hidden">
-              <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <div className="flex items-center space-x-2.5 md:space-x-2">
-                  <Activity className="h-5 w-5 md:h-5 md:w-5 text-blue-600" />
-                  <div>
-                    <h2 className="font-black text-[#0a192f] text-sm md:text-sm tracking-tight">Registro Unificado de Actividad</h2>
-                    <p className="text-[11px] md:text-[11px] text-gray-400 font-medium">Auditoría inmutable de eventos clave operativos.</p>
-                  </div>
-                </div>
-                {(filtroActividad.busqueda || filtroActividad.modulo !== "Todos" || filtroActividad.tipo !== "Todos" || filtroActividad.fecha) && (
-                  <button onClick={() => setFiltroActividad({ busqueda: "", modulo: "Todos", tipo: "Todos", fecha: "" })} className="flex items-center px-3 md:px-2.5 py-2.5 md:py-1.5 bg-red-50 text-red-600 text-xs font-bold rounded-lg md:rounded active:bg-red-100 hover:bg-red-100 transition-colors w-full sm:w-auto justify-center"><FilterX className="h-4 w-4 md:h-3.5 md:w-3.5 mr-1.5 md:mr-1" /> Limpiar Filtros</button>
-                )}
-              </div>
-              <div className="p-4 border-b border-gray-100 bg-white grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 md:gap-3">
-                <div className="relative">
-                  <Search className="absolute left-3 md:left-2.5 top-3 md:top-2.5 h-4 w-4 md:h-4 md:w-4 text-gray-400" />
-                  <input type="text" value={filtroActividad.busqueda} onChange={(e) => actualizarFiltroActividad("busqueda", e.target.value)} placeholder="Filtrar cliente o nota..." className="w-full pl-9 md:pl-8 pr-3 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs focus:outline-none focus:border-blue-400 focus:bg-white transition-all" />
-                </div>
-                <select value={filtroActividad.modulo} onChange={(e) => actualizarFiltroActividad("modulo", e.target.value)} className="w-full px-3 md:px-2 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs text-gray-600 outline-none">
-                  <option value="Todos">Todos los Módulos</option><option value="Facturación">Facturación</option><option value="Calendario">Calendario</option><option value="Clientes">Clientes</option><option value="Sistema">Sistema Base</option>
-                </select>
-                <select value={filtroActividad.tipo} onChange={(e) => actualizarFiltroActividad("tipo", e.target.value)} className="w-full px-3 md:px-2 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs text-gray-600 outline-none">
-                  <option value="Todos">Todos los Eventos</option><option value="Creación">Creación</option><option value="Edición de Factura">Edición de Factura</option><option value="Abono">Abono</option><option value="Eliminación de Abono">Eliminación de Abono</option><option value="Actualización">Actualización</option><option value="Reprogramación">Reprogramación</option><option value="Cancelación">Cancelación</option><option value="WhatsApp">WhatsApp</option><option value="Eliminación">Eliminación</option>
-                </select>
-                <input type="date" value={filtroActividad.fecha} onChange={(e) => actualizarFiltroActividad("fecha", e.target.value)} className="w-full px-3 md:px-2 py-3 md:py-1.5 bg-gray-50 border border-gray-200 rounded-lg md:rounded text-xs text-gray-500 outline-none" />
-              </div>
-              <div className="divide-y divide-gray-100 max-h-[400px] overflow-y-auto custom-scrollbar">
-                {actividadPaginada.length > 0 ? (
-                  actividadPaginada.map((act) => (
-                    <div key={act.id} className="p-4 md:p-3.5 hover:bg-gray-50/40 active:bg-gray-50/40 transition-colors flex flex-col md:flex-row justify-between items-start gap-3">
-                      <div className="flex-1 min-w-0 space-y-1.5 md:space-y-1">
-                        <div className="flex flex-wrap items-center gap-1.5 md:gap-1.5">
-                          <span className="text-[9px] font-black uppercase px-2 md:px-1.5 py-0.5 md:py-0.2 rounded border bg-gray-50 text-gray-500">{textoSeguro(act.modulo)}</span>
-                          <span className="text-[9px] font-black uppercase px-2 md:px-1.5 py-0.5 md:py-0.2 rounded border bg-blue-50 text-blue-600 border-blue-100">{textoSeguro(act.tipo)}</span>
-                          {act.cliente !== "N/A" && <span className="text-xs md:text-xs font-black text-[#0a192f] uppercase tracking-tight ml-1 truncate max-w-[220px]">{textoSeguro(act.cliente)}</span>}
-                        </div>
-                        <p className="text-xs md:text-xs text-gray-600 font-medium leading-relaxed">{textoSeguro(act.detalle)}</p>
-                        {act.tipo === "Edición de Factura" && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setActividadSeleccionada(act);
-                              setModalActivo("detalleEdicionFactura");
-                            }}
-                            className="mt-2 px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-[11px] font-black hover:bg-amber-100 active:bg-amber-100 transition-colors"
-                          >
-                            Ver cambios detallados
-                          </button>
-                        )}
-                      </div>
-                      <div className="shrink-0 text-left md:text-right flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center w-full md:w-auto border-t md:border-0 pt-2 md:pt-0 border-gray-100 gap-2">
-                        <span className="text-[11px] font-mono text-gray-400 flex items-center"><Clock className="h-3.5 w-3.5 md:h-3 md:w-3 mr-1.5 md:mr-1" />{textoSeguro(act.fechaHora, "Sin fecha")}</span>
-                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex items-center"><User className="h-3.5 w-3.5 md:h-3 md:w-3 mr-1.5 md:mr-1" />{textoSeguro(act.usuario)}</span>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-center py-12 text-gray-400"><Activity className="h-9 w-9 mx-auto mb-2 opacity-25" /><p className="text-xs italic">Ningún movimiento coincide con los filtros establecidos.</p></div>
-                )}
-              </div>
-              {totalPaginasAct > 1 && (
-                <div className="p-3 bg-gray-50 border-t border-gray-100 flex justify-between items-center px-4 shrink-0">
-                  <span className="text-[11px] font-medium text-gray-400">Pág. <strong className="text-gray-600">{paginaActividad}</strong> de {totalPaginasAct}</span>
-                  <div className="flex space-x-2 md:space-x-1">
-                    <button disabled={paginaActividad === 1} onClick={() => setPaginaActividad((p) => Math.max(p - 1, 1))} className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 transition-all"><ChevronLeft className="h-4 w-4 md:h-3.5 md:w-3.5" /></button>
-                    <button disabled={paginaActividad === totalPaginasAct} onClick={() => setPaginaActividad((p) => Math.min(p + 1, totalPaginasAct))} className="p-2 md:p-1 border bg-white rounded-lg md:rounded text-gray-500 hover:bg-gray-50 active:bg-gray-200 disabled:opacity-40 transition-all"><ChevronRight className="h-4 w-4 md:h-3.5 md:w-3.5" /></button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </>
+      {tabActiva === "resumen" && (
+        <ResumenEjecutivoSU
+          administradores={administradores}
+          solicitudesNotasOrdenadas={solicitudesNotasOrdenadas}
+          resumenesLineaCredito={resumenesLineaCredito}
+          actividad={actividad || []}
+          onCambiarTab={cambiarTab}
+        />
       )}
 
-      {/* MODALES "BOTTOM SHEET" DE SEGURIDAD */}
-      {modalActivo && (
-        <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm md:p-4">
-          <div className={`bg-white rounded-t-3xl md:rounded-xl shadow-2xl w-full flex flex-col overflow-hidden animate-slide-up md:animate-zoom-in max-h-[90vh] pb-6 md:pb-0 m-auto md:m-0 ${modalActivo === "detalleEdicionFactura" ? "max-w-2xl" : "max-w-sm"}`}>
-            <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-4 md:hidden shrink-0"></div>
-
-            {modalActivo !== "notificacion" && (
-              <div className="flex justify-between items-center p-4 md:p-4 border-b border-gray-100 bg-white md:bg-gray-50 shrink-0">
-                <h2 className="text-sm md:text-sm font-black text-[#0a192f] flex items-center">
-                  {modalActivo === "nuevoUsuario" && <><UserPlus className="h-4 w-4 md:h-4 md:w-4 mr-1.5" /> Alta de Personal</>}
-                  {modalActivo === "confirmarEstado" && <><Power className="h-4 w-4 md:h-4 md:w-4 mr-1.5 text-amber-500" /> Confirmar Cambio de Estado</>}
-                  {modalActivo === "confirmarSolicitud" && <><Shield className="h-4 w-4 md:h-4 md:w-4 mr-1.5 text-amber-500" /> Resolver Movimiento</>}
-                  {modalActivo === "detalleEdicionFactura" && <><Activity className="h-4 w-4 mr-1.5 text-amber-500" /> Detalle de Edición de Factura</>}
-                </h2>
-                <button onClick={cerrarModal} className="text-gray-400 active:text-red-500 bg-gray-50 md:bg-transparent p-1 md:p-0 rounded-full"><XCircle className="h-6 w-6 md:h-5 md:w-5" /></button>
-              </div>
-            )}
-
-            <div className="p-5 overflow-y-auto custom-scrollbar">
-              {modalActivo === "nuevoUsuario" && (
-                <form id="formUsuarioSU" onSubmit={handleCrearUsuario} className="space-y-5 md:space-y-4">
-                  <div>
-                    <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">Nombre Completo</label>
-                    <input type="text" required value={nuevoUsuario.nombre} onChange={(e) => setNuevoUsuario({ ...nuevoUsuario, nombre: e.target.value })} className="w-full px-4 py-3 md:px-3 md:py-1.5 bg-gray-50 focus:bg-white border border-gray-200 rounded-xl md:rounded text-xs focus:outline-none focus:ring-2 focus:ring-[#ffd700]" placeholder="Ej. Carlos Mendoza" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">ID Usuario (Acceso)</label>
-                    <div className="flex">
-                      <input type="text" required value={nuevoUsuario.usuario} onChange={(e) => setNuevoUsuario({ ...nuevoUsuario, usuario: e.target.value })} className="w-full px-4 py-3 md:px-3 md:py-1.5 bg-gray-50 focus:bg-white border border-r-0 border-gray-200 rounded-l-xl md:rounded-l text-xs focus:outline-none focus:ring-2 focus:ring-[#ffd700] font-mono" placeholder="carlos.m" />
-                      <span className="px-4 py-3 md:px-3 md:py-1.5 bg-gray-100 border border-l-0 border-gray-200 rounded-r-xl md:rounded-r text-xs text-gray-400 font-mono select-none flex items-center">@mlh.local</span>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">Clave Inicial Temporal</label>
-                    <input type="password" required minLength="6" value={nuevoUsuario.password} onChange={(e) => setNuevoUsuario({ ...nuevoUsuario, password: e.target.value })} className="w-full px-4 py-3 md:px-3 md:py-1.5 bg-gray-50 focus:bg-white border border-gray-200 rounded-xl md:rounded text-xs focus:outline-none focus:ring-2 focus:ring-[#ffd700] font-mono" placeholder="Mínimo 6 caracteres" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">Rol Operativo</label>
-                    <input type="text" disabled value="ADMIN - Operativo Ventas" className="w-full px-4 py-3 md:px-3 md:py-1.5 bg-gray-100 border border-gray-200 rounded-xl md:rounded text-xs font-bold text-gray-500 cursor-not-allowed" />
-                  </div>
-                </form>
-              )}
-
-              {modalActivo === "confirmarEstado" && usuarioSeleccionado && (
-                <div className="text-center space-y-4 md:space-y-3">
-                  <AlertTriangle className="h-12 w-12 md:h-10 md:w-10 text-amber-500 mx-auto" />
-                  <p className="text-gray-700 font-medium text-base md:text-sm leading-relaxed">
-                    ¿Confirmas que deseas{" "}
-                    <span
-                      className={`font-black uppercase tracking-wider ${
-                        usuarioSeleccionado.activo
-                          ? "text-red-600"
-                          : "text-green-600"
-                      }`}
-                    >
-                      {usuarioSeleccionado.activo ? "suspender" : "reactivar"}
-                    </span>{" "}
-                    esta cuenta?
-                  </p>
-                  <p className="text-xs text-gray-500 bg-gray-50 p-3 md:p-2 rounded-xl md:rounded border border-gray-100">
-                    <strong className="text-[#0a192f]">Usuario:</strong>{" "}
-                    {textoSeguro(usuarioSeleccionado.nombre)}
-                  </p>
-                  <p className="text-[11px] text-gray-400 leading-relaxed">
-                    {usuarioSeleccionado.activo
-                      ? "El usuario perderá el acceso al sistema cuando su perfil vuelva a validarse."
-                      : "El usuario podrá volver a iniciar sesión con sus credenciales actuales."}
-                  </p>
-                </div>
-              )}
-
-              {modalActivo === "confirmarSolicitud" && (
-                <div className="text-center space-y-4 md:space-y-3">
-                  <Info className="h-12 w-12 md:h-10 md:w-10 text-amber-500 mx-auto" />
-                  <p className="text-gray-700 font-medium text-base md:text-sm leading-relaxed">
-                    ¿Confirmar resolución de trámite comercial como <span className={`font-black uppercase tracking-wider ${tempSolicitud?.nuevoEstatus === "Autorizado" ? "text-green-600" : "text-red-600"}`}>{textoSeguro(tempSolicitud?.nuevoEstatus)}</span>?
-                  </p>
-                  <p className="text-xs text-gray-500 bg-gray-50 p-3 md:p-2 rounded-xl md:rounded border border-gray-100">
-                    <strong className="text-[#0a192f]">Afectado:</strong> {textoSeguro(tempSolicitud?.cliente)}
-                  </p>
-                </div>
-              )}
-
-              {modalActivo === "detalleEdicionFactura" && actividadSeleccionada && (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3">
-                      <span className="block text-[10px] font-black uppercase text-gray-400">Factura</span>
-                      <strong className="font-mono text-[#0a192f]">{textoSeguro(actividadSeleccionada.folio, "S/F")}</strong>
-                    </div>
-                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3">
-                      <span className="block text-[10px] font-black uppercase text-gray-400">Operador</span>
-                      <strong className="text-[#0a192f]">{textoSeguro(actividadSeleccionada.usuario)}</strong>
-                    </div>
-                    <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 sm:col-span-2">
-                      <span className="block text-[10px] font-black uppercase text-gray-400">Cliente</span>
-                      <strong className="text-[#0a192f]">{textoSeguro(actividadSeleccionada.cliente)}</strong>
-                    </div>
-                  </div>
-
-                  <div className="border border-gray-200 rounded-xl overflow-hidden">
-                    <div className="grid grid-cols-3 bg-gray-100 text-[10px] font-black uppercase text-gray-500">
-                      <div className="p-2.5">Campo</div>
-                      <div className="p-2.5 border-l border-gray-200">Antes</div>
-                      <div className="p-2.5 border-l border-gray-200">Después</div>
-                    </div>
-                    {(actividadSeleccionada.campos_modificados || []).map((campo) => {
-                      const campoValor = campo === "cliente_id" ? "cliente" : campo;
-                      return (
-                        <div key={campo} className="grid grid-cols-3 text-xs border-t border-gray-100">
-                          <div className="p-2.5 font-black text-gray-600">{ETIQUETAS_CAMBIOS_FACTURA[campo] || campo}</div>
-                          <div className="p-2.5 border-l border-gray-100 text-red-700 break-words">{formatearCambioFactura(campo, actividadSeleccionada.valores_anteriores?.[campoValor])}</div>
-                          <div className="p-2.5 border-l border-gray-100 text-green-700 break-words">{formatearCambioFactura(campo, actividadSeleccionada.valores_nuevos?.[campoValor])}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <p className="text-[11px] text-gray-400 font-mono">{textoSeguro(actividadSeleccionada.fechaHora, "Sin fecha")}</p>
-                </div>
-              )}
-
-              {modalActivo === "notificacion" && (
-                <div className="text-center py-4 md:py-2">
-                  <div className={`h-14 w-14 md:h-12 md:w-12 rounded-full flex items-center justify-center mx-auto mb-4 md:mb-3 ${notificacion.tipo === 'error' ? 'bg-red-100' : 'bg-green-100'}`}>
-                    {notificacion.tipo === 'error' ? <X className="h-7 w-7 md:h-6 md:w-6 text-red-600" /> : <Check className="h-7 w-7 md:h-6 md:w-6 text-green-600" />}
-                  </div>
-                  <h3 className="text-lg md:text-base font-black text-[#0a192f] mb-1.5 md:mb-0.5">{textoSeguro(notificacion.titulo)}</h3>
-                  <p className="text-sm md:text-xs text-gray-500 leading-relaxed px-2">{textoSeguro(notificacion.descripcion)}</p>
-                </div>
-              )}
-            </div>
-
-            <div className="p-4 md:p-3 border-t border-gray-100 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-2 md:rounded-b-xl shrink-0">
-              {modalActivo === "notificacion" || modalActivo === "detalleEdicionFactura" ? (
-                <button onClick={cerrarModal} className={`w-full px-4 py-3.5 md:py-2 text-sm md:text-xs font-black text-white rounded-xl md:rounded shadow-sm transition-colors ${modalActivo === "detalleEdicionFactura" ? "bg-[#0a192f] hover:bg-[#112240]" : notificacion.tipo === "error" ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"}`}>{modalActivo === "detalleEdicionFactura" ? "Cerrar" : "Aceptar"}</button>
-              ) : (
-                <>
-                  <button onClick={cerrarModal} disabled={isSubmitting} className="w-full md:w-auto px-4 py-3.5 md:py-1.5 text-sm md:text-xs font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 hover:bg-gray-50 transition-colors disabled:opacity-50">Cancelar</button>
-                  {modalActivo === "confirmarEstado" && usuarioSeleccionado && (
-                    <button
-                      onClick={alternarEstadoUsuario}
-                      disabled={isSubmitting}
-                      className={`w-full md:w-auto px-6 py-3.5 md:py-1.5 text-sm md:text-xs font-black text-white rounded-xl md:rounded shadow-sm transition-colors flex items-center justify-center disabled:opacity-50 ${
-                        usuarioSeleccionado.activo
-                          ? "bg-red-600 hover:bg-red-700"
-                          : "bg-green-600 hover:bg-green-700"
-                      }`}
-                    >
-                      {isSubmitting ? (
-                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                      ) : (
-                        <Power className="h-4 w-4 mr-1" />
-                      )}
-                      {isSubmitting
-                        ? "Procesando..."
-                        : usuarioSeleccionado.activo
-                          ? "Sí, suspender"
-                          : "Sí, reactivar"}
-                    </button>
-                  )}
-                  {modalActivo === "confirmarSolicitud" && (
-                    <button onClick={confirmarSolicitud} disabled={isSubmitting} className={`w-full md:w-auto px-6 py-3.5 md:py-1.5 text-sm md:text-xs font-black text-white rounded-xl md:rounded shadow-sm transition-colors flex items-center justify-center disabled:opacity-50 ${tempSolicitud?.nuevoEstatus === "Autorizado" ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700"}`}>
-                      {isSubmitting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : (tempSolicitud?.nuevoEstatus === "Autorizado" ? <Check className="h-4 w-4 mr-1" /> : <X className="h-4 w-4 mr-1" />)}
-                      {isSubmitting ? "Procesando..." : "Aplicar"}
-                    </button>
-                  )}
-                  {modalActivo === "nuevoUsuario" && (
-                    <button type="submit" form="formUsuarioSU" disabled={isSubmitting} className="w-full md:w-auto px-8 py-3.5 md:py-1.5 text-sm md:text-xs font-black text-[#0a192f] bg-[#ffd700] rounded-xl md:rounded hover:bg-[#e6c200] active:bg-[#e6c200] shadow-sm transition-colors flex items-center justify-center disabled:opacity-50">
-                      {isSubmitting ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Creando...</> : "Generar Acceso"}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
+      {tabActiva === "usuarios" && (
+        <ControlPersonalSU
+          administradores={administradores}
+          onCrearUsuario={() => setModalActivo("nuevoUsuario")}
+          onCambiarEstado={abrirConfirmacionEstado}
+          onEnviarResetPassword={abrirConfirmacionResetPassword}
+        />
       )}
+
+      {tabActiva === "creditos" && (
+        <CreditoRiesgoSU
+          vistaCredito={vistaCredito}
+          onCambiarVista={cambiarVistaCredito}
+          clienteNotaSeleccionadoId={clienteNotaSeleccionadoId}
+          clienteNotaSeleccionado={clienteNotaSeleccionadoParaVista}
+          resumenesNotasCredito={resumenesNotasCredito}
+          historialNotasCliente={historialNotasCliente}
+          cargandoResumenesNotasCredito={cargandoResumenesNotasCredito}
+          errorResumenesNotasCredito={errorResumenesNotasCredito}
+          cargandoHistorialNotasCredito={cargandoHistorialNotasCredito}
+          errorHistorialNotasCredito={errorHistorialNotasCredito}
+          paginaNotasCredito={paginaNotasCredito}
+          hayAnteriorNotasCredito={hayAnteriorNotasCredito}
+          haySiguienteNotasCredito={haySiguienteNotasCredito}
+          paginaHistorialNotasCredito={paginaHistorialNotasCredito}
+          hayAnteriorHistorialNotasCredito={hayAnteriorHistorialNotasCredito}
+          haySiguienteHistorialNotasCredito={haySiguienteHistorialNotasCredito}
+          filtroHistorialNotasCredito={filtroHistorialNotasCredito}
+          clienteLineaSeleccionadoId={clienteLineaSeleccionadoId}
+          clienteLineaSeleccionado={clienteLineaSeleccionadoParaVista}
+          solicitudesNotasOrdenadas={solicitudesNotasOrdenadas}
+          resumenesLineaCredito={resumenesLineaCredito}
+          movimientosClienteLinea={movimientosClienteLinea}
+          cargandoMovimientosLinea={cargandoMovimientosLinea}
+          cargandoResumenesLineaCredito={cargandoResumenesLineaCredito}
+          errorResumenesLineaCredito={errorResumenesLineaCredito}
+          paginaLineaCredito={paginaLineaCredito}
+          hayAnteriorLineaCredito={hayAnteriorLineaCredito}
+          haySiguienteLineaCredito={haySiguienteLineaCredito}
+          onAnteriorNotasCredito={irAnteriorNotasCredito}
+          onSiguienteNotasCredito={irSiguienteNotasCredito}
+          onAnteriorHistorialNotasCredito={irAnteriorHistorialNotasCredito}
+          onSiguienteHistorialNotasCredito={irSiguienteHistorialNotasCredito}
+          onCambiarFiltroHistorialNotasCredito={cambiarFiltroHistorialNotasCredito}
+          onAnteriorLineaCredito={irAnteriorLineaCredito}
+          onSiguienteLineaCredito={irSiguienteLineaCredito}
+          onSeleccionarClienteNota={seleccionarClienteNota}
+          onSeleccionarClienteLinea={seleccionarClienteLinea}
+          onResolverSolicitudNota={abrirEvaluarSolicitudNotaCredito}
+        />
+      )}
+
+      {tabActiva === "actividad" && (
+        <AuditoriaSU
+          actividad={actividad || []}
+          onVerDetalleEdicionFactura={abrirDetalleEdicionFactura}
+        />
+      )}
+
+      <ModalesSU
+        modalActivo={modalActivo}
+        nuevoUsuario={nuevoUsuario}
+        setNuevoUsuario={setNuevoUsuario}
+        usuarioSeleccionado={usuarioSeleccionado}
+        tempSolicitud={tempSolicitud}
+        actividadSeleccionada={actividadSeleccionada}
+        notificacion={notificacion}
+        motivoRechazoNota={motivoRechazoNota}
+        setMotivoRechazoNota={setMotivoRechazoNota}
+        isSubmitting={isSubmitting}
+        onCerrarModal={cerrarModal}
+        onCrearUsuario={handleCrearUsuario}
+        onAlternarEstadoUsuario={alternarEstadoUsuario}
+        onConfirmarSolicitud={confirmarSolicitud}
+        onConfirmarResetPassword={confirmarResetPassword}
+      />
     </div>
   );
 }

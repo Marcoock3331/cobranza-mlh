@@ -123,6 +123,20 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "solicitudes_notas_credito",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "estatus",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

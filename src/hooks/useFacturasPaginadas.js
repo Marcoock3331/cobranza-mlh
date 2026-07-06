@@ -26,6 +26,12 @@ export const useFacturasPaginadas = ({
     async ({ paginaDestino = 1, cursoresDestino = [null] } = {}) => {
       if (!enabled) {
         setFacturas([]);
+        setHaySiguiente(false);
+        setCursorSiguiente(null);
+        setPagina(1);
+        setCursores([null]);
+        setMensaje("");
+        setError("");
         setCargando(false);
         return;
       }
@@ -80,11 +86,18 @@ export const useFacturasPaginadas = ({
   );
 
   useEffect(() => {
-    const temporizador = window.setTimeout(() => {
+    let cancelado = false;
+
+    const temporizador = setTimeout(() => {
+      if (cancelado) return;
+
       ejecutarConsulta({ paginaDestino: 1, cursoresDestino: [null] });
     }, 200);
 
-    return () => window.clearTimeout(temporizador);
+    return () => {
+      cancelado = true;
+      clearTimeout(temporizador);
+    };
   }, [ejecutarConsulta]);
 
   const siguientePagina = useCallback(async () => {

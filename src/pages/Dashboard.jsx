@@ -1,4 +1,4 @@
-import { useContext, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -11,7 +11,6 @@ import {
   ChevronUp,
   Clock,
   DollarSign,
-  FileText,
   TrendingUp,
   Users,
 } from "lucide-react";
@@ -47,63 +46,53 @@ const CATEGORIAS = {
   },
 };
 
+const STORAGE_NOTIFICACIONES_DESCARTADAS =
+  "mlh_cobranza_notificaciones_descartadas";
+
+const DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS = 30;
+const MS_POR_DIA = 24 * 60 * 60 * 1000;
+
 const FILTROS_ACTIVIDAD = [
   { id: "TODOS", label: "Todos" },
+  { id: "SOLICITUDES", label: "Solicitudes" },
   { id: "HOY", label: "Hoy" },
-  { id: "VENCIDAS", label: "Vencidas" },
-  { id: "RECORDATORIOS", label: "Recordatorios" },
-  { id: "PROXIMOS", label: "Próximos" },
-  { id: "CREDITOS", label: "Créditos" },
 ];
 
-const ESTILOS_ACTIVIDAD = {
+const ESTILOS_CARD_ACTIVIDAD = {
   alerta: {
-    borde: "border-red-200",
-    fondo: "bg-red-50/35",
-    barra: "bg-red-500",
-    icono: "bg-red-100 text-red-600",
-    accion: "text-red-700",
-    componente: AlertTriangle,
+    punto: "bg-red-500",
+    hover: "hover:bg-red-50/70 hover:border-red-300",
+    accion: "text-red-700 hover:text-red-900",
   },
   recordatorio: {
-    borde: "border-blue-200",
-    fondo: "bg-blue-50/30",
-    barra: "bg-blue-500",
-    icono: "bg-blue-100 text-blue-600",
-    accion: "text-blue-700",
-    componente: Bell,
+    punto: "bg-blue-500",
+    hover: "hover:bg-blue-50/80 hover:border-blue-300",
+    accion: "text-blue-700 hover:text-blue-900",
   },
   proximo: {
-    borde: "border-amber-200",
-    fondo: "bg-amber-50/35",
-    barra: "bg-amber-500",
-    icono: "bg-amber-100 text-amber-700",
-    accion: "text-amber-700",
-    componente: Clock,
+    punto: "bg-amber-500",
+    hover: "hover:bg-amber-50/80 hover:border-amber-300",
+    accion: "text-amber-700 hover:text-amber-900",
   },
   aprobada: {
-    borde: "border-green-200",
-    fondo: "bg-green-50/35",
-    barra: "bg-green-500",
-    icono: "bg-green-100 text-green-600",
-    accion: "text-green-700",
-    componente: CheckCircle,
+    punto: "bg-green-500",
+    hover: "hover:bg-green-50/80 hover:border-green-300",
+    accion: "text-green-700 hover:text-green-900",
   },
   rechazada: {
-    borde: "border-gray-200",
-    fondo: "bg-gray-50",
-    barra: "bg-gray-400",
-    icono: "bg-gray-200 text-gray-600",
-    accion: "text-gray-700",
-    componente: FileText,
+    punto: "bg-red-500",
+    hover: "hover:bg-red-50/70 hover:border-red-300",
+    accion: "text-red-700 hover:text-red-900",
+  },
+  anulada: {
+    punto: "bg-slate-500",
+    hover: "hover:bg-slate-50 hover:border-slate-300",
+    accion: "text-slate-700 hover:text-slate-900",
   },
   dato: {
-    borde: "border-slate-200",
-    fondo: "bg-slate-50/70",
-    barra: "bg-slate-500",
-    icono: "bg-slate-200 text-slate-700",
-    accion: "text-slate-700",
-    componente: Users,
+    punto: "bg-slate-400",
+    hover: "hover:bg-slate-50 hover:border-slate-300",
+    accion: "text-slate-700 hover:text-slate-900",
   },
 };
 
@@ -114,6 +103,7 @@ const ESTILOS_PRIORIDAD = {
   PENDIENTE: "bg-purple-100 text-purple-700 border-purple-200",
   CRÉDITO: "bg-green-100 text-green-700 border-green-200",
   DATOS: "bg-slate-200 text-slate-700 border-slate-300",
+  ANULADA: "bg-slate-100 text-slate-700 border-slate-200",
 };
 
 const formatearMoneda = (valor) =>
@@ -151,6 +141,123 @@ const formatearRangoSemana = (inicio, fin) => {
   });
 
   return `${inicioTexto}–${finTexto}`;
+};
+
+const obtenerTiempoFirestore = (valor) => {
+  const tiempo =
+    valor?.toDate?.().getTime?.() ||
+    (valor instanceof Date ? valor.getTime() : 0) ||
+    new Date(valor || 0).getTime();
+
+  return Number.isFinite(tiempo) ? tiempo : 0;
+};
+
+const esTiempoReciente = (tiempo, dias = 7) =>
+  Boolean(tiempo) && Date.now() - tiempo <= dias * 24 * 60 * 60 * 1000;
+
+const esTiempoDeHoy = (tiempo) => {
+  if (!tiempo) return false;
+
+  const fecha = new Date(tiempo);
+
+  return fechaAClave(fecha) === fechaAClave(new Date());
+};
+
+const limpiarTelefono = (telefono = "") =>
+  telefono.toString().replace(/\D/g, "");
+
+const telefonoValido = (telefono = "") => {
+  const numero = limpiarTelefono(telefono);
+
+  if (numero.length === 10) return true;
+  if (numero.startsWith("52") && numero.length === 12) return true;
+  if (numero.startsWith("521") && numero.length === 13) return true;
+
+  return false;
+};
+
+const correoValido = (correo = "") =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(correo || "").trim());
+
+const cargarNotificacionesOcultas = () => {
+  if (typeof window === "undefined") return {};
+
+  try {
+    const valorGuardado = window.localStorage.getItem(
+      STORAGE_NOTIFICACIONES_DESCARTADAS,
+    );
+
+    if (!valorGuardado) return {};
+
+    const valor = JSON.parse(valorGuardado);
+    const ahoraIso = new Date().toISOString();
+
+    if (Array.isArray(valor)) {
+      return valor.reduce((acumulado, id) => {
+        if (id) {
+          acumulado[id] = { hiddenAt: ahoraIso };
+        }
+
+        return acumulado;
+      }, {});
+    }
+
+    if (valor && typeof valor === "object") {
+      return Object.entries(valor).reduce((acumulado, [id, detalle]) => {
+        if (!id) return acumulado;
+
+        if (detalle && typeof detalle === "object") {
+          acumulado[id] = {
+            hiddenAt: detalle.hiddenAt || ahoraIso,
+          };
+        } else {
+          acumulado[id] = { hiddenAt: ahoraIso };
+        }
+
+        return acumulado;
+      }, {});
+    }
+  } catch {
+    return {};
+  }
+
+  return {};
+};
+
+const depurarNotificacionesOcultas = (ocultas = {}, idsActuales = new Set()) => {
+  const ahora = Date.now();
+  const maximoOcultoMs = DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS * MS_POR_DIA;
+
+  return Object.entries(ocultas).reduce((acumulado, [id, detalle]) => {
+    if (!idsActuales.has(id)) return acumulado;
+
+    const hiddenAt = detalle?.hiddenAt || new Date().toISOString();
+    const tiempoOculto = new Date(hiddenAt).getTime();
+
+    if (!Number.isFinite(tiempoOculto)) return acumulado;
+    if (ahora - tiempoOculto > maximoOcultoMs) return acumulado;
+
+    acumulado[id] = { hiddenAt };
+    return acumulado;
+  }, {});
+};
+
+const mapasIguales = (primero = {}, segundo = {}) =>
+  JSON.stringify(primero) === JSON.stringify(segundo);
+
+const clienteContactoIncompleto = (cliente) =>
+  !telefonoValido(cliente?.telefono) || !correoValido(cliente?.correo);
+
+const filtrarActividadPorFiltro = (lista = [], filtro = "TODOS") => {
+  if (filtro === "TODOS") return lista;
+
+  if (filtro === "HOY") {
+    return lista.filter((notificacion) => notificacion.esHoy);
+  }
+
+  return lista.filter(
+    (notificacion) => notificacion.categoriaActividad === filtro,
+  );
 };
 
 function TarjetaKPI({
@@ -234,11 +341,49 @@ function TarjetaKPI({
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { stats, solicitudes, userRole, clientes } =
-    useContext(GlobalContext);
+  const {
+    stats,
+    solicitudes,
+    solicitudesNotasCredito,
+    userRole,
+    clientes,
+    currentUser,
+  } = useContext(GlobalContext);
 
   const [panelExpandido, setPanelExpandido] = useState(false);
   const [filtroActividad, setFiltroActividad] = useState("TODOS");
+  const [notificacionesOcultas, setNotificacionesOcultas] = useState(
+    cargarNotificacionesOcultas,
+  );
+
+  const guardarNotificacionesOcultas = (ocultas) => {
+    setNotificacionesOcultas(ocultas);
+
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(
+        STORAGE_NOTIFICACIONES_DESCARTADAS,
+        JSON.stringify(ocultas),
+      );
+    }
+  };
+
+  const descartarNotificacion = (id) => {
+    const notificacion = notificacionesFeed.find((item) => item.id === id);
+
+    if (!notificacion || notificacion.bloquearDescartar) {
+      return;
+    }
+
+    guardarNotificacionesOcultas({
+      ...notificacionesOcultasVigentes,
+      [id]: { hiddenAt: new Date().toISOString() },
+    });
+  };
+
+  const restaurarNotificaciones = () => {
+    guardarNotificacionesOcultas({});
+    setPanelExpandido(false);
+  };
 
   const rangoSemana = useMemo(
     () => obtenerRangoAgenda(new Date(), "SEMANA"),
@@ -317,7 +462,7 @@ export default function Dashboard() {
     [eventosActivos, claveHoy],
   );
 
-  const clientesSinTelefonoConSaldo = useMemo(
+  const clientesContactoIncompletoConSaldo = useMemo(
     () =>
       (clientes || []).filter((cliente) => {
         const activo =
@@ -325,9 +470,8 @@ export default function Dashboard() {
           cliente?.estatus !== "Inactivo";
 
         const tieneSaldo = Number(cliente?.deuda_actual) > 0;
-        const telefono = String(cliente?.telefono || "").replace(/\D/g, "");
 
-        return activo && tieneSaldo && telefono.length < 10;
+        return activo && tieneSaldo && clienteContactoIncompleto(cliente);
       }),
     [clientes],
   );
@@ -346,6 +490,17 @@ export default function Dashboard() {
     [solicitudes],
   );
 
+  const solicitudesNotasCreditoVisibles = useMemo(
+    () =>
+      (solicitudesNotasCredito || []).filter((solicitud) => {
+        if (userRole === "SU") return true;
+        if (!currentUser?.uid) return true;
+
+        return solicitud.solicitado_por_uid === currentUser.uid;
+      }),
+    [solicitudesNotasCredito, userRole, currentUser],
+  );
+
   const abrirCalendario = (fecha, filtro = "TODOS", vista = "SEMANA") => {
     navigate(
       `/calendario?fecha=${fechaAClave(fecha)}&vista=${vista}&filtro=${filtro}`,
@@ -355,6 +510,12 @@ export default function Dashboard() {
   const abrirFacturasVencidas = () => {
     navigate("/facturas?estado=Vencida");
   };
+
+  const obtenerTiempoSolicitudNota = (solicitud = {}) =>
+    obtenerTiempoFirestore(solicitud.anuladaAt) ||
+    obtenerTiempoFirestore(solicitud.resolvedAt) ||
+    obtenerTiempoFirestore(solicitud.createdAt) ||
+    obtenerTiempoFirestore(solicitud.fecha);
 
   const notificacionesFeed = useMemo(() => {
     const feed = [];
@@ -483,14 +644,91 @@ export default function Dashboard() {
       });
     }
 
+    solicitudesNotasCreditoVisibles
+      .filter((solicitud) => {
+        const estatus = solicitud.estatus || "Pendiente";
+        const estaPendiente = estatus === "Pendiente";
+        const tiempo = obtenerTiempoSolicitudNota(solicitud);
+
+        if (userRole === "SU") {
+          return estaPendiente;
+        }
+
+        return estaPendiente || esTiempoReciente(tiempo, 7);
+      })
+      .slice()
+      .sort(
+        (primera, segunda) =>
+          obtenerTiempoSolicitudNota(segunda) -
+          obtenerTiempoSolicitudNota(primera),
+      )
+      .slice(0, 10)
+      .forEach((solicitud, indice) => {
+        const estatus = solicitud.nota_anulada ? "Anulada" : solicitud.estatus || "Pendiente";
+        const estaPendiente = estatus === "Pendiente";
+        const estaAutorizada = ["Autorizado", "Aprobado"].includes(estatus);
+        const estaAnulada = estatus === "Anulada";
+        const monto = Number(solicitud.monto_nota) || 0;
+        const cliente = solicitud.cliente || "Cliente";
+        const folio = solicitud.folio || "S/F";
+        const rutaCliente = solicitud.cliente_id
+          ? `/clientes/${solicitud.cliente_id}`
+          : "/clientes";
+        const rutaFacturaExpediente =
+          solicitud.cliente_id && solicitud.factura_id
+            ? `/clientes/${solicitud.cliente_id}?facturaId=${encodeURIComponent(
+                solicitud.factura_id,
+              )}&abrirFactura=1&origen=notaCredito`
+            : rutaCliente;
+        const tiempo = obtenerTiempoSolicitudNota(solicitud);
+
+        feed.push({
+          id: `solicitud-nota-credito-${solicitud.id || indice}-${estatus}`,
+          tipo: estaPendiente
+            ? "recordatorio"
+            : estaAutorizada
+              ? "aprobada"
+              : estaAnulada
+                ? "anulada"
+                : "rechazada",
+          prioridad: estaPendiente ? "PENDIENTE" : estaAnulada ? "ANULADA" : "CRÉDITO",
+          categoriaActividad: "SOLICITUDES",
+          esHoy: esTiempoDeHoy(tiempo),
+          orden: estaPendiente ? 0 : 35,
+          tiempoOrden: tiempo,
+          bloquearDescartar: estaPendiente,
+          titulo: estaPendiente
+            ? "Nota de crédito pendiente"
+            : estaAutorizada
+              ? "Nota de crédito autorizada"
+              : estaAnulada
+                ? "Nota de crédito anulada"
+                : "Nota de crédito rechazada",
+          descripcion: estaPendiente
+            ? `Nota de crédito pendiente para ${cliente}, factura ${folio}, por $${formatearMoneda(monto)}.`
+            : estaAutorizada
+              ? `Nota de crédito autorizada para ${cliente}, factura ${folio}, por $${formatearMoneda(monto)}.`
+              : estaAnulada
+                ? `Nota de crédito anulada para ${cliente}, factura ${folio}, por $${formatearMoneda(monto)}.`
+                : `Nota de crédito rechazada para ${cliente}, factura ${folio}, por $${formatearMoneda(monto)}.${solicitud.motivo_resolucion ? ` Motivo: ${solicitud.motivo_resolucion}.` : ""}`,
+          fecha: estaPendiente
+            ? "En espera de autorización del SU"
+            : solicitud.fecha || "Resolución reciente",
+          accionTexto:
+            userRole === "SU" ? "Abrir panel SU" : "Ver factura",
+          ruta: userRole === "SU" ? "/panel-su?tab=creditos" : rutaFacturaExpediente,
+        });
+      });
+
     if (solicitudesPendientes.length > 0) {
       feed.push({
         id: "solicitudes-pendientes",
         tipo: "recordatorio",
         prioridad: "PENDIENTE",
-        categoriaActividad: "CREDITOS",
+        categoriaActividad: "SOLICITUDES",
         esHoy: false,
-        orden: 40,
+        orden: 15,
+        bloquearDescartar: true,
         titulo:
           userRole === "SU"
             ? "Solicitudes pendientes de autorización"
@@ -502,12 +740,25 @@ export default function Dashboard() {
         fecha: "En espera de resolución",
         accionTexto:
           userRole === "SU" ? "Revisar solicitudes" : "Ver clientes",
-        ruta: userRole === "SU" ? "/panel-su" : "/clientes",
+        ruta: userRole === "SU" ? "/panel-su?tab=creditos" : "/clientes",
       });
     }
 
     (solicitudes || [])
-      .filter((solicitud) => solicitud.estatus !== "Pendiente")
+      .filter((solicitud) => {
+        if (solicitud.estatus === "Pendiente") return false;
+
+        const tiempo =
+          obtenerTiempoFirestore(solicitud.resolvedAt) ||
+          obtenerTiempoFirestore(solicitud.createdAt) ||
+          obtenerTiempoFirestore(solicitud.fecha);
+
+        if (userRole === "SU") {
+          return false;
+        }
+
+        return esTiempoReciente(tiempo, 7);
+      })
       .slice(0, 4)
       .forEach((solicitud, indice) => {
         const esAprobada = ["Autorizado", "Aprobado"].includes(
@@ -519,23 +770,28 @@ export default function Dashboard() {
           Number(solicitud.monto_incremento) ||
           0;
 
+        const tiempo =
+          obtenerTiempoFirestore(solicitud.resolvedAt) ||
+          obtenerTiempoFirestore(solicitud.createdAt) ||
+          obtenerTiempoFirestore(solicitud.fecha);
+
         feed.push({
           id: `solicitud-${solicitud.id}`,
           tipo: esAprobada ? "aprobada" : "rechazada",
           prioridad: "CRÉDITO",
-          categoriaActividad: "CREDITOS",
-          esHoy: false,
-          orden: 80 + indice,
+          categoriaActividad: "SOLICITUDES",
+          esHoy: esTiempoDeHoy(tiempo),
+          orden: 85 + indice,
+          tiempoOrden: tiempo,
           titulo: `Crédito ${solicitud.estatus}`,
           descripcion: `${solicitud.cliente || "Cliente"}: línea de crédito relacionada por $${formatearMoneda(monto)}.`,
           fecha: solicitud.fecha || "Movimiento reciente",
-          accionTexto:
-            userRole === "SU" ? "Abrir panel SU" : "Abrir directorio",
-          ruta: userRole === "SU" ? "/panel-su" : "/clientes",
+          accionTexto: "Abrir directorio",
+          ruta: "/clientes",
         });
       });
 
-    if (clientesSinTelefonoConSaldo.length > 0) {
+    if (clientesContactoIncompletoConSaldo.length > 0) {
       feed.push({
         id: "clientes-sin-telefono",
         tipo: "dato",
@@ -544,68 +800,99 @@ export default function Dashboard() {
         esHoy: false,
         orden: 95,
         titulo: "Datos de contacto incompletos",
-        descripcion: `${clientesSinTelefonoConSaldo.length} cliente(s) con saldo pendiente no tienen un teléfono válido para seguimiento.`,
+        descripcion: `${clientesContactoIncompletoConSaldo.length} cliente(s) con saldo pendiente tienen teléfono o correo incompleto para seguimiento.`,
         fecha: "Revisión de expedientes",
         accionTexto: "Completar contactos",
         ruta: "/clientes?filtro=contacto-incompleto",
       });
     }
 
-    return feed.sort((primera, segunda) => primera.orden - segunda.orden);
+    return feed.sort((primera, segunda) => {
+      if (primera.orden !== segunda.orden) {
+        return primera.orden - segunda.orden;
+      }
+
+      return (segunda.tiempoOrden || 0) - (primera.tiempoOrden || 0);
+    });
   }, [
     stats,
     resumenSemana,
     solicitudes,
     userRole,
     solicitudesPendientes,
+    solicitudesNotasCreditoVisibles,
     recordatoriosHoy,
     recordatoriosAtrasados,
     recordatoriosProximos,
     vencimientosHoy,
-    clientesSinTelefonoConSaldo,
+    clientesContactoIncompletoConSaldo,
     claveHoy,
   ]);
 
-  const conteosActividad = useMemo(
-    () => ({
-      TODOS: notificacionesFeed.length,
-      HOY: recordatoriosHoy.length + vencimientosHoy.length,
-      VENCIDAS: Number(stats?.facturas_vencidas) || 0,
-      RECORDATORIOS:
-        recordatoriosAtrasados.length +
-        recordatoriosHoy.length +
-        recordatoriosProximos.length,
-      PROXIMOS: resumenSemana.POR_VENCER || 0,
-      CREDITOS: solicitudesPendientes.length,
-    }),
-    [
-      notificacionesFeed,
-      recordatoriosHoy,
-      recordatoriosAtrasados,
-      recordatoriosProximos,
-      vencimientosHoy,
-      stats,
-      resumenSemana,
-      solicitudesPendientes,
-    ],
+  useEffect(() => {
+    const idsActuales = new Set(
+      notificacionesFeed.map((notificacion) => notificacion.id),
+    );
+    const ocultasDepuradas = depurarNotificacionesOcultas(
+      notificacionesOcultas,
+      idsActuales,
+    );
+
+    if (mapasIguales(notificacionesOcultas, ocultasDepuradas)) {
+      return undefined;
+    }
+
+    const temporizador = window.setTimeout(() => {
+      setNotificacionesOcultas(ocultasDepuradas);
+
+      window.localStorage.setItem(
+        STORAGE_NOTIFICACIONES_DESCARTADAS,
+        JSON.stringify(ocultasDepuradas),
+      );
+    }, 0);
+
+    return () => window.clearTimeout(temporizador);
+  }, [notificacionesFeed, notificacionesOcultas]);
+
+  const notificacionesOcultasVigentes = depurarNotificacionesOcultas(
+    notificacionesOcultas,
+    new Set(notificacionesFeed.map((notificacion) => notificacion.id)),
   );
 
-  const notificacionesFiltradas = useMemo(() => {
-    if (filtroActividad === "TODOS") {
-      return notificacionesFeed;
-    }
+  const idsDescartados = new Set(Object.keys(notificacionesOcultasVigentes));
 
-    if (filtroActividad === "HOY") {
-      return notificacionesFeed.filter(
-        (notificacion) => notificacion.esHoy,
-      );
-    }
+  const notificacionesOcultasActuales = notificacionesFeed.filter(
+    (notificacion) =>
+      !notificacion.bloquearDescartar && idsDescartados.has(notificacion.id),
+  );
 
-    return notificacionesFeed.filter(
-      (notificacion) =>
-        notificacion.categoriaActividad === filtroActividad,
-    );
-  }, [notificacionesFeed, filtroActividad]);
+  const notificacionesActivas = notificacionesFeed.filter(
+    (notificacion) =>
+      notificacion.bloquearDescartar || !idsDescartados.has(notificacion.id),
+  );
+
+  const conteosActividad = {
+    TODOS: notificacionesActivas.length,
+    SOLICITUDES: filtrarActividadPorFiltro(notificacionesActivas, "SOLICITUDES").length,
+    HOY: filtrarActividadPorFiltro(notificacionesActivas, "HOY").length,
+  };
+
+  const filtrosActividadVisibles = FILTROS_ACTIVIDAD.filter(
+    (filtro) =>
+      filtro.id === "TODOS" ||
+      conteosActividad[filtro.id] > 0 ||
+      filtroActividad === filtro.id,
+  );
+
+  const notificacionesFiltradas = filtrarActividadPorFiltro(
+    notificacionesActivas,
+    filtroActividad,
+  );
+
+  const notificacionesOcultasFiltroActual = filtrarActividadPorFiltro(
+    notificacionesOcultasActuales,
+    filtroActividad,
+  );
 
   const notificacionesVisibles = panelExpandido
     ? notificacionesFiltradas
@@ -887,7 +1174,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden h-fit">
+        <section className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden h-fit min-h-[520px] flex flex-col">
           <div className="p-4 border-b border-gray-100 bg-white">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -901,13 +1188,26 @@ export default function Dashboard() {
                 </p>
               </div>
 
-              <span className="bg-blue-50 text-blue-700 text-[10px] font-black min-w-7 h-7 px-2 rounded-full border border-blue-100 flex items-center justify-center shrink-0">
-                {notificacionesFiltradas.length}
-              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                {notificacionesOcultasActuales.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={restaurarNotificaciones}
+                    className="text-[9px] font-black text-gray-500 bg-gray-50 border border-gray-200 rounded-full px-2 py-1 hover:bg-gray-100"
+                    title={`Restaurar actividades ocultas en este navegador. Las ocultas se limpian automáticamente después de ${DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS} días.`}
+                  >
+                    Restaurar {notificacionesOcultasActuales.length}
+                  </button>
+                )}
+
+                <span className="bg-blue-50 text-blue-700 text-[9px] font-black min-w-7 h-7 px-2 rounded-full border border-blue-100 flex items-center justify-center">
+                  {notificacionesActivas.length} activas
+                </span>
+              </div>
             </div>
 
             <div className="flex gap-2 overflow-x-auto mt-3 pb-1 custom-scrollbar">
-              {FILTROS_ACTIVIDAD.map((filtro) => {
+              {filtrosActividadVisibles.map((filtro) => {
                 const cantidad = conteosActividad[filtro.id] || 0;
 
                 return (
@@ -943,108 +1243,137 @@ export default function Dashboard() {
           <div
             className={
               panelExpandido
-                ? "max-h-[620px] overflow-y-auto custom-scrollbar p-3 space-y-2"
-                : "p-3 space-y-2"
+                ? "min-h-[360px] max-h-[620px] flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2"
+                : "min-h-[360px] max-h-[360px] flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2"
             }
           >
             {notificacionesVisibles.length ? (
               notificacionesVisibles.map((notificacion) => {
-                const estilo =
-                  ESTILOS_ACTIVIDAD[notificacion.tipo] ||
-                  ESTILOS_ACTIVIDAD.recordatorio;
+                const tarjeta =
+                  ESTILOS_CARD_ACTIVIDAD[notificacion.tipo] ||
+                  ESTILOS_CARD_ACTIVIDAD.recordatorio;
 
-                const Icono = estilo.componente;
+                const sePuedeOcultar = !notificacion.bloquearDescartar;
 
                 return (
-                  <button
+                  <div
                     key={notificacion.id}
-                    type="button"
-                    onClick={() => navigate(notificacion.ruta)}
-                    className={`w-full relative overflow-hidden rounded-xl border text-left ${estilo.borde} ${estilo.fondo} hover:brightness-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-200`}
+                    className={`w-full rounded-2xl border border-gray-200 bg-[#f2f3f7] transition-all duration-200 shadow-[0.45rem_0.45rem_1rem_rgba(180,185,200,0.35),-0.35rem_-0.35rem_0.9rem_rgba(255,255,255,0.9)] ${tarjeta.hover}`}
                   >
-                    <span
-                      className={`absolute left-0 top-0 bottom-0 w-1 ${estilo.barra}`}
-                    />
+                    <div className="flex gap-3 px-4 py-3.5">
+                      <div className="pt-1.5 shrink-0">
+                        <span
+                          className={`block h-2.5 w-2.5 rounded-full ${tarjeta.punto}`}
+                        />
+                      </div>
 
-                    <span className="flex items-start gap-3 p-3 pl-4">
-                      <span
-                        className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${estilo.icono}`}
-                      >
-                        <Icono className="h-4 w-4" />
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => navigate(notificacion.ruta)}
+                          className="w-full text-left"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-[12px] md:text-[13px] font-black text-[#0a192f] leading-snug">
+                                {notificacion.titulo}
+                              </p>
 
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[11px] md:text-xs font-black text-[#0a192f] leading-snug">
-                            {notificacion.titulo}
-                          </span>
-
-                          {notificacion.prioridad &&
-                            ["ALTA", "HOY", "PENDIENTE"].includes(
-                              notificacion.prioridad,
-                            ) && (
-                              <span
-                                className={`rounded-full border px-1.5 py-0.5 text-[7px] font-black uppercase tracking-wide ${
-                                  ESTILOS_PRIORIDAD[
-                                    notificacion.prioridad
-                                  ] ||
-                                  "bg-gray-100 text-gray-600 border-gray-200"
+                              <p
+                                className={`text-[10px] md:text-[11px] text-gray-600 mt-1 leading-relaxed ${
+                                  panelExpandido
+                                    ? "whitespace-normal"
+                                    : "line-clamp-2"
                                 }`}
                               >
-                                {notificacion.prioridad}
-                              </span>
-                            )}
-                        </span>
+                                {notificacion.descripcion}
+                              </p>
+                            </div>
 
-                        <span
-                          className={`block text-[10px] text-gray-600 mt-1 leading-relaxed break-words ${
-                            panelExpandido
-                              ? "whitespace-normal"
-                              : "line-clamp-2"
-                          }`}
-                        >
-                          {notificacion.descripcion}
-                        </span>
+                            {notificacion.prioridad &&
+                              ["ALTA", "HOY", "PENDIENTE"].includes(
+                                notificacion.prioridad,
+                              ) && (
+                                <span
+                                  className={`shrink-0 rounded-full border px-2 py-0.5 text-[7px] font-black uppercase tracking-wide ${
+                                    ESTILOS_PRIORIDAD[
+                                      notificacion.prioridad
+                                    ] ||
+                                    "bg-gray-100 text-gray-600 border-gray-200"
+                                  }`}
+                                >
+                                  {notificacion.prioridad}
+                                </span>
+                              )}
+                          </div>
 
-                        <span className="mt-2 flex items-center justify-between gap-2">
-                          <span className="text-[8px] text-gray-400 flex items-center min-w-0">
+                          <p className="text-[9px] text-gray-400 mt-1.5 flex items-center">
                             <Clock className="h-3 w-3 mr-1 shrink-0" />
                             <span className="truncate">
                               {notificacion.fecha}
                             </span>
-                          </span>
+                          </p>
+                        </button>
 
-                          <span
-                            className={`text-[8px] font-black flex items-center shrink-0 ${estilo.accion}`}
+                        <div className="flex items-center gap-4 mt-2">
+                          <button
+                            type="button"
+                            onClick={() => navigate(notificacion.ruta)}
+                            className={`text-[10px] md:text-[11px] font-black ${tarjeta.accion}`}
                           >
                             {notificacion.accionTexto || "Abrir"}
-                            <ArrowRight className="h-3 w-3 ml-1" />
-                          </span>
-                        </span>
-                      </span>
-                    </span>
-                  </button>
+                          </button>
+
+                          {sePuedeOcultar && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                descartarNotificacion(notificacion.id)
+                              }
+                              className="text-[10px] md:text-[11px] font-medium text-gray-500 hover:text-red-600"
+                            >
+                              Ocultar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 );
               })
             ) : (
-              <div className="py-10 px-4 text-center rounded-xl border border-dashed border-gray-200 bg-gray-50/70 text-gray-400">
+              <div className="flex min-h-[330px] flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 bg-gray-50/70 px-4 py-10 text-center text-gray-400">
                 <CheckCircle className="h-8 w-8 text-gray-300 mx-auto mb-2" />
                 <p className="text-[11px] font-black">
                   Sin actividades pendientes
                 </p>
                 <p className="text-[9px] mt-1 leading-relaxed">
-                  No existen acciones para el filtro seleccionado.
+                  {notificacionesOcultasFiltroActual.length > 0
+                    ? `Las actividades de este filtro están ocultas en este navegador. Se limpiarán solas después de ${DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS} días.`
+                    : "No existen acciones para el filtro seleccionado."}
                 </p>
 
-                {filtroActividad !== "TODOS" && (
-                  <button
-                    type="button"
-                    onClick={() => setFiltroActividad("TODOS")}
-                    className="mt-3 text-[9px] font-black text-blue-600"
-                  >
-                    Mostrar todas
-                  </button>
-                )}
+                <div className="mt-3 flex flex-wrap justify-center gap-3">
+                  {filtroActividad !== "TODOS" && (
+                    <button
+                      type="button"
+                      onClick={() => setFiltroActividad("TODOS")}
+                      className="text-[9px] font-black text-blue-600"
+                    >
+                      Mostrar todas
+                    </button>
+                  )}
+
+                  {notificacionesOcultasFiltroActual.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={restaurarNotificaciones}
+                      className="text-[9px] font-black text-gray-600"
+                    >
+                      Restaurar ocultas
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>

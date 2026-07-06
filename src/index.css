@@ -7,5 +7,25 @@ body,
   height: 100%;
   margin: 0;
   padding: 0;
-  background-color: #f4f6f8;
+  background-color: #e8e8e8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  overscroll-behavior: none;
+}
+
+button,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
 }

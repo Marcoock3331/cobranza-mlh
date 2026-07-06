@@ -109,19 +109,33 @@ export const useFacturasCliente = ({
   );
 
   useEffect(() => {
-    const temporizador = window.setTimeout(() => {
+    let cancelado = false;
+
+    const temporizador = setTimeout(() => {
+      if (cancelado) return;
+
       ejecutarConsulta({ paginaDestino: 1, cursoresDestino: [null] });
     }, 150);
 
-    return () => window.clearTimeout(temporizador);
+    return () => {
+      cancelado = true;
+      clearTimeout(temporizador);
+    };
   }, [ejecutarConsulta]);
 
   useEffect(() => {
-    const temporizador = window.setTimeout(() => {
+    let cancelado = false;
+
+    const temporizador = setTimeout(() => {
+      if (cancelado) return;
+
       cargarResumen();
     }, 150);
 
-    return () => window.clearTimeout(temporizador);
+    return () => {
+      cancelado = true;
+      clearTimeout(temporizador);
+    };
   }, [cargarResumen]);
 
   const siguientePagina = useCallback(async () => {

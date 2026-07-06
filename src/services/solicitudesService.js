@@ -1,7 +1,9 @@
 import { db } from "../config/firebase";
+import { facturasService } from "./facturasService";
 import {
   collection,
   doc,
+  getDoc,
   increment,
   runTransaction,
   serverTimestamp,
@@ -9,6 +11,8 @@ import {
 } from "firebase/firestore";
 
 const SOLICITUDES_COLLECTION = "solicitudes";
+const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
+const RESUMEN_NOTAS_CREDITO_COLLECTION = "notas_credito_resumen_clientes";
 const CLIENTES_COLLECTION = "clientes";
 const ACTIVIDAD_COLLECTION = "actividad";
 
@@ -30,6 +34,72 @@ const mapearErrorFirestore = (error) => {
   }
 
   return error?.message || "No se pudo completar la operación de crédito.";
+};
+
+const resumenNotaRefPorCliente = (clienteId) =>
+  doc(db, RESUMEN_NOTAS_CREDITO_COLLECTION, String(clienteId || "sin-cliente"));
+
+const setResumenNuevaSolicitudNota = (batch, payload) => {
+  if (!payload.cliente_id) return;
+
+  const resumenRef = resumenNotaRefPorCliente(payload.cliente_id);
+  const monto = Number(payload.monto_nota) || 0;
+
+  batch.set(
+    resumenRef,
+    {
+      id: payload.cliente_id,
+      cliente_id: payload.cliente_id,
+      cliente: payload.cliente || "S/N",
+      total_solicitudes: increment(1),
+      pendientes: increment(1),
+      autorizadas: increment(0),
+      rechazadas: increment(0),
+      anuladas: increment(0),
+      monto_total_notas: increment(monto),
+      ultimo_estado: "Pendiente",
+      ultimo_monto_nota: monto,
+      ultimo_folio: payload.folio || "S/F",
+      ultimo_movimiento_at: serverTimestamp(),
+      ultimo_solicitado_por: payload.solicitado_por_nombre || "ADMIN",
+      activo: true,
+    },
+    { merge: true },
+  );
+};
+
+const setResumenResolucionNota = (writer, solicitud, decision, actorNombre) => {
+  if (!solicitud?.cliente_id) return;
+
+  const resumenRef = resumenNotaRefPorCliente(solicitud.cliente_id);
+  const monto = Number(solicitud.monto_nota) || 0;
+  const campoResultado = decision === "Autorizado" ? "autorizadas" : "rechazadas";
+
+  writer.set(
+    resumenRef,
+    {
+      id: solicitud.cliente_id,
+      cliente_id: solicitud.cliente_id,
+      cliente: solicitud.cliente || "S/N",
+      pendientes: increment(-1),
+      [campoResultado]: increment(1),
+      ultimo_estado: decision,
+      ultimo_monto_nota: monto,
+      ultimo_folio: solicitud.folio || "S/F",
+      ultimo_movimiento_at: serverTimestamp(),
+      ultimo_resuelto_por: actorNombre || "SU",
+      activo: true,
+    },
+    { merge: true },
+  );
+};
+
+const actualizarResumenNotaAutorizada = async (solicitud, actorNombre) => {
+  if (!solicitud?.cliente_id) return;
+
+  const batch = writeBatch(db);
+  setResumenResolucionNota(batch, solicitud, "Autorizado", actorNombre);
+  await batch.commit();
 };
 
 export const solicitudesService = {
@@ -198,6 +268,221 @@ export const solicitudesService = {
     }
   },
 
+
+  crearSolicitudNotaCredito: async ({
+    factura,
+    montoNota,
+    motivo,
+    observaciones,
+    solicitado_por_uid,
+    solicitado_por_nombre,
+  }) => {
+    try {
+      if (!factura?.id) {
+        throw new Error("No se identificó la factura para solicitar la nota de crédito.");
+      }
+
+      if (!solicitado_por_uid) {
+        throw new Error("No se identificó al usuario solicitante.");
+      }
+
+      const monto = Number(montoNota);
+      const saldoActual = Number(factura.saldo_pendiente) || 0;
+
+      if (!Number.isFinite(monto) || monto <= 0) {
+        throw new Error("El monto de la nota de crédito debe ser mayor a cero.");
+      }
+
+      if (monto > saldoActual) {
+        throw new Error("La nota de crédito no puede superar el saldo pendiente.");
+      }
+
+      if (!String(motivo || "").trim()) {
+        throw new Error("El motivo de la nota de crédito es obligatorio.");
+      }
+
+      const solicitudRef = doc(
+        collection(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION),
+      );
+
+      const payload = {
+        id: solicitudRef.id,
+        tipo_solicitud: "NOTA_CREDITO",
+        factura_id: factura.id,
+        folio: String(factura.folio || "S/F"),
+        cliente_id: String(factura.cliente_id || ""),
+        cliente: String(factura.cliente || "S/N"),
+        monto_nota: monto,
+        saldo_actual: saldoActual,
+        motivo: String(motivo || "").trim(),
+        observaciones: String(observaciones || "").trim(),
+        estatus: "Pendiente",
+        solicitado_por_uid,
+        solicitado_por_nombre: solicitado_por_nombre || "ADMIN",
+        createdAt: serverTimestamp(),
+      };
+
+      const batch = writeBatch(db);
+      batch.set(solicitudRef, payload);
+      setResumenNuevaSolicitudNota(batch, payload);
+
+      const actividadRef = doc(
+        collection(db, ACTIVIDAD_COLLECTION),
+      );
+
+      batch.set(actividadRef, {
+        actor_uid: solicitado_por_uid,
+        usuario: solicitado_por_nombre || "ADMIN",
+        modulo: "Facturación",
+        tipo: "Solicitud de Nota de Crédito",
+        cliente: payload.cliente,
+        factura_id: payload.factura_id,
+        folio: payload.folio,
+        detalle: `Solicitó una nota de crédito por $${monto.toLocaleString("es-MX")} para la factura ${payload.folio}. Motivo: ${payload.motivo}.`,
+        serverTime: serverTimestamp(),
+      });
+
+      await batch.commit();
+
+      return {
+        success: true,
+        data: payload,
+      };
+    } catch (error) {
+      console.error(
+        "Error creando solicitud de nota de crédito:",
+        error,
+      );
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
+
+  resolverSolicitudNotaCredito: async ({
+    solicitud_id,
+    decision,
+    actor_uid,
+    actor_nombre,
+    motivo_resolucion = "",
+  }) => {
+    try {
+      if (!solicitud_id || !decision || !actor_uid) {
+        throw new Error("Faltan datos obligatorios para resolver la solicitud.");
+      }
+
+      if (!["Autorizado", "Rechazado"].includes(decision)) {
+        throw new Error("La decisión indicada no es válida.");
+      }
+
+      const solicitudRef = doc(
+        db,
+        SOLICITUDES_NOTAS_CREDITO_COLLECTION,
+        solicitud_id,
+      );
+
+      const solicitudSnap = await getDoc(solicitudRef);
+
+      if (!solicitudSnap.exists()) {
+        throw new Error("La solicitud de nota de crédito no existe.");
+      }
+
+      const solicitudData = {
+        id: solicitudSnap.id,
+        ...solicitudSnap.data(),
+      };
+
+      if (solicitudData.estatus !== "Pendiente") {
+        throw new Error(
+          `La solicitud ya fue resuelta como ${solicitudData.estatus}.`,
+        );
+      }
+
+      if (decision === "Autorizado") {
+        const resultadoAutorizacion = await facturasService.aplicarNotaCredito({
+          factura: { id: solicitudData.factura_id },
+          montoNota: solicitudData.monto_nota,
+          motivo: solicitudData.motivo,
+          observaciones: solicitudData.observaciones,
+          userName: actor_nombre || "SU",
+          actor_uid,
+          solicitudNotaId: solicitudData.id,
+        });
+
+        if (resultadoAutorizacion.success) {
+          await actualizarResumenNotaAutorizada(
+            solicitudData,
+            actor_nombre || "SU",
+          );
+        }
+
+        return resultadoAutorizacion;
+      }
+
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(solicitudRef);
+
+        if (!snap.exists()) {
+          throw new Error("La solicitud de nota de crédito no existe.");
+        }
+
+        const solicitud = snap.data();
+
+        if (solicitud.estatus !== "Pendiente") {
+          throw new Error(
+            `La solicitud ya fue resuelta como ${solicitud.estatus}.`,
+          );
+        }
+
+        transaction.update(solicitudRef, {
+          estatus: "Rechazado",
+          resolvedAt: serverTimestamp(),
+          resolvedBy: actor_nombre || "SU",
+          resolvedByUid: actor_uid,
+          motivo_resolucion: String(motivo_resolucion || "").trim(),
+        });
+
+        setResumenResolucionNota(
+          transaction,
+          solicitud,
+          "Rechazado",
+          actor_nombre || "SU",
+        );
+
+        const actividadRef = doc(
+          collection(db, ACTIVIDAD_COLLECTION),
+        );
+
+        transaction.set(actividadRef, {
+          actor_uid,
+          usuario: actor_nombre || "SU",
+          modulo: "Facturación",
+          tipo: "Rechazo de Nota de Crédito",
+          cliente: solicitud.cliente || "S/N",
+          factura_id: solicitud.factura_id || "",
+          folio: solicitud.folio || "S/F",
+          motivo_resolucion: String(motivo_resolucion || "").trim(),
+          detalle: `El SU rechazó la solicitud de nota de crédito por $${(Number(solicitud.monto_nota) || 0).toLocaleString("es-MX")} de la factura ${solicitud.folio || "S/F"}.${String(motivo_resolucion || "").trim() ? ` Motivo: ${String(motivo_resolucion || "").trim()}.` : ""}`,
+          serverTime: serverTimestamp(),
+        });
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error(
+        "Fallo al resolver solicitud de nota de crédito:",
+        error,
+      );
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
+
   resolverSolicitud: async ({
     solicitud_id,
     decision,
@@ -205,110 +490,68 @@ export const solicitudesService = {
     actor_nombre,
   }) => {
     try {
-      if (
-        !solicitud_id ||
-        !decision ||
-        !actor_uid
-      ) {
-        throw new Error(
-          "Faltan datos obligatorios para resolver la solicitud.",
-        );
+      if (!solicitud_id || !decision || !actor_uid) {
+        throw new Error("Faltan datos obligatorios para resolver la solicitud.");
       }
 
-      if (
-        !["Autorizado", "Rechazado"].includes(
-          decision,
-        )
-      ) {
-        throw new Error(
-          "La decisión indicada no es válida.",
-        );
+      if (!["Autorizado", "Rechazado"].includes(decision)) {
+        throw new Error("La decisión indicada no es válida.");
       }
 
       await runTransaction(
         db,
         async (transaction) => {
-          const solicitudRef = doc(
-            db,
-            SOLICITUDES_COLLECTION,
-            solicitud_id,
-          );
-
-          const solicitudSnap =
-            await transaction.get(solicitudRef);
+          const solicitudRef = doc(db, SOLICITUDES_COLLECTION, solicitud_id);
+          const solicitudSnap = await transaction.get(solicitudRef);
 
           if (!solicitudSnap.exists()) {
-            throw new Error(
-              "La solicitud no existe.",
-            );
+            throw new Error("La solicitud no existe.");
           }
 
-          const solicitudData =
-            solicitudSnap.data();
+          const solicitudData = solicitudSnap.data();
 
-          if (
-            solicitudData.estatus !== "Pendiente"
-          ) {
+          if (solicitudData.estatus !== "Pendiente") {
             throw new Error(
               `La solicitud ya fue resuelta como ${solicitudData.estatus}.`,
             );
           }
 
-          const clienteId =
-            solicitudData.cliente_id;
-
-          if (!clienteId) {
-            throw new Error(
-              "La solicitud no contiene un cliente_id válido.",
-            );
-          }
-
-          const clienteRef = doc(
-            db,
-            CLIENTES_COLLECTION,
-            clienteId,
-          );
-
-          const clienteSnap =
-            await transaction.get(clienteRef);
-
-          if (!clienteSnap.exists()) {
-            throw new Error(
-              "El cliente asociado no existe.",
-            );
-          }
-
-          const clienteData =
-            clienteSnap.data();
-
-          if (
-            clienteData.activo === false ||
-            clienteData.estatus === "Inactivo"
-          ) {
-            throw new Error(
-              "No se puede resolver crédito para un cliente inactivo.",
-            );
-          }
-
-          const montoIncremento = Number(
-            solicitudData.monto_incremento,
-          );
-
-          if (
-            !Number.isFinite(montoIncremento) ||
-            montoIncremento <= 0
-          ) {
-            throw new Error(
-              "La solicitud contiene un monto inválido.",
-            );
-          }
+          const montoIncremento = Number(solicitudData.monto_incremento) || 0;
 
           if (decision === "Autorizado") {
+            if (!Number.isFinite(montoIncremento) || montoIncremento <= 0) {
+              throw new Error("La solicitud contiene un monto inválido.");
+            }
+
+            if (!solicitudData.cliente_id) {
+              throw new Error("La solicitud no contiene un cliente_id válido.");
+            }
+
+            const clienteRef = doc(
+              db,
+              CLIENTES_COLLECTION,
+              solicitudData.cliente_id,
+            );
+            const clienteSnap = await transaction.get(clienteRef);
+
+            if (!clienteSnap.exists()) {
+              throw new Error("El cliente asociado no existe.");
+            }
+
+            const clienteData = clienteSnap.data();
+
+            if (
+              clienteData.activo === false ||
+              clienteData.estatus === "Inactivo"
+            ) {
+              throw new Error(
+                "No se puede autorizar crédito para un cliente inactivo.",
+              );
+            }
+
             transaction.update(clienteRef, {
-              limite_credito:
-                increment(montoIncremento),
-              credito_disponible:
-                increment(montoIncremento),
+              limite_credito: increment(montoIncremento),
+              credito_disponible: increment(montoIncremento),
               updatedAt: serverTimestamp(),
             });
           }
@@ -320,32 +563,22 @@ export const solicitudesService = {
             resolvedByUid: actor_uid,
           });
 
-          const actividadRef = doc(
-            collection(db, ACTIVIDAD_COLLECTION),
-          );
-
-          transaction.set(actividadRef, {
+          transaction.set(doc(collection(db, ACTIVIDAD_COLLECTION)), {
             actor_uid,
             usuario: actor_nombre || "SU",
             modulo: "Crédito",
             tipo: `Resolución (${decision})`,
-            cliente:
-              solicitudData.cliente || "S/N",
+            cliente: solicitudData.cliente || "S/N",
             detalle: `El SU resolvió como ${decision.toUpperCase()} la solicitud de aumento por $${montoIncremento.toLocaleString("es-MX")}.`,
             serverTime: serverTimestamp(),
           });
         },
-        {
-          maxAttempts: 1,
-        },
+        { maxAttempts: 1 },
       );
 
       return { success: true };
     } catch (error) {
-      console.error(
-        "Fallo transaccional al resolver solicitud:",
-        error,
-      );
+      console.error("Fallo transaccional al resolver solicitud:", error);
 
       return {
         success: false,

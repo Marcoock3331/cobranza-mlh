@@ -20,6 +20,7 @@ const CLIENTES_COLLECTION = "clientes";
 const STATS_COLLECTION = "metricas_globales";
 const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
+const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
 
 const redondearMoneda = (valor) =>
   Math.round((Number(valor) || 0) * 100) / 100;
@@ -331,6 +332,8 @@ export const facturasService = {
         ).trim(),
         estatus: "Pendiente",
         abonos: [],
+        notas_credito: [],
+        total_notas_credito: 0,
         createdAt: serverTimestamp(),
       };
 
@@ -495,6 +498,25 @@ export const facturasService = {
         saldo_restante: nuevoSaldo,
       };
 
+      const limiteCredito = redondearMoneda(
+        clienteBD.limite_credito,
+      );
+      const creditoDisponibleActual = redondearMoneda(
+        clienteBD.credito_disponible,
+      );
+      const nuevoCreditoDisponible =
+        limiteCredito > 0
+          ? Math.min(
+              limiteCredito,
+              Math.max(
+                0,
+                redondearMoneda(
+                  creditoDisponibleActual + monto,
+                ),
+              ),
+            )
+          : 0;
+
       const batch = writeBatch(db);
 
       const facturaRef = doc(
@@ -519,7 +541,7 @@ export const facturasService = {
 
       batch.update(clienteRef, {
         deuda_actual: increment(-monto),
-        credito_disponible: increment(monto),
+        credito_disponible: nuevoCreditoDisponible,
         monto_ultimo_pago: monto,
         fecha_ultimo_pago: serverTimestamp(),
         metodo_ultimo_pago: metodoPago,
@@ -747,6 +769,25 @@ export const facturasService = {
       });
 
       const ultimoAbono = abonosRestantes[0];
+      const limiteCredito = redondearMoneda(
+        clienteBD.limite_credito,
+      );
+      const creditoDisponibleActual = redondearMoneda(
+        clienteBD.credito_disponible,
+      );
+      const nuevoCreditoDisponible =
+        limiteCredito > 0
+          ? Math.min(
+              limiteCredito,
+              Math.max(
+                0,
+                redondearMoneda(
+                  creditoDisponibleActual - montoAbono,
+                ),
+              ),
+            )
+          : 0;
+
       const batch = writeBatch(db);
 
       batch.update(facturaRef, {
@@ -759,7 +800,7 @@ export const facturasService = {
 
       const clienteUpdatePayload = {
         deuda_actual: increment(montoAbono),
-        credito_disponible: increment(-montoAbono),
+        credito_disponible: nuevoCreditoDisponible,
         updatedAt: serverTimestamp(),
       };
 
@@ -1302,6 +1343,495 @@ export const facturasService = {
       };
     } catch (error) {
       console.error("Error al modificar la factura:", error);
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
+
+
+  aplicarNotaCredito: async ({
+    factura,
+    montoNota,
+    motivo,
+    observaciones,
+    userName,
+    actor_uid,
+    solicitudNotaId = "",
+  }) => {
+    if (!actor_uid) {
+      return {
+        success: false,
+        error: "No se identificó al usuario responsable.",
+      };
+    }
+
+    if (!factura?.id) {
+      return {
+        success: false,
+        error: "No se identificó la factura para aplicar la nota de crédito.",
+      };
+    }
+
+    try {
+      const monto = redondearMoneda(montoNota);
+
+      if (monto <= 0) {
+        throw new Error("La nota de crédito debe ser mayor a cero.");
+      }
+
+      if (!String(motivo || "").trim()) {
+        throw new Error("El motivo de la nota de crédito es obligatorio.");
+      }
+
+      const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const solicitudNotaRef = solicitudNotaId
+        ? doc(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION, solicitudNotaId)
+        : null;
+
+      const resultado = await runTransaction(db, async (transaction) => {
+        let solicitudNota = null;
+
+        if (solicitudNotaRef) {
+          const solicitudSnap = await transaction.get(solicitudNotaRef);
+
+          if (!solicitudSnap.exists()) {
+            throw new Error("La solicitud de nota de crédito ya no existe.");
+          }
+
+          solicitudNota = {
+            id: solicitudSnap.id,
+            ...solicitudSnap.data(),
+          };
+
+          if (solicitudNota.estatus !== "Pendiente") {
+            throw new Error(
+              `La solicitud ya fue resuelta como ${solicitudNota.estatus}.`,
+            );
+          }
+        }
+
+        const facturaSnap = await transaction.get(facturaRef);
+
+        if (!facturaSnap.exists()) {
+          throw new Error("La factura ya no existe en Firestore.");
+        }
+
+        const facturaActual = {
+          id: facturaSnap.id,
+          ...facturaSnap.data(),
+        };
+
+        if (!facturaActual.cliente_id) {
+          throw new Error(
+            "La factura no tiene cliente_id y no puede ajustarse de forma segura.",
+          );
+        }
+
+        const clienteRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          facturaActual.cliente_id,
+        );
+
+        const clienteSnap = await transaction.get(clienteRef);
+
+        if (!clienteSnap.exists()) {
+          throw new Error("No se encontró el cliente enlazado a la factura.");
+        }
+
+        const cliente = clienteSnap.data();
+        const saldoAnterior = redondearMoneda(facturaActual.saldo_pendiente);
+
+        if (saldoAnterior <= 0) {
+          throw new Error("No se puede aplicar nota de crédito a una factura liquidada.");
+        }
+
+        if (monto > saldoAnterior) {
+          throw new Error(
+            `La nota de crédito no puede superar el saldo pendiente de $${saldoAnterior.toLocaleString("es-MX")}.`,
+          );
+        }
+
+        if (solicitudNota) {
+          const montoSolicitud = redondearMoneda(solicitudNota.monto_nota);
+          if (solicitudNota.factura_id !== facturaActual.id) {
+            throw new Error("La solicitud no pertenece a esta factura.");
+          }
+
+          if (montoSolicitud !== monto) {
+            throw new Error("El monto solicitado no coincide con el monto autorizado.");
+          }
+        }
+
+        const saldoRestante = redondearMoneda(saldoAnterior - monto);
+        const montoPagado = redondearMoneda(facturaActual.monto_pagado);
+        const totalNotasActual = redondearMoneda(
+          facturaActual.total_notas_credito || 0,
+        );
+        const totalNotasNuevo = redondearMoneda(totalNotasActual + monto);
+
+        const nuevoEstatus =
+          saldoRestante === 0
+            ? "Pagada"
+            : esFacturaVencida(facturaActual)
+              ? "Vencida"
+              : "Pendiente";
+
+        const nuevaNota = {
+          id_nota: `nc-${Date.now()}`,
+          fecha: Timestamp.now(),
+          monto,
+          motivo: String(motivo || "").trim(),
+          observaciones: String(observaciones || "").trim(),
+          aplicado_por_uid: actor_uid,
+          aplicado_por: userName || "SU",
+          origen: solicitudNota ? "Solicitud ADMIN autorizada" : "Aplicación directa SU",
+          solicitud_nota_id: solicitudNota?.id || "",
+          saldo_anterior: saldoAnterior,
+          saldo_restante: saldoRestante,
+          cancelada: false,
+          estado: "Activa",
+        };
+
+        transaction.update(facturaRef, {
+          saldo_pendiente: saldoRestante,
+          estatus: nuevoEstatus,
+          notas_credito: arrayUnion(nuevaNota),
+          total_notas_credito: totalNotasNuevo,
+          ultima_accion: {
+            tipo: "Nota de crédito",
+            monto,
+            fecha: Timestamp.now(),
+            usuario: userName || "SU",
+          },
+          updatedAt: serverTimestamp(),
+        });
+
+        const limiteCredito = redondearMoneda(cliente.limite_credito);
+        const deudaActual = redondearMoneda(cliente.deuda_actual);
+        const creditoDisponible = redondearMoneda(cliente.credito_disponible);
+
+        transaction.update(clienteRef, {
+          deuda_actual: Math.max(0, redondearMoneda(deudaActual - monto)),
+          credito_disponible:
+            limiteCredito > 0
+              ? Math.min(
+                  limiteCredito,
+                  Math.max(0, redondearMoneda(creditoDisponible + monto)),
+                )
+              : 0,
+          updatedAt: serverTimestamp(),
+        });
+
+        const estabaVencida =
+          saldoAnterior > 0 && esFacturaVencida(facturaActual);
+
+        const statsUpdate = {
+          cartera_total: increment(-monto),
+          total_notas_credito: increment(monto),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (estabaVencida) {
+          statsUpdate.cartera_vencida = increment(-monto);
+        }
+
+        if (saldoRestante === 0) {
+          statsUpdate.facturas_pagadas = increment(1);
+          statsUpdate.facturas_pendientes = increment(-1);
+
+          if (estabaVencida) {
+            statsUpdate.facturas_vencidas = increment(-1);
+          }
+        }
+
+        transaction.set(statsRef, statsUpdate, { merge: true });
+
+        if (solicitudNotaRef && solicitudNota) {
+          transaction.update(solicitudNotaRef, {
+            estatus: "Autorizado",
+            resolvedAt: serverTimestamp(),
+            resolvedBy: userName || "SU",
+            resolvedByUid: actor_uid,
+            nota_credito_id: nuevaNota.id_nota,
+            saldo_restante: saldoRestante,
+          });
+        }
+
+        transaction.set(auditRef, {
+          actor_uid,
+          usuario: userName || "SU",
+          modulo: "Facturación",
+          tipo: "Nota de Crédito",
+          factura_id: facturaActual.id,
+          folio: facturaActual.folio || "S/F",
+          cliente: facturaActual.cliente || cliente.nombre || "S/N",
+          cliente_id: facturaActual.cliente_id,
+          detalle: `El SU aplicó una nota de crédito por $${monto.toLocaleString("es-MX")} a la factura ${facturaActual.folio || "S/F"}. Motivo: ${String(motivo || "").trim()}.`,
+          serverTime: serverTimestamp(),
+        });
+
+        return {
+          nota: nuevaNota,
+          factura: {
+            ...facturaActual,
+            saldo_pendiente: saldoRestante,
+            estatus: nuevoEstatus,
+            total_notas_credito: totalNotasNuevo,
+            monto_pagado: montoPagado,
+          },
+        };
+      });
+
+      return {
+        success: true,
+        data: resultado,
+      };
+    } catch (error) {
+      console.error("Error al aplicar nota de crédito:", error);
+
+      return {
+        success: false,
+        error: mapearErrorFirestore(error),
+      };
+    }
+  },
+
+
+  cancelarNotaCredito: async ({
+    factura,
+    idNota,
+    motivoCancelacion = "",
+    userName,
+    actor_uid,
+  }) => {
+    if (!actor_uid) {
+      return {
+        success: false,
+        error: "No se identificó al usuario responsable.",
+      };
+    }
+
+    if (!factura?.id || !idNota) {
+      return {
+        success: false,
+        error: "No se identificó la factura o la nota de crédito.",
+      };
+    }
+
+    try {
+      const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+
+      const resultado = await runTransaction(db, async (transaction) => {
+        const facturaSnap = await transaction.get(facturaRef);
+
+        if (!facturaSnap.exists()) {
+          throw new Error("La factura ya no existe en Firestore.");
+        }
+
+        const facturaActual = {
+          id: facturaSnap.id,
+          ...facturaSnap.data(),
+        };
+
+        if (!facturaActual.cliente_id) {
+          throw new Error(
+            "La factura no tiene cliente_id y no puede ajustarse de forma segura.",
+          );
+        }
+
+        const notasCredito = Array.isArray(facturaActual.notas_credito)
+          ? facturaActual.notas_credito
+          : [];
+
+        const notaObjetivo = notasCredito.find(
+          (nota) => nota.id_nota === idNota,
+        );
+
+        if (!notaObjetivo) {
+          throw new Error("No se encontró la nota de crédito seleccionada.");
+        }
+
+        const montoNota = redondearMoneda(notaObjetivo.monto);
+
+        if (montoNota <= 0) {
+          throw new Error("La nota de crédito contiene un monto inválido.");
+        }
+
+        if (notaObjetivo.cancelada === true || ["Anulada", "Cancelada"].includes(notaObjetivo.estado)) {
+          throw new Error("La nota de crédito ya está anulada.");
+        }
+
+        const solicitudNotaRef = notaObjetivo.solicitud_nota_id
+          ? doc(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION, notaObjetivo.solicitud_nota_id)
+          : null;
+
+        const solicitudNotaSnap = solicitudNotaRef
+          ? await transaction.get(solicitudNotaRef)
+          : null;
+
+        const clienteRef = doc(
+          db,
+          CLIENTES_COLLECTION,
+          facturaActual.cliente_id,
+        );
+
+        const clienteSnap = await transaction.get(clienteRef);
+
+        if (!clienteSnap.exists()) {
+          throw new Error("No se encontró el cliente enlazado a la factura.");
+        }
+
+        const cliente = clienteSnap.data();
+
+        const montoTotal = redondearMoneda(facturaActual.monto_total);
+        const montoPagado = redondearMoneda(facturaActual.monto_pagado);
+        const saldoActual = redondearMoneda(facturaActual.saldo_pendiente);
+        const totalNotasActual = redondearMoneda(
+          facturaActual.total_notas_credito || 0,
+        );
+        const totalNotasNuevo = Math.max(
+          0,
+          redondearMoneda(totalNotasActual - montoNota),
+        );
+
+        const saldoNuevo = Math.max(
+          0,
+          redondearMoneda(montoTotal - montoPagado - totalNotasNuevo),
+        );
+
+        if (saldoNuevo < saldoActual) {
+          throw new Error("La eliminación calculó un saldo inválido.");
+        }
+
+        const nuevoEstatus =
+          saldoNuevo === 0
+            ? "Pagada"
+            : esFacturaVencida(facturaActual)
+              ? "Vencida"
+              : "Pendiente";
+
+        const fechaAnulacion = Timestamp.now();
+        const motivoAnulacion = String(motivoCancelacion || "").trim();
+
+        const notasActualizadas = notasCredito.map((nota) =>
+          nota.id_nota === idNota
+            ? {
+                ...nota,
+                cancelada: true,
+                estado: "Anulada",
+                fecha_anulacion: fechaAnulacion,
+                anulada_por: userName || "SU",
+                anulada_por_uid: actor_uid,
+                motivo_cancelacion: motivoAnulacion,
+                saldo_revertido: saldoNuevo,
+              }
+            : nota,
+        );
+
+        transaction.update(facturaRef, {
+          saldo_pendiente: saldoNuevo,
+          estatus: nuevoEstatus,
+          notas_credito: notasActualizadas,
+          total_notas_credito: totalNotasNuevo,
+          ultima_accion: {
+            tipo: "Eliminación de nota de crédito",
+            monto: montoNota,
+            fecha: Timestamp.now(),
+            usuario: userName || "SU",
+          },
+          updatedAt: serverTimestamp(),
+        });
+
+        const limiteCredito = redondearMoneda(cliente.limite_credito);
+        const deudaActual = redondearMoneda(cliente.deuda_actual);
+        const creditoDisponible = redondearMoneda(cliente.credito_disponible);
+
+        transaction.update(clienteRef, {
+          deuda_actual: redondearMoneda(deudaActual + montoNota),
+          credito_disponible:
+            limiteCredito > 0
+              ? Math.max(0, redondearMoneda(creditoDisponible - montoNota))
+              : 0,
+          updatedAt: serverTimestamp(),
+        });
+
+        const quedaVencida = saldoNuevo > 0 && esFacturaVencida(facturaActual);
+        const estabaPagada = saldoActual === 0;
+
+        const statsUpdate = {
+          cartera_total: increment(montoNota),
+          total_notas_credito: increment(-montoNota),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (quedaVencida) {
+          statsUpdate.cartera_vencida = increment(montoNota);
+        }
+
+        if (estabaPagada && saldoNuevo > 0) {
+          statsUpdate.facturas_pagadas = increment(-1);
+
+          if (quedaVencida) {
+            statsUpdate.facturas_vencidas = increment(1);
+          } else {
+            statsUpdate.facturas_pendientes = increment(1);
+          }
+        }
+
+        transaction.set(statsRef, statsUpdate, { merge: true });
+
+        if (solicitudNotaRef && solicitudNotaSnap?.exists()) {
+          transaction.update(solicitudNotaRef, {
+            estatus: "Anulada",
+            nota_anulada: true,
+            anuladaAt: serverTimestamp(),
+            anuladaBy: userName || "SU",
+            anuladaByUid: actor_uid,
+            motivo_anulacion: String(motivoCancelacion || "").trim(),
+          });
+        }
+
+        transaction.set(auditRef, {
+          actor_uid,
+          usuario: userName || "SU",
+          modulo: "Facturación",
+          tipo: "Anulación de Nota de Crédito",
+          factura_id: facturaActual.id,
+          folio: facturaActual.folio || "S/F",
+          cliente: facturaActual.cliente || cliente.nombre || "S/N",
+          cliente_id: facturaActual.cliente_id,
+          monto: montoNota,
+          motivo: notaObjetivo.motivo || "Sin motivo",
+          motivo_cancelacion: String(motivoCancelacion || "").trim(),
+          detalle: `El SU anuló/revirtió una nota de crédito por $${montoNota.toLocaleString("es-MX")} de la factura ${facturaActual.folio || "S/F"}. La nota quedó visible como ANULADA en el historial.`,
+          serverTime: serverTimestamp(),
+        });
+
+        return {
+          factura: {
+            ...facturaActual,
+            saldo_pendiente: saldoNuevo,
+            estatus: nuevoEstatus,
+            total_notas_credito: totalNotasNuevo,
+            notas_credito: notasActualizadas,
+          },
+        };
+      });
+
+      return {
+        success: true,
+        data: resultado,
+      };
+    } catch (error) {
+      console.error("Error al eliminar nota de crédito:", error);
 
       return {
         success: false,
