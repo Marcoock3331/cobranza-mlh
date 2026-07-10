@@ -46,6 +46,7 @@ copias/
 repomix-output.xml
 revision-*.md
 bloque-*.md
+repomix-*.md
 
 # Editor directories and files
 .vscode/*
