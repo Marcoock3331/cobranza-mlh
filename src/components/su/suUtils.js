@@ -6,6 +6,7 @@ export const RESUMENES_LINEA_POR_PAGINA = 10;
 export const MOVIMIENTOS_LINEA_POR_PAGINA = 6;
 export const NOTAS_CLIENTES_POR_PAGINA = 10;
 export const NOTAS_HISTORIAL_POR_PAGINA = 6;
+export const ABONOS_REPORTE_POR_PAGINA = 10;
 
 
 export const TABS_PANEL_SU = [
@@ -28,6 +29,11 @@ export const TABS_PANEL_SU = [
     id: "actividad",
     label: "Auditoría",
     descripcion: "Registro completo de eventos.",
+  },
+  {
+    id: "abonos",
+    label: "Reporte de Abonos",
+    descripcion: "Pagos registrados y limpieza de pruebas.",
   },
 ];
 

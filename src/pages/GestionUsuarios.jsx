@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   Activity,
   CreditCard,
+  ReceiptText,
   Shield,
   UserCheck,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import ControlPersonalSU from "../components/su/ControlPersonalSU";
 import CreditoRiesgoSU from "../components/su/CreditoRiesgoSU";
 import ModalesSU from "../components/su/ModalesSU";
 import ResumenEjecutivoSU from "../components/su/ResumenEjecutivoSU";
+import ReporteAbonosSU from "../components/su/ReporteAbonosSU";
 import {
   MOVIMIENTOS_LINEA_POR_PAGINA,
   NOTAS_CLIENTES_POR_PAGINA,
@@ -41,11 +43,13 @@ const RESUMEN_LINEA_COLLECTION = "lineas_credito_resumen_clientes";
 const MOVIMIENTOS_LINEA_COLLECTION = "lineas_credito_movimientos";
 const RESUMEN_NOTAS_COLLECTION = "notas_credito_resumen_clientes";
 const SOLICITUDES_NOTAS_COLLECTION = "solicitudes_notas_credito";
+const ADMIN_USUARIOS_POR_PAGINA = 10;
 
 const normalizarTab = (tab = "") => {
   if (tab === "solicitudes" || tab === "creditos") return "creditos";
   if (tab === "usuarios") return "usuarios";
   if (tab === "actividad") return "actividad";
+  if (tab === "abonos") return "abonos";
   return "resumen";
 };
 
@@ -68,7 +72,6 @@ export default function GestionUsuarios() {
     actividad,
     solicitudesNotasCredito,
     currentUser,
-    usuarios,
     userName,
   } = useContext(GlobalContext);
 
@@ -102,6 +105,16 @@ export default function GestionUsuarios() {
     correo: "",
     password: "",
   });
+
+  const [administradores, setAdministradores] = useState([]);
+  const [cargandoAdministradores, setCargandoAdministradores] = useState(false);
+  const [errorAdministradores, setErrorAdministradores] = useState("");
+  const [paginaAdministradores, setPaginaAdministradores] = useState(1);
+  const [cursoresAdministradores, setCursoresAdministradores] = useState([]);
+  const [haySiguienteAdministradores, setHaySiguienteAdministradores] =
+    useState(false);
+  const [hayAdministradoresSuspendidos, setHayAdministradoresSuspendidos] =
+    useState(false);
 
   const [resumenesLineaCredito, setResumenesLineaCredito] = useState([]);
   const [clienteLineaSeleccionadoDetalle, setClienteLineaSeleccionadoDetalle] =
@@ -140,9 +153,11 @@ export default function GestionUsuarios() {
     useState([]);
   const [haySiguienteHistorialNotasCredito, setHaySiguienteHistorialNotasCredito] =
     useState(false);
+  
   const hayAnteriorLineaCredito = paginaLineaCredito > 1;
   const hayAnteriorNotasCredito = paginaNotasCredito > 1;
   const hayAnteriorHistorialNotasCredito = paginaHistorialNotasCredito > 1;
+  const hayAnteriorAdministradores = paginaAdministradores > 1;
 
   const clienteLineaEnPagina = useMemo(
     () =>
@@ -207,9 +222,62 @@ export default function GestionUsuarios() {
     );
   };
 
-  const administradores = useMemo(
-    () => (usuarios || []).filter((usuario) => usuario.rol === "ADMIN"),
-    [usuarios],
+  const cargarIndicadorAdministradoresSuspendidos = useCallback(async () => {
+    if (!isSuperUser) {
+      return;
+    }
+
+    const res = await usuariosService.existenAdministradoresSuspendidos();
+    setHayAdministradoresSuspendidos(Boolean(res.existe));
+  }, [isSuperUser]);
+
+  const cargarPaginaAdministradores = useCallback(
+    async ({ paginaDestino = 1, cursor = null, reiniciarCursores = false } = {}) => {
+      if (!isSuperUser) return;
+
+      setCargandoAdministradores(true);
+      setErrorAdministradores("");
+
+      try {
+        const res = await usuariosService.cargarAdministradoresPagina({
+          cursor,
+          registrosPorPagina: ADMIN_USUARIOS_POR_PAGINA,
+        });
+
+        if (!res.success) {
+          setAdministradores([]);
+          setHaySiguienteAdministradores(false);
+          setErrorAdministradores(res.error || "No se pudo cargar usuarios ADMIN.");
+          return;
+        }
+
+        setAdministradores(res.data || []);
+        setPaginaAdministradores(paginaDestino);
+        setHaySiguienteAdministradores(Boolean(res.haySiguiente));
+
+        setCursoresAdministradores((cursoresActuales) => {
+          if (reiniciarCursores) {
+            return res.cursorFinal ? [res.cursorFinal] : [];
+          }
+
+          const cursoresNuevos = cursoresActuales.slice(0, paginaDestino - 1);
+
+          if (res.cursorFinal) {
+            cursoresNuevos[paginaDestino - 1] = res.cursorFinal;
+          }
+
+          return cursoresNuevos;
+        });
+      } catch (error) {
+        console.error("Error cargando usuarios ADMIN:", error);
+        setAdministradores([]);
+        setHaySiguienteAdministradores(false);
+        setErrorAdministradores("No se pudo cargar la página de usuarios ADMIN.");
+      } finally {
+        setCargandoAdministradores(false);
+      }
+    },
+    [isSuperUser],
   );
 
   const solicitudesNotasOrdenadas = useMemo(
@@ -224,6 +292,72 @@ export default function GestionUsuarios() {
       ).length,
     [solicitudesNotasOrdenadas],
   );
+
+  // EFECTO CORREGIDO - Evitamos setState síncrono si no es SuperUser
+  useEffect(() => {
+    if (!isSuperUser) return undefined;
+
+    let cancelado = false;
+
+    const timeoutId = window.setTimeout(() => {
+      if (cancelado) return;
+
+      cargarPaginaAdministradores({
+        paginaDestino: 1,
+        cursor: null,
+        reiniciarCursores: true,
+      });
+      cargarIndicadorAdministradoresSuspendidos();
+    }, 0);
+
+    return () => {
+      cancelado = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    cargarIndicadorAdministradoresSuspendidos,
+    cargarPaginaAdministradores,
+    isSuperUser,
+  ]);
+
+  const irSiguienteAdministradores = () => {
+    if (cargandoAdministradores || !haySiguienteAdministradores) return;
+
+    const cursorActual = cursoresAdministradores[paginaAdministradores - 1];
+
+    if (!cursorActual) return;
+
+    cargarPaginaAdministradores({
+      paginaDestino: paginaAdministradores + 1,
+      cursor: cursorActual,
+    });
+  };
+
+  const irAnteriorAdministradores = () => {
+    if (cargandoAdministradores || paginaAdministradores <= 1) return;
+
+    const paginaDestino = paginaAdministradores - 1;
+    const cursorAnterior =
+      paginaDestino === 1 ? null : cursoresAdministradores[paginaDestino - 2];
+
+    cargarPaginaAdministradores({
+      paginaDestino,
+      cursor: cursorAnterior,
+    });
+  };
+
+  const refrescarPaginaActualAdministradores = async () => {
+    await cargarPaginaAdministradores({
+      paginaDestino: paginaAdministradores,
+      cursor:
+        paginaAdministradores === 1
+          ? null
+          : cursoresAdministradores[paginaAdministradores - 2],
+      reiniciarCursores: paginaAdministradores === 1,
+    });
+
+    await cargarIndicadorAdministradoresSuspendidos();
+  };
 
   const cargarPaginaResumenesLineaCredito = useCallback(
     async ({ paginaDestino = 1, cursor = null, reiniciarCursores = false } = {}) => {
@@ -448,7 +582,7 @@ export default function GestionUsuarios() {
   );
 
   useEffect(() => {
-    if (!isSuperUser) {
+    if (!isSuperUser || tabActiva !== "creditos" || vistaCredito !== "linea") {
       return undefined;
     }
 
@@ -468,10 +602,10 @@ export default function GestionUsuarios() {
       cancelado = true;
       window.clearTimeout(timeoutId);
     };
-  }, [cargarPaginaResumenesLineaCredito, isSuperUser]);
+  }, [cargarPaginaResumenesLineaCredito, isSuperUser, tabActiva, vistaCredito]);
 
   useEffect(() => {
-    if (!isSuperUser) {
+    if (!isSuperUser || tabActiva !== "creditos" || vistaCredito !== "notas") {
       return undefined;
     }
 
@@ -491,10 +625,16 @@ export default function GestionUsuarios() {
       cancelado = true;
       window.clearTimeout(timeoutId);
     };
-  }, [cargarPaginaResumenesNotasCredito, isSuperUser]);
+  }, [cargarPaginaResumenesNotasCredito, isSuperUser, tabActiva, vistaCredito]);
 
   useEffect(() => {
-    if (!isSuperUser || !clienteLineaSeleccionadoId || clienteLineaEnPagina) {
+    if (
+      !isSuperUser ||
+      tabActiva !== "creditos" ||
+      vistaCredito !== "linea" ||
+      !clienteLineaSeleccionadoId ||
+      clienteLineaEnPagina
+    ) {
       return undefined;
     }
 
@@ -533,10 +673,22 @@ export default function GestionUsuarios() {
     return () => {
       cancelado = true;
     };
-  }, [clienteLineaEnPagina, clienteLineaSeleccionadoId, isSuperUser]);
+  }, [
+    clienteLineaEnPagina,
+    clienteLineaSeleccionadoId,
+    isSuperUser,
+    tabActiva,
+    vistaCredito,
+  ]);
 
   useEffect(() => {
-    if (!isSuperUser || !clienteNotaSeleccionadoId || clienteNotaEnPagina) {
+    if (
+      !isSuperUser ||
+      tabActiva !== "creditos" ||
+      vistaCredito !== "notas" ||
+      !clienteNotaSeleccionadoId ||
+      clienteNotaEnPagina
+    ) {
       return undefined;
     }
 
@@ -575,10 +727,21 @@ export default function GestionUsuarios() {
     return () => {
       cancelado = true;
     };
-  }, [clienteNotaEnPagina, clienteNotaSeleccionadoId, isSuperUser]);
+  }, [
+    clienteNotaEnPagina,
+    clienteNotaSeleccionadoId,
+    isSuperUser,
+    tabActiva,
+    vistaCredito,
+  ]);
 
   useEffect(() => {
-    if (!isSuperUser || !clienteNotaSeleccionadoId) {
+    if (
+      !isSuperUser ||
+      tabActiva !== "creditos" ||
+      vistaCredito !== "notas" ||
+      !clienteNotaSeleccionadoId
+    ) {
       return undefined;
     }
 
@@ -598,10 +761,21 @@ export default function GestionUsuarios() {
       cancelado = true;
       window.clearTimeout(timeoutId);
     };
-  }, [cargarPaginaHistorialNotasCredito, clienteNotaSeleccionadoId, isSuperUser]);
+  }, [
+    cargarPaginaHistorialNotasCredito,
+    clienteNotaSeleccionadoId,
+    isSuperUser,
+    tabActiva,
+    vistaCredito,
+  ]);
 
   useEffect(() => {
-    if (!isSuperUser || !clienteLineaSeleccionadoId) {
+    if (
+      !isSuperUser ||
+      tabActiva !== "creditos" ||
+      vistaCredito !== "linea" ||
+      !clienteLineaSeleccionadoId
+    ) {
       return undefined;
     }
 
@@ -631,7 +805,7 @@ export default function GestionUsuarios() {
     );
 
     return () => unsub();
-  }, [isSuperUser, clienteLineaSeleccionadoId]);
+  }, [isSuperUser, clienteLineaSeleccionadoId, tabActiva, vistaCredito]);
 
   const irSiguienteLineaCredito = () => {
     if (cargandoResumenesLineaCredito || !haySiguienteLineaCredito) return;
@@ -769,6 +943,14 @@ export default function GestionUsuarios() {
         correo: "",
         password: "",
       });
+
+      await cargarPaginaAdministradores({
+        paginaDestino: 1,
+        cursor: null,
+        reiniciarCursores: true,
+      });
+      await cargarIndicadorAdministradoresSuspendidos();
+
       return;
     }
 
@@ -866,6 +1048,8 @@ export default function GestionUsuarios() {
       }
 
       setUsuarioSeleccionado(null);
+
+      await refrescarPaginaActualAdministradores();
 
       mostrarNotificacion(
         nuevoEstado ? "Usuario reactivado" : "Usuario suspendido",
@@ -1072,7 +1256,7 @@ export default function GestionUsuarios() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 rounded-2xl border border-white bg-white/55 p-2 shadow-sm md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-2 rounded-2xl border border-white bg-white/55 p-2 shadow-sm sm:grid-cols-2 xl:grid-cols-5">
         {TABS_PANEL_SU.map((tab) => {
           const activa = tabActiva === tab.id;
 
@@ -1083,7 +1267,9 @@ export default function GestionUsuarios() {
                 ? UserCheck
                 : tab.id === "creditos"
                   ? CreditCard
-                  : Activity;
+                  : tab.id === "abonos"
+                    ? ReceiptText
+                    : Activity;
 
           return (
             <button
@@ -1127,11 +1313,10 @@ export default function GestionUsuarios() {
 
       {tabActiva === "resumen" && (
         <ResumenEjecutivoSU
-          administradores={administradores}
           solicitudesNotasOrdenadas={solicitudesNotasOrdenadas}
-          resumenesLineaCredito={resumenesLineaCredito}
           actividad={actividad || []}
           onCambiarTab={cambiarTab}
+          hayUsuariosSuspendidos={hayAdministradoresSuspendidos}
         />
       )}
 
@@ -1141,6 +1326,15 @@ export default function GestionUsuarios() {
           onCrearUsuario={() => setModalActivo("nuevoUsuario")}
           onCambiarEstado={abrirConfirmacionEstado}
           onEnviarResetPassword={abrirConfirmacionResetPassword}
+          haySuspendidos={hayAdministradoresSuspendidos}
+          pagina={paginaAdministradores}
+          hayAnterior={hayAnteriorAdministradores}
+          haySiguiente={haySiguienteAdministradores}
+          cargando={cargandoAdministradores}
+          error={errorAdministradores}
+          registrosEnPagina={administradores.length}
+          onAnterior={irAnteriorAdministradores}
+          onSiguiente={irSiguienteAdministradores}
         />
       )}
 
@@ -1191,6 +1385,14 @@ export default function GestionUsuarios() {
         <AuditoriaSU
           actividad={actividad || []}
           onVerDetalleEdicionFactura={abrirDetalleEdicionFactura}
+        />
+      )}
+
+
+      {tabActiva === "abonos" && (
+        <ReporteAbonosSU
+          actorUid={currentUser?.uid}
+          userName={userName || usuarioResponsable}
         />
       )}
 

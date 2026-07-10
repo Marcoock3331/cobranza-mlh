@@ -13,7 +13,6 @@ import { db } from "../config/firebase";
 import { clientesService } from "../services/clientesService";
 import { facturasService } from "../services/facturasService";
 import { solicitudesService } from "../services/solicitudesService";
-import { usuariosService } from "../services/usuariosService";
 import { formatearFechaSegura } from "../utils/normalizadores";
 import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
 import { AuthContext } from "./AuthContext";
@@ -67,6 +66,7 @@ export const GlobalProvider = ({ children }) => {
         total_liquidado: 0,
         cobrado_historico: 0,
         abonos_registrados: 0,
+        monto_recuperado: 0,
         total_notas_credito: 0,
       },
       clientes: [],
@@ -105,7 +105,6 @@ function GlobalDataProvider({ authData, children }) {
   const [solicitudes, setSolicitudes] = useState([]);
   const [solicitudesNotasCredito, setSolicitudesNotasCredito] = useState([]);
   const [actividad, setActividad] = useState([]);
-  const [usuarios, setUsuarios] = useState([]);
   const [statsDB, setStatsDB] = useState({
     cartera_total: 0,
     cartera_vencida: 0,
@@ -120,6 +119,7 @@ function GlobalDataProvider({ authData, children }) {
     total_liquidado: 0,
     cobrado_historico: 0,
     abonos_registrados: 0,
+    monto_recuperado: 0,
     total_notas_credito: 0,
   });
 
@@ -128,14 +128,9 @@ function GlobalDataProvider({ authData, children }) {
       return undefined;
     }
 
-    let unsubUsuarios = () => {};
     let unsubActividad = () => {};
 
     if (userRole === "SU") {
-      unsubUsuarios = usuariosService.escucharUsuarios((dataNormalizada) => {
-        setUsuarios(dataNormalizada);
-      });
-
       const qActividad = query(
         collection(db, ACTIVIDAD_COLLECTION),
         orderBy("serverTime", "desc"),
@@ -257,7 +252,6 @@ function GlobalDataProvider({ authData, children }) {
       unsubActividad();
       unsubSolicitudes();
       unsubSolicitudesNotasCredito();
-      unsubUsuarios();
     };
   }, [actorUid, userRole]);
 
@@ -311,6 +305,8 @@ function GlobalDataProvider({ authData, children }) {
       total_liquidado: Number(statsDB.total_liquidado) || 0,
       cobrado_historico: Number(statsDB.cobrado_historico) || 0,
       abonos_registrados: Number(statsDB.abonos_registrados) || 0,
+      monto_recuperado:
+        Number(statsDB.monto_recuperado) || Number(statsDB.cobrado_historico) || 0,
       total_notas_credito: Number(statsDB.total_notas_credito) || 0,
     };
   }, [clientes, statsDB]);
@@ -548,11 +544,6 @@ function GlobalDataProvider({ authData, children }) {
     [actividad, userRole],
   );
 
-  const usuariosVisibles = useMemo(
-    () => (userRole === "SU" ? usuarios : []),
-    [usuarios, userRole],
-  );
-
   const contextValue = useMemo(
     () => ({
       ...authData,
@@ -578,7 +569,7 @@ function GlobalDataProvider({ authData, children }) {
       setSolicitudes,
       solicitudesNotasCredito,
       setSolicitudesNotasCredito,
-      usuarios: usuariosVisibles,
+      usuarios: [],
     }),
     [
       authData,
@@ -598,7 +589,6 @@ function GlobalDataProvider({ authData, children }) {
       actividadVisible,
       solicitudes,
       solicitudesNotasCredito,
-      usuariosVisibles,
     ],
   );
 

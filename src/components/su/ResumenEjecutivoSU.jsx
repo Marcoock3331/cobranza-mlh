@@ -6,11 +6,10 @@ import {
   CreditCard,
   FileText,
   Shield,
-  UserCheck,
   Users,
 } from "lucide-react";
 
-import { actividadEsCritica, formatearMoneda, formatearFechaFirestore } from "./suUtils";
+import { actividadEsCritica, formatearFechaFirestore } from "./suUtils";
 import { textoSeguro } from "../../utils/normalizadores";
 
 
@@ -55,11 +54,10 @@ function KpiSU({ titulo, valor, descripcion, icono: Icono, variante = "azul" }) 
 }
 
 export default function ResumenEjecutivoSU({
-  administradores,
   solicitudesNotasOrdenadas,
-  resumenesLineaCredito,
   actividad,
   onCambiarTab,
+  hayUsuariosSuspendidos = false,
 }) {
   const solicitudesPendientes = solicitudesNotasOrdenadas.filter(
     (solicitud) => solicitud.estatus === "Pendiente",
@@ -69,17 +67,9 @@ export default function ResumenEjecutivoSU({
     (solicitud) => solicitud.estatus !== "Pendiente",
   );
 
-  const usuariosActivos = administradores.filter((usuario) => usuario.activo);
-  const usuariosSuspendidos = administradores.filter((usuario) => !usuario.activo);
-
   const movimientosCriticos = (actividad || []).filter(actividadEsCritica);
   const movimientosLinea = (actividad || []).filter(
     (item) => item.modulo === "Crédito" && item.tipo === "Movimiento de Línea",
-  );
-
-  const montoNetoLinea = (resumenesLineaCredito || []).reduce(
-    (total, resumen) => total + (Number(resumen.limite_actual) || 0),
-    0,
   );
 
   const alertas = [
@@ -97,10 +87,10 @@ export default function ResumenEjecutivoSU({
       accion: "Abrir auditoría",
       tab: "actividad",
     },
-    usuariosSuspendidos.length > 0 && {
+    hayUsuariosSuspendidos && {
       id: "usuarios-suspendidos",
       titulo: "Usuarios suspendidos",
-      descripcion: `${usuariosSuspendidos.length} cuenta(s) ADMIN sin acceso operativo.`,
+      descripcion: "Existen accesos ADMIN inactivos conservados como historial.",
       accion: "Revisar personal",
       tab: "usuarios",
     },
@@ -110,7 +100,7 @@ export default function ResumenEjecutivoSU({
 
   return (
     <div className="space-y-4 md:space-y-6">
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <KpiSU
           titulo="Pendientes"
           valor={solicitudesPendientes.length}
@@ -128,19 +118,11 @@ export default function ResumenEjecutivoSU({
         />
 
         <KpiSU
-          titulo="Clientes con línea"
-          valor={(resumenesLineaCredito || []).length}
-          descripcion={`Líneas auditadas. Total visible: $${formatearMoneda(montoNetoLinea)}.`}
-          icono={CreditCard}
-          variante="azul"
-        />
-
-        <KpiSU
-          titulo="Usuarios activos"
-          valor={usuariosActivos.length}
-          descripcion={`${usuariosSuspendidos.length} suspendido(s).`}
-          icono={UserCheck}
-          variante="morado"
+          titulo="Actividad crítica"
+          valor={movimientosCriticos.length}
+          descripcion="Eventos sensibles detectados en auditoría."
+          icono={AlertTriangle}
+          variante={movimientosCriticos.length > 0 ? "rojo" : "slate"}
         />
       </section>
 

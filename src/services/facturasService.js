@@ -1,29 +1,96 @@
-import { db } from "../config/firebase";
+import { auth, db } from "../config/firebase";
 import {
   arrayRemove,
   arrayUnion,
   collection,
   doc,
   getDoc,
-  getDocs,
   increment,
-  query,
   runTransaction,
   serverTimestamp,
   Timestamp,
-  where,
   writeBatch,
 } from "firebase/firestore";
+
+import {
+  construirAbonoIndexId,
+  construirAbonoIndexPayload,
+} from "./abonosIndexService";
 
 const FACTURAS_COLLECTION = "facturas";
 const CLIENTES_COLLECTION = "clientes";
 const STATS_COLLECTION = "metricas_globales";
 const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
+const ABONOS_INDEX_COLLECTION = "abonos_index";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
 
 const redondearMoneda = (valor) =>
   Math.round((Number(valor) || 0) * 100) / 100;
+
+const obtenerActorUidSeguro = (actor_uid) => {
+  const uidSesion = auth.currentUser?.uid || "";
+  const uidRecibido = String(actor_uid || "").trim();
+
+  if (!uidSesion) {
+    throw new Error("No hay una sesión activa de Firebase Authentication.");
+  }
+
+  if (uidRecibido && uidRecibido !== uidSesion) {
+    console.warn("actor_uid distinto al UID autenticado. Se usará el UID real de Firebase Auth.", {
+      actor_uid_recibido: uidRecibido,
+      uid_auth_real: uidSesion,
+    });
+  }
+
+  return uidSesion;
+};
+
+const obtenerResumenPagoCliente = (cliente = {}) => ({
+  monto_ultimo_pago: cliente.monto_ultimo_pago ?? null,
+  fecha_ultimo_pago: cliente.fecha_ultimo_pago ?? null,
+  metodo_ultimo_pago: cliente.metodo_ultimo_pago ?? null,
+  ultimo_deposito_monto: cliente.ultimo_deposito_monto ?? null,
+  ultimo_deposito_fecha: cliente.ultimo_deposito_fecha ?? null,
+  ultimo_deposito_metodo: cliente.ultimo_deposito_metodo ?? null,
+  ultimo_abono_id: cliente.ultimo_abono_id ?? null,
+  ultimo_abono_factura_id: cliente.ultimo_abono_factura_id ?? null,
+});
+
+const aplicarResumenPagoCliente = (payload, resumen = {}) => {
+  payload.monto_ultimo_pago = resumen?.monto_ultimo_pago ?? null;
+  payload.fecha_ultimo_pago = resumen?.fecha_ultimo_pago ?? null;
+  payload.metodo_ultimo_pago = resumen?.metodo_ultimo_pago ?? null;
+  payload.ultimo_deposito_monto = resumen?.ultimo_deposito_monto ?? null;
+  payload.ultimo_deposito_fecha = resumen?.ultimo_deposito_fecha ?? null;
+  payload.ultimo_deposito_metodo = resumen?.ultimo_deposito_metodo ?? null;
+  payload.ultimo_abono_id = resumen?.ultimo_abono_id ?? null;
+  payload.ultimo_abono_factura_id = resumen?.ultimo_abono_factura_id ?? null;
+
+  return payload;
+};
+
+const abonoCoincideConResumenClienteLegacy = (cliente = {}, abono = {}) => {
+  const clienteSinPunteroAbono =
+    !cliente.ultimo_abono_id &&
+    !cliente.ultimo_abono_factura_id;
+
+  if (!clienteSinPunteroAbono) {
+    return false;
+  }
+
+  const montoAbono = redondearMoneda(abono.monto);
+  const mismoMonto =
+    redondearMoneda(cliente.monto_ultimo_pago) === montoAbono ||
+    redondearMoneda(cliente.ultimo_deposito_monto) === montoAbono;
+
+  const mismoMetodo =
+    !cliente.metodo_ultimo_pago ||
+    !abono.metodo ||
+    String(cliente.metodo_ultimo_pago) === String(abono.metodo);
+
+  return mismoMonto && mismoMetodo;
+};
 
 const mapearErrorFirestore = (error) => {
   if (error?.code === "resource-exhausted") {
@@ -60,7 +127,6 @@ const convertirFechaFormulario = (fecha) => {
 
   return fechaConvertida;
 };
-
 
 const convertirFechaAString = (fecha) => {
   if (!fecha) return "";
@@ -124,7 +190,7 @@ const ETIQUETAS_EDICION = {
 };
 
 const formatearValorAuditoria = (campo, valor) => {
-  if (campo === "monto_total") {
+  if (campo === "monto_total" || campo === "saldo_pendiente" || campo === "monto_pagado") {
     return `$${redondearMoneda(valor).toLocaleString("es-MX", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -236,6 +302,7 @@ export const facturasService = {
     }
 
     try {
+      const actorUid = obtenerActorUidSeguro(actor_uid);
       const clienteBD = clientes.find(
         (cliente) => cliente.id === formData.cliente_id,
       );
@@ -385,7 +452,7 @@ export const facturasService = {
       );
 
       batch.set(auditRef, {
-        actor_uid,
+        actor_uid: actorUid,
         usuario: userName || "Usuario",
         modulo: "Facturación",
         tipo: "Creación",
@@ -432,15 +499,13 @@ export const facturasService = {
     }
 
     try {
-      const saldoActual =
-        Number(factura.saldo_pendiente) || 0;
-
+      const actorUid = obtenerActorUidSeguro(actor_uid);
+      const saldoActual = Number(factura.saldo_pendiente) || 0;
+      const montoTotal = Number(factura.monto_total) || 0;
       const monto = redondearMoneda(montoAbonado);
 
       if (monto <= 0) {
-        throw new Error(
-          "El monto del abono debe ser mayor a cero.",
-        );
+        throw new Error("El monto del abono debe ser mayor a cero.");
       }
 
       if (monto > saldoActual) {
@@ -454,28 +519,16 @@ export const facturasService = {
       );
 
       if (!clienteBD) {
-        throw new Error(
-          "No se encontró el cliente enlazado mediante cliente_id.",
-        );
+        throw new Error("No se encontró el cliente enlazado mediante cliente_id.");
       }
 
-      const nuevoSaldo = redondearMoneda(
-        saldoActual - monto,
-      );
+      const nuevoSaldo = redondearMoneda(saldoActual - monto);
 
-      const montoPagadoActual = Number.isFinite(
-        Number(factura.monto_pagado),
-      )
+      const montoPagadoActual = Number.isFinite(Number(factura.monto_pagado))
         ? Number(factura.monto_pagado)
-        : Math.max(
-            0,
-            (Number(factura.monto_total) || 0) -
-              saldoActual,
-          );
+        : Math.max(0, montoTotal - saldoActual);
 
-      const nuevoMontoPagado = redondearMoneda(
-        montoPagadoActual + monto,
-      );
+      const nuevoMontoPagado = redondearMoneda(montoPagadoActual + monto);
 
       const nuevoEstatus =
         nuevoSaldo === 0
@@ -488,66 +541,106 @@ export const facturasService = {
                 ? "Vencida"
                 : "Pendiente";
 
+      const fechaAbono = Timestamp.now();
+      const resumenPagoAnteriorCliente = obtenerResumenPagoCliente(clienteBD);
+
       const nuevoAbono = {
         id_abono: `abn-${Date.now()}`,
-        fecha: Timestamp.now(),
+        fecha: fechaAbono,
         monto,
         metodo: metodoPago,
         registrado_por: userName || "Usuario",
+        registrado_por_uid: actorUid,
         saldo_anterior: saldoActual,
         saldo_restante: nuevoSaldo,
+        resumen_pago_anterior_cliente: resumenPagoAnteriorCliente,
       };
 
-      const limiteCredito = redondearMoneda(
-        clienteBD.limite_credito,
-      );
-      const creditoDisponibleActual = redondearMoneda(
-        clienteBD.credito_disponible,
-      );
+      const limiteCredito = redondearMoneda(clienteBD.limite_credito);
+      const creditoDisponibleActual = redondearMoneda(clienteBD.credito_disponible);
       const nuevoCreditoDisponible =
         limiteCredito > 0
           ? Math.min(
               limiteCredito,
-              Math.max(
-                0,
-                redondearMoneda(
-                  creditoDisponibleActual + monto,
-                ),
-              ),
+              Math.max(0, redondearMoneda(creditoDisponibleActual + monto)),
             )
           : 0;
 
       const batch = writeBatch(db);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
 
-      const facturaRef = doc(
-        db,
-        FACTURAS_COLLECTION,
-        factura.id,
-      );
+      batch.set(auditRef, {
+        actor_uid: actorUid,
+        usuario: userName || "Usuario",
+        modulo: "Facturación",
+        tipo: "Registro de Abono",
+        factura_id: factura.id,
+        folio: factura.folio || "S/F",
+        cliente: factura.cliente || clienteBD.nombre,
+        cliente_id: factura.cliente_id,
+        campos_modificados: ["saldo_pendiente", "monto_pagado", "estatus"],
+        valores_anteriores: {
+          saldo_pendiente: saldoActual,
+          monto_pagado: montoPagadoActual,
+          estatus: factura.estatus,
+        },
+        valores_nuevos: {
+          saldo_pendiente: nuevoSaldo,
+          monto_pagado: nuevoMontoPagado,
+          estatus: nuevoEstatus,
+        },
+        detalle: `Abono de $${monto.toLocaleString("es-MX")} registrado vía ${metodoPago} a la factura ${factura.folio}.`,
+        serverTime: serverTimestamp(),
+      });
+
+      const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
 
       batch.update(facturaRef, {
         saldo_pendiente: nuevoSaldo,
         monto_pagado: nuevoMontoPagado,
         estatus: nuevoEstatus,
         abonos: arrayUnion(nuevoAbono),
+        ultima_edicion_audit_id: auditRef.id,
+        ultima_edicion_actor_uid: actorUid,
+        ultima_edicion_at: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
-      const clienteRef = doc(
+      const abonoIndexRef = doc(
         db,
-        CLIENTES_COLLECTION,
-        clienteBD.id,
+        ABONOS_INDEX_COLLECTION,
+        construirAbonoIndexId(factura.id, nuevoAbono.id_abono),
       );
+
+      batch.set(
+        abonoIndexRef,
+        {
+          ...construirAbonoIndexPayload({
+            factura,
+            abono: nuevoAbono,
+            actorUid,
+            userName: userName || "Usuario",
+            estado: "ACTIVO",
+            activo: true,
+          }),
+          createdAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+      const clienteRef = doc(db, CLIENTES_COLLECTION, clienteBD.id);
 
       batch.update(clienteRef, {
         deuda_actual: increment(-monto),
         credito_disponible: nuevoCreditoDisponible,
         monto_ultimo_pago: monto,
-        fecha_ultimo_pago: serverTimestamp(),
+        fecha_ultimo_pago: fechaAbono,
         metodo_ultimo_pago: metodoPago,
         ultimo_deposito_monto: monto,
-        ultimo_deposito_fecha: serverTimestamp(),
+        ultimo_deposito_fecha: fechaAbono,
         ultimo_deposito_metodo: metodoPago,
+        ultimo_abono_id: nuevoAbono.id_abono,
+        ultimo_abono_factura_id: factura.id,
         updatedAt: serverTimestamp(),
       });
 
@@ -557,6 +650,7 @@ export const facturasService = {
         ingresos_semana: increment(monto),
         cobrado_historico: increment(monto),
         abonos_registrados: increment(monto),
+        monto_recuperado: increment(monto),
         ultima_actualizacion: serverTimestamp(),
       };
 
@@ -569,36 +663,15 @@ export const facturasService = {
       if (nuevoSaldo === 0) {
         statsPayload.facturas_pagadas = increment(1);
         statsPayload.facturas_pendientes = increment(-1);
-        statsPayload.total_liquidado = increment(
-          Number(factura.monto_total) || 0,
-        );
+        statsPayload.total_liquidado = increment(montoTotal);
 
         if (estabaVencida) {
           statsPayload.facturas_vencidas = increment(-1);
         }
       }
 
-      const statsRef = doc(
-        db,
-        STATS_COLLECTION,
-        STATS_DOC,
-      );
-
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       batch.set(statsRef, statsPayload, { merge: true });
-
-      const auditRef = doc(
-        collection(db, ACTIVIDAD_COLLECTION),
-      );
-
-      batch.set(auditRef, {
-        actor_uid,
-        usuario: userName || "Usuario",
-        modulo: "Facturación",
-        tipo: "Abono",
-        cliente: factura.cliente || clienteBD.nombre,
-        detalle: `Abono de $${monto.toLocaleString("es-MX")} registrado vía ${metodoPago} a la factura ${factura.folio}.`,
-        serverTime: serverTimestamp(),
-      });
 
       await batch.commit();
 
@@ -607,10 +680,7 @@ export const facturasService = {
         data: nuevoAbono,
       };
     } catch (error) {
-      console.error(
-        "Error al registrar el abono:",
-        error,
-      );
+      console.error("Error al registrar el abono:", error);
 
       return {
         success: false,
@@ -618,7 +688,6 @@ export const facturasService = {
       };
     }
   },
-
   eliminarAbono: async ({
     idFactura,
     idAbono,
@@ -633,12 +702,8 @@ export const facturasService = {
     }
 
     try {
-      const facturaRef = doc(
-        db,
-        FACTURAS_COLLECTION,
-        idFactura,
-      );
-
+      const actorUid = obtenerActorUidSeguro(actor_uid);
+      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
       const facturaSnapshot = await getDoc(facturaRef);
 
       if (!facturaSnapshot.exists()) {
@@ -650,36 +715,23 @@ export const facturasService = {
         ...facturaSnapshot.data(),
       };
 
-      const abonosFactura = Array.isArray(factura.abonos)
-        ? factura.abonos
-        : [];
+      const abonosFactura = Array.isArray(factura.abonos) ? factura.abonos : [];
 
-      const abonoTarget = abonosFactura.find(
-        (abono) => abono.id_abono === idAbono,
-      );
+      const abonoTarget = abonosFactura.find((abono) => abono.id_abono === idAbono);
 
       if (!abonoTarget) {
         throw new Error("El abono no fue encontrado.");
       }
 
       if (!factura.cliente_id) {
-        throw new Error(
-          "La factura no contiene un cliente_id válido.",
-        );
+        throw new Error("La factura no contiene un cliente_id válido.");
       }
 
-      const clienteRef = doc(
-        db,
-        CLIENTES_COLLECTION,
-        factura.cliente_id,
-      );
-
+      const clienteRef = doc(db, CLIENTES_COLLECTION, factura.cliente_id);
       const clienteSnapshot = await getDoc(clienteRef);
 
       if (!clienteSnapshot.exists()) {
-        throw new Error(
-          "No se encontró el cliente enlazado mediante cliente_id.",
-        );
+        throw new Error("No se encontró el cliente enlazado mediante cliente_id.");
       }
 
       const clienteBD = {
@@ -690,39 +742,36 @@ export const facturasService = {
       const montoAbono = Number(abonoTarget.monto) || 0;
 
       if (montoAbono <= 0) {
-        throw new Error(
-          "El abono seleccionado contiene un monto inválido.",
-        );
+        throw new Error("El abono seleccionado contiene un monto inválido.");
       }
 
-      const saldoActual =
-        Number(factura.saldo_pendiente) || 0;
+      const saldoActual = Number(factura.saldo_pendiente) || 0;
+      const montoTotal = Number(factura.monto_total) || 0;
 
-      const nuevoSaldo = redondearMoneda(
-        saldoActual + montoAbono,
-      );
-
-      const montoTotal =
-        Number(factura.monto_total) || 0;
+      const nuevoSaldo = redondearMoneda(saldoActual + montoAbono);
 
       if (nuevoSaldo > montoTotal) {
-        throw new Error(
-          "La reversión produciría un saldo superior al monto total de la factura.",
-        );
+        throw new Error("La reversión produciría un saldo superior al monto total de la factura.");
       }
 
-      const montoPagadoActual = Number.isFinite(
-        Number(factura.monto_pagado),
-      )
+      const montoPagadoActual = Number.isFinite(Number(factura.monto_pagado))
         ? Number(factura.monto_pagado)
         : Math.max(0, montoTotal - saldoActual);
 
-      const nuevoMontoPagado = redondearMoneda(
-        Math.max(0, montoPagadoActual - montoAbono),
-      );
+      const nuevoMontoPagado = redondearMoneda(Math.max(0, montoPagadoActual - montoAbono));
 
-      const pasaAVencida =
-        nuevoSaldo > 0 && esFacturaVencida(factura);
+      const totalNotasCredito = Number(factura.total_notas_credito) || 0;
+      const validacionFinanciera = redondearMoneda(
+        nuevoSaldo + nuevoMontoPagado + totalNotasCredito,
+      ) === redondearMoneda(montoTotal);
+
+      if (!validacionFinanciera) {
+        throw new Error(
+          "La anulación dejaría la factura descuadrada: saldo + pagado + notas no coincide con el total.",
+        );
+      }
+
+      const pasaAVencida = nuevoSaldo > 0 && esFacturaVencida(factura);
 
       const nuevoEstatus = pasaAVencida
         ? "Vencida"
@@ -730,73 +779,91 @@ export const facturasService = {
           ? "Pendiente"
           : "Pagada";
 
-      const facturasClienteQuery = query(
-        collection(db, FACTURAS_COLLECTION),
-        where("cliente_id", "==", factura.cliente_id),
-      );
-
-      const facturasClienteSnapshot = await getDocs(
-        facturasClienteQuery,
-      );
-
-      const abonosRestantes = [];
-
-      facturasClienteSnapshot.docs.forEach((documento) => {
-        const data = documento.data();
-        const abonos = Array.isArray(data.abonos) ? data.abonos : [];
-
-        abonos.forEach((abono) => {
-          const esAbonoEliminado =
-            documento.id === idFactura &&
-            abono.id_abono === idAbono;
-
-          if (!esAbonoEliminado) {
-            abonosRestantes.push(abono);
-          }
-        });
-      });
-
-      abonosRestantes.sort((primerAbono, segundoAbono) => {
-        const fechaPrimera = primerAbono.fecha?.toDate
-          ? primerAbono.fecha.toDate().getTime()
-          : new Date(primerAbono.fecha).getTime();
-
-        const fechaSegunda = segundoAbono.fecha?.toDate
-          ? segundoAbono.fecha.toDate().getTime()
-          : new Date(segundoAbono.fecha).getTime();
-
-        return fechaSegunda - fechaPrimera;
-      });
-
-      const ultimoAbono = abonosRestantes[0];
-      const limiteCredito = redondearMoneda(
-        clienteBD.limite_credito,
-      );
-      const creditoDisponibleActual = redondearMoneda(
-        clienteBD.credito_disponible,
-      );
+      const limiteCredito = redondearMoneda(clienteBD.limite_credito);
+      const creditoDisponibleActual = redondearMoneda(clienteBD.credito_disponible);
       const nuevoCreditoDisponible =
         limiteCredito > 0
           ? Math.min(
               limiteCredito,
-              Math.max(
-                0,
-                redondearMoneda(
-                  creditoDisponibleActual - montoAbono,
-                ),
-              ),
+              Math.max(0, redondearMoneda(creditoDisponibleActual - montoAbono)),
             )
           : 0;
 
+      const resumenAnterior = abonoTarget.resumen_pago_anterior_cliente || null;
+
+      const esUltimoAbonoDelCliente =
+        clienteBD.ultimo_abono_id === idAbono &&
+        clienteBD.ultimo_abono_factura_id === idFactura;
+
+      const esAbonoLegacyQuePareceResumenActual =
+        abonoCoincideConResumenClienteLegacy(clienteBD, abonoTarget);
+
+      const debeRestaurarResumenPago =
+        esUltimoAbonoDelCliente || esAbonoLegacyQuePareceResumenActual;
+
       const batch = writeBatch(db);
+      const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+
+      batch.set(auditRef, {
+        actor_uid: actorUid,
+        usuario: userName || "SU",
+        modulo: "Facturación",
+        tipo: "Anulación de Abono",
+        factura_id: idFactura,
+        folio: factura.folio || "S/F",
+        cliente: factura.cliente || clienteBD.nombre,
+        cliente_id: factura.cliente_id,
+        campos_modificados: ["saldo_pendiente", "monto_pagado", "estatus"],
+        valores_anteriores: {
+          saldo_pendiente: saldoActual,
+          monto_pagado: montoPagadoActual,
+          estatus: factura.estatus,
+        },
+        valores_nuevos: {
+          saldo_pendiente: nuevoSaldo,
+          monto_pagado: nuevoMontoPagado,
+          estatus: nuevoEstatus,
+        },
+        detalle: `Se canceló un pago de $${montoAbono.toLocaleString("es-MX")} aplicado a la factura ${factura.folio}. Ese monto volvió a quedar como saldo pendiente del cliente.`,
+        serverTime: serverTimestamp(),
+      });
 
       batch.update(facturaRef, {
         saldo_pendiente: nuevoSaldo,
         monto_pagado: nuevoMontoPagado,
         estatus: nuevoEstatus,
         abonos: arrayRemove(abonoTarget),
+        ultima_edicion_audit_id: auditRef.id,
+        ultima_edicion_actor_uid: actorUid,
+        ultima_edicion_at: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      const abonoIndexRef = doc(
+        db,
+        ABONOS_INDEX_COLLECTION,
+        construirAbonoIndexId(idFactura, idAbono),
+      );
+
+      batch.set(
+        abonoIndexRef,
+        {
+          ...construirAbonoIndexPayload({
+            factura,
+            abono: abonoTarget,
+            actorUid,
+            userName: userName || "SU",
+            estado: "CANCELADO",
+            activo: false,
+          }),
+          estado: "CANCELADO",
+          activo: false,
+          cancelado_at: serverTimestamp(),
+          cancelado_por_uid: actorUid,
+          cancelado_por: userName || "SU",
+        },
+        { merge: true },
+      );
 
       const clienteUpdatePayload = {
         deuda_actual: increment(montoAbono),
@@ -804,20 +871,8 @@ export const facturasService = {
         updatedAt: serverTimestamp(),
       };
 
-      if (ultimoAbono) {
-        clienteUpdatePayload.monto_ultimo_pago = ultimoAbono.monto;
-        clienteUpdatePayload.fecha_ultimo_pago = ultimoAbono.fecha;
-        clienteUpdatePayload.metodo_ultimo_pago = ultimoAbono.metodo;
-        clienteUpdatePayload.ultimo_deposito_monto = ultimoAbono.monto;
-        clienteUpdatePayload.ultimo_deposito_fecha = ultimoAbono.fecha;
-        clienteUpdatePayload.ultimo_deposito_metodo = ultimoAbono.metodo;
-      } else {
-        clienteUpdatePayload.monto_ultimo_pago = null;
-        clienteUpdatePayload.fecha_ultimo_pago = null;
-        clienteUpdatePayload.metodo_ultimo_pago = null;
-        clienteUpdatePayload.ultimo_deposito_monto = null;
-        clienteUpdatePayload.ultimo_deposito_fecha = null;
-        clienteUpdatePayload.ultimo_deposito_metodo = null;
+      if (debeRestaurarResumenPago) {
+        aplicarResumenPagoCliente(clienteUpdatePayload, resumenAnterior);
       }
 
       batch.update(clienteRef, clienteUpdatePayload);
@@ -826,6 +881,7 @@ export const facturasService = {
         cartera_total: increment(montoAbono),
         cobrado_historico: increment(-montoAbono),
         abonos_registrados: increment(-montoAbono),
+        monto_recuperado: increment(-montoAbono),
         ultima_actualizacion: serverTimestamp(),
       };
 
@@ -851,36 +907,14 @@ export const facturasService = {
         }
       }
 
-      const statsRef = doc(
-        db,
-        STATS_COLLECTION,
-        STATS_DOC,
-      );
-
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       batch.set(statsRef, statsPayload, { merge: true });
-
-      const auditRef = doc(
-        collection(db, ACTIVIDAD_COLLECTION),
-      );
-
-      batch.set(auditRef, {
-        actor_uid,
-        usuario: userName || "Usuario",
-        modulo: "Facturación",
-        tipo: "Eliminación de Abono",
-        cliente: factura.cliente || clienteBD.nombre,
-        detalle: `Se anuló un abono de $${montoAbono.toLocaleString("es-MX")} de la factura ${factura.folio}. El saldo y los indicadores fueron restaurados.`,
-        serverTime: serverTimestamp(),
-      });
 
       await batch.commit();
 
       return { success: true };
     } catch (error) {
-      console.error(
-        "Error al eliminar el abono:",
-        error,
-      );
+      console.error("Error al eliminar el abono:", error);
 
       return {
         success: false,
@@ -888,7 +922,6 @@ export const facturasService = {
       };
     }
   },
-
   modificarFactura: async ({
     idFactura,
     formData,
@@ -910,6 +943,7 @@ export const facturasService = {
     }
 
     try {
+      const actorUid = obtenerActorUidSeguro(actor_uid);
       const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
@@ -1221,7 +1255,7 @@ export const facturasService = {
           saldo_pendiente: saldoNuevo,
           estatus: estatusNuevo,
           ultima_edicion_audit_id: auditRef.id,
-          ultima_edicion_actor_uid: actor_uid,
+          ultima_edicion_actor_uid: actorUid,
           ultima_edicion_at: serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
@@ -1310,7 +1344,7 @@ export const facturasService = {
         });
 
         transaction.set(auditRef, {
-          actor_uid,
+          actor_uid: actorUid,
           usuario: userName || "Usuario",
           modulo: "Facturación",
           tipo: "Edición de Factura",
@@ -1351,7 +1385,6 @@ export const facturasService = {
     }
   },
 
-
   aplicarNotaCredito: async ({
     factura,
     montoNota,
@@ -1376,6 +1409,7 @@ export const facturasService = {
     }
 
     try {
+      const actorUid = obtenerActorUidSeguro(actor_uid);
       const monto = redondearMoneda(montoNota);
 
       if (monto <= 0) {
@@ -1488,7 +1522,7 @@ export const facturasService = {
           monto,
           motivo: String(motivo || "").trim(),
           observaciones: String(observaciones || "").trim(),
-          aplicado_por_uid: actor_uid,
+          aplicado_por_uid: actorUid,
           aplicado_por: userName || "SU",
           origen: solicitudNota ? "Solicitud ADMIN autorizada" : "Aplicación directa SU",
           solicitud_nota_id: solicitudNota?.id || "",
@@ -1557,14 +1591,14 @@ export const facturasService = {
             estatus: "Autorizado",
             resolvedAt: serverTimestamp(),
             resolvedBy: userName || "SU",
-            resolvedByUid: actor_uid,
+            resolvedByUid: actorUid,
             nota_credito_id: nuevaNota.id_nota,
             saldo_restante: saldoRestante,
           });
         }
 
         transaction.set(auditRef, {
-          actor_uid,
+          actor_uid: actorUid,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Nota de Crédito",
@@ -1602,7 +1636,6 @@ export const facturasService = {
     }
   },
 
-
   cancelarNotaCredito: async ({
     factura,
     idNota,
@@ -1625,6 +1658,7 @@ export const facturasService = {
     }
 
     try {
+      const actorUid = obtenerActorUidSeguro(actor_uid);
       const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
@@ -1729,7 +1763,7 @@ export const facturasService = {
                 estado: "Anulada",
                 fecha_anulacion: fechaAnulacion,
                 anulada_por: userName || "SU",
-                anulada_por_uid: actor_uid,
+                anulada_por_uid: actorUid,
                 motivo_cancelacion: motivoAnulacion,
                 saldo_revertido: saldoNuevo,
               }
@@ -1794,13 +1828,13 @@ export const facturasService = {
             nota_anulada: true,
             anuladaAt: serverTimestamp(),
             anuladaBy: userName || "SU",
-            anuladaByUid: actor_uid,
+            anuladaByUid: actorUid,
             motivo_anulacion: String(motivoCancelacion || "").trim(),
           });
         }
 
         transaction.set(auditRef, {
-          actor_uid,
+          actor_uid: actorUid,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Anulación de Nota de Crédito",
@@ -1860,6 +1894,7 @@ export const facturasService = {
     }
 
     try {
+      const actorUid = obtenerActorUidSeguro(actor_uid);
       const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
@@ -2024,7 +2059,7 @@ export const facturasService = {
         transaction.set(statsRef, statsUpdate, { merge: true });
 
         transaction.set(auditRef, {
-          actor_uid,
+          actor_uid: actorUid,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Eliminación de Factura",

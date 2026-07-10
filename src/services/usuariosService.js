@@ -6,8 +6,10 @@ import {
   getDocs,
   limit,
   onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
+  startAfter,
   where,
   writeBatch,
 } from "firebase/firestore";
@@ -44,6 +46,57 @@ const correoRealValido = (valor = "") =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(valor) &&
   !valor.endsWith("@mlh.local");
 
+
+const USUARIOS_POR_PAGINA_DEFAULT = 10;
+
+const obtenerOrdenFechaCreacion = (data = {}) => {
+  if (data.fecha_creacion?.toDate) {
+    return data.fecha_creacion.toDate().getTime();
+  }
+
+  if (data.fecha_creacion?.seconds) {
+    return data.fecha_creacion.seconds * 1000;
+  }
+
+  return 0;
+};
+
+const normalizarUsuarioSnapshot = (docSnap) => {
+  const data = docSnap.data();
+  const rol = rolSeguro(data);
+  const correo = normalizarCorreo(data.correo || data.email || "");
+  const usuarioAlias = normalizarAlias(data.usuario_alias || data.usuario || "");
+  const fechaCreacionOrden = obtenerOrdenFechaCreacion(data);
+
+  return {
+    id: docSnap.id,
+    nombre: data.nombre || "Sin Nombre",
+    correo,
+    correo_auth: normalizarCorreo(data.correo_auth || correo),
+    usuario_alias: usuarioAlias,
+    usuarioLimpio: usuarioAlias || (correo ? correo.split("@")[0] : "S/N"),
+    rol,
+    activo: data.activo === true,
+    estado: data.activo === true ? "activo" : "inactivo",
+    proveedor_acceso: data.proveedor_acceso || "LEGACY_LOCAL",
+    requiere_reset_password: data.requiere_reset_password === true,
+    ultima_entrada: formatearFechaSegura(
+      data.ultima_entrada || data.ultimoLogin,
+      "Nunca",
+    ),
+    fecha_creacion_texto: formatearFechaSegura(
+      data.fecha_creacion,
+      "Sin fecha",
+    ),
+    fecha_actualizacion_texto: formatearFechaSegura(
+      data.fecha_actualizacion,
+      "Sin fecha",
+    ),
+    _fechaCreacionOrden: fechaCreacionOrden,
+    _cursor: docSnap,
+  };
+};
+
 const mapearErrorAuth = (error) => {
   if (error?.code === "auth/email-already-in-use") {
     return "El correo real ya está registrado en Firebase Authentication.";
@@ -71,56 +124,13 @@ const mapearErrorAuth = (error) => {
 export const usuariosService = {
   escucharUsuarios: (callback) => {
     return onSnapshot(
-      collection(db, USUARIOS_COLLECTION),
+      query(
+        collection(db, USUARIOS_COLLECTION),
+        orderBy("fecha_creacion", "desc"),
+        limit(USUARIOS_POR_PAGINA_DEFAULT),
+      ),
       (snapshot) => {
-        const usuariosNormalizados = snapshot.docs
-          .map((docSnap) => {
-            const data = docSnap.data();
-            const rol = rolSeguro(data);
-            const correo = normalizarCorreo(data.correo || data.email || "");
-            const usuarioAlias = normalizarAlias(
-              data.usuario_alias || data.usuario || "",
-            );
-
-            let fechaCreacionOrden = 0;
-
-            if (data.fecha_creacion?.toDate) {
-              fechaCreacionOrden = data.fecha_creacion.toDate().getTime();
-            } else if (data.fecha_creacion?.seconds) {
-              fechaCreacionOrden = data.fecha_creacion.seconds * 1000;
-            }
-
-            return {
-              id: docSnap.id,
-              nombre: data.nombre || "Sin Nombre",
-              correo,
-              correo_auth: normalizarCorreo(data.correo_auth || correo),
-              usuario_alias: usuarioAlias,
-              usuarioLimpio: usuarioAlias || (correo ? correo.split("@")[0] : "S/N"),
-              rol,
-              activo: data.activo === true,
-              estado: data.activo === true ? "activo" : "inactivo",
-              proveedor_acceso: data.proveedor_acceso || "LEGACY_LOCAL",
-              requiere_reset_password: data.requiere_reset_password === true,
-              ultima_entrada: formatearFechaSegura(
-                data.ultima_entrada || data.ultimoLogin,
-                "Nunca",
-              ),
-              fecha_creacion_texto: formatearFechaSegura(
-                data.fecha_creacion,
-                "Sin fecha",
-              ),
-              fecha_actualizacion_texto: formatearFechaSegura(
-                data.fecha_actualizacion,
-                "Sin fecha",
-              ),
-              _fechaCreacionOrden: fechaCreacionOrden,
-            };
-          })
-          .sort(
-            (primero, segundo) =>
-              segundo._fechaCreacionOrden - primero._fechaCreacionOrden,
-          );
+        const usuariosNormalizados = snapshot.docs.map(normalizarUsuarioSnapshot);
 
         callback(usuariosNormalizados);
       },
@@ -129,6 +139,82 @@ export const usuariosService = {
         callback([]);
       },
     );
+  },
+
+  cargarAdministradoresPagina: async ({
+    cursor = null,
+    registrosPorPagina = USUARIOS_POR_PAGINA_DEFAULT,
+  } = {}) => {
+    try {
+      const restricciones = [
+        where("rol", "==", "ADMIN"),
+        orderBy("fecha_creacion", "desc"),
+      ];
+
+      if (cursor) {
+        restricciones.push(startAfter(cursor));
+      }
+
+      restricciones.push(limit(registrosPorPagina + 1));
+
+      const qAdministradores = query(
+        collection(db, USUARIOS_COLLECTION),
+        ...restricciones,
+      );
+
+      const snap = await getDocs(qAdministradores);
+      const documentosVisibles = snap.docs.slice(0, registrosPorPagina);
+      const usuarios = documentosVisibles.map(normalizarUsuarioSnapshot);
+
+      return {
+        success: true,
+        data: usuarios,
+        cursorFinal:
+          documentosVisibles.length > 0
+            ? documentosVisibles[documentosVisibles.length - 1]
+            : null,
+        haySiguiente: snap.docs.length > registrosPorPagina,
+      };
+    } catch (error) {
+      console.error("Error cargando página de administradores:", error);
+
+      return {
+        success: false,
+        data: [],
+        cursorFinal: null,
+        haySiguiente: false,
+        error:
+          error?.code === "failed-precondition"
+            ? "Firestore requiere un índice para paginar usuarios ADMIN. Crea el índice sugerido por Firebase."
+            : error?.message || "No se pudo cargar la página de usuarios.",
+      };
+    }
+  },
+
+  existenAdministradoresSuspendidos: async () => {
+    try {
+      const qSuspendidos = query(
+        collection(db, USUARIOS_COLLECTION),
+        where("rol", "==", "ADMIN"),
+        where("activo", "==", false),
+        limit(1),
+      );
+
+      const snap = await getDocs(qSuspendidos);
+
+      return {
+        success: true,
+        existe: !snap.empty,
+      };
+    } catch (error) {
+      console.error("Error verificando usuarios suspendidos:", error);
+
+      return {
+        success: false,
+        existe: false,
+        error: error?.message || "No se pudo verificar usuarios suspendidos.",
+      };
+    }
   },
 
   crearAdmin: async ({
@@ -338,14 +424,14 @@ export const usuariosService = {
 
       if (aliasNormalizado) {
         const aliasRef = doc(db, ALIAS_COLLECTION, aliasNormalizado);
-        batch.set(
-          aliasRef,
-          {
+        const aliasSnap = await getDoc(aliasRef);
+
+        if (aliasSnap.exists()) {
+          batch.update(aliasRef, {
             activo,
             updatedAt: serverTimestamp(),
-          },
-          { merge: true },
-        );
+          });
+        }
       }
 
       const tipoAccion = activo ? "Reactivación de Cuenta" : "Suspensión de Cuenta";

@@ -1,21 +1,6 @@
-import { KeyRound, Mail, Power, UserPlus, Users } from "lucide-react";
+import { AlertTriangle, KeyRound, Mail, Power, UserPlus, Users } from "lucide-react";
+import PaginacionSU from "./PaginacionSU";
 import { textoSeguro } from "../../utils/normalizadores";
-
-function KpiPersonal({ etiqueta, valor, descripcion }) {
-  return (
-    <article className="rounded-2xl border border-white bg-white/65 p-4 shadow-sm">
-      <p className="text-[10px] font-black uppercase tracking-wide text-gray-500">
-        {etiqueta}
-      </p>
-      <p className="mt-1 text-2xl font-black text-[#0a192f]">
-        {valor}
-      </p>
-      <p className="mt-1 text-[11px] text-gray-500">
-        {descripcion}
-      </p>
-    </article>
-  );
-}
 
 function EstadoUsuario({ activo }) {
   return (
@@ -31,24 +16,7 @@ function EstadoUsuario({ activo }) {
           activo ? "bg-green-500" : "bg-red-500"
         }`}
       />
-      {activo ? "Operativo" : "Suspendido"}
-    </span>
-  );
-}
-
-function AccesoBadge({ usuario }) {
-  const esCorreoReal =
-    usuario.correo && !String(usuario.correo).toLowerCase().endsWith("@mlh.local");
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-black uppercase ${
-        esCorreoReal
-          ? "border-blue-100 bg-blue-50 text-blue-700"
-          : "border-amber-100 bg-amber-50 text-amber-700"
-      }`}
-    >
-      {esCorreoReal ? "Correo real" : "Legacy local"}
+      {activo ? "Activo" : "Suspendido"}
     </span>
   );
 }
@@ -62,39 +30,34 @@ export default function ControlPersonalSU({
   onCrearUsuario,
   onCambiarEstado,
   onEnviarResetPassword,
+  haySuspendidos = false,
+  pagina = 1,
+  hayAnterior = false,
+  haySiguiente = false,
+  cargando = false,
+  error = "",
+  registrosEnPagina = 0,
+  onAnterior,
+  onSiguiente,
 }) {
-  const activos = administradores.filter((usuario) => usuario.activo);
-  const suspendidos = administradores.filter((usuario) => !usuario.activo);
-  const conCorreoReal = administradores.filter(puedeRecuperarPassword);
-  const ultimoAcceso = administradores.find(
-    (usuario) => usuario.ultima_entrada && usuario.ultima_entrada !== "Nunca",
-  );
-
   return (
-    <div className="space-y-4 md:space-y-6">
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <KpiPersonal
-          etiqueta="ADMIN activos"
-          valor={activos.length}
-          descripcion="Cuentas operativas con acceso al sistema."
-        />
+    <div className="space-y-4 md:space-y-5">
+      {haySuspendidos && (
+        <section className="flex items-start gap-3 rounded-2xl border border-amber-100 bg-amber-50/80 p-4 text-amber-800 shadow-sm">
+          <div className="rounded-xl bg-white/80 p-2 text-amber-600 shadow-sm">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
 
-        <KpiPersonal
-          etiqueta="Suspendidos"
-          valor={suspendidos.length}
-          descripcion="Cuentas sin operación activa."
-        />
-
-        <KpiPersonal
-          etiqueta="Correo real"
-          valor={conCorreoReal.length}
-          descripcion={
-            ultimoAcceso
-              ? `Último acceso: ${textoSeguro(ultimoAcceso.nombre)}`
-              : "Accesos listos para recuperación por correo."
-          }
-        />
-      </section>
+          <div>
+            <p className="text-xs font-black uppercase tracking-wide">
+              Accesos suspendidos detectados
+            </p>
+            <p className="mt-1 text-[11px] font-semibold leading-relaxed text-amber-700/80">
+              Existen operadores ADMIN inactivos conservados como historial. La tabla está paginada para evitar cargas innecesarias de Firestore.
+            </p>
+          </div>
+        </section>
+      )}
 
       <section className="overflow-hidden rounded-2xl border border-white bg-white/55 shadow-[8px_10px_28px_rgba(0,0,0,0.08)]">
         <div className="flex flex-col gap-3 border-b border-white/70 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -104,11 +67,20 @@ export default function ControlPersonalSU({
             </div>
 
             <div>
-              <h2 className="text-sm font-black text-[#0a192f]">
-                Control de Personal
-              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm font-black text-[#0a192f]">
+                  Control de Personal
+                </h2>
+
+                {haySuspendidos && (
+                  <span className="rounded-full border border-amber-100 bg-amber-50 px-2 py-0.5 text-[9px] font-black uppercase text-amber-700">
+                    Inactivos
+                  </span>
+                )}
+              </div>
+
               <p className="text-[11px] text-gray-500">
-                Administración de accesos ADMIN con alias y correo real.
+                Administración paginada de accesos ADMIN con alias y correo.
               </p>
             </div>
           </div>
@@ -123,7 +95,20 @@ export default function ControlPersonalSU({
           </button>
         </div>
 
-        {administradores.length === 0 ? (
+        {error && (
+          <div className="m-4 rounded-xl border border-red-100 bg-red-50 p-3 text-xs font-bold text-red-700">
+            {error}
+          </div>
+        )}
+
+        {cargando && administradores.length === 0 ? (
+          <div className="p-8 text-center">
+            <Users className="mx-auto h-9 w-9 animate-pulse text-gray-300" />
+            <p className="mt-2 text-xs font-bold text-gray-500">
+              Cargando operadores ADMIN...
+            </p>
+          </div>
+        ) : administradores.length === 0 ? (
           <div className="p-8 text-center">
             <Users className="mx-auto h-9 w-9 text-gray-300" />
             <p className="mt-2 text-xs font-bold text-gray-500">
@@ -153,7 +138,6 @@ export default function ControlPersonalSU({
                           </p>
 
                           <EstadoUsuario activo={usuario.activo} />
-                          <AccesoBadge usuario={usuario} />
                         </div>
 
                         <p className="mt-1 font-mono text-[10px] text-gray-500">
@@ -198,7 +182,7 @@ export default function ControlPersonalSU({
                         }`}
                       >
                         <KeyRound className="mr-1.5 h-3.5 w-3.5" />
-                        {resetDisponible ? "Enviar recuperación" : "Requiere migración"}
+                        {resetDisponible ? "Enviar recuperación" : "Sin correo válido"}
                       </button>
                     </div>
                   </article>
@@ -207,11 +191,11 @@ export default function ControlPersonalSU({
             </div>
 
             <div className="hidden overflow-x-auto custom-scrollbar md:block">
-              <table className="w-full min-w-[880px] text-left text-xs">
+              <table className="w-full min-w-[820px] text-left text-xs">
                 <thead>
                   <tr className="border-b border-white/70 bg-white/45 text-[10px] uppercase tracking-wide text-gray-400">
                     <th className="px-4 py-3 font-black">Usuario</th>
-                    <th className="px-4 py-3 font-black">Correo real</th>
+                    <th className="px-4 py-3 font-black">Correo</th>
                     <th className="px-4 py-3 font-black">Rol</th>
                     <th className="px-4 py-3 font-black">Estado</th>
                     <th className="px-4 py-3 font-black">Última entrada</th>
@@ -243,14 +227,11 @@ export default function ControlPersonalSU({
                         </td>
 
                         <td className="px-4 py-3">
-                          <div className="flex max-w-[260px] items-center gap-2">
+                          <div className="flex max-w-[280px] items-center gap-2">
                             <Mail className="h-3.5 w-3.5 shrink-0 text-gray-300" />
                             <span className="truncate font-mono text-[10px] text-gray-500">
                               {textoSeguro(usuario.correo, "Sin correo")}
                             </span>
-                          </div>
-                          <div className="mt-1">
-                            <AccesoBadge usuario={usuario} />
                           </div>
                         </td>
 
@@ -294,7 +275,7 @@ export default function ControlPersonalSU({
                               }`}
                             >
                               <KeyRound className="mr-1.5 h-3.5 w-3.5" />
-                              {resetDisponible ? "Recuperar" : "Migrar"}
+                              {resetDisponible ? "Recuperar" : "Sin correo"}
                             </button>
                           </div>
                         </td>
@@ -303,6 +284,21 @@ export default function ControlPersonalSU({
                   })}
                 </tbody>
               </table>
+            </div>
+
+            <div className="border-t border-white/70 px-3 py-3">
+              <PaginacionSU
+                modoCursor
+                pagina={pagina}
+                hayAnterior={hayAnterior}
+                haySiguiente={haySiguiente}
+                cargando={cargando}
+                etiquetaTotal="usuarios"
+                etiquetaPagina="Usuarios por página"
+                registrosEnPagina={registrosEnPagina}
+                onAnterior={onAnterior}
+                onSiguiente={onSiguiente}
+              />
             </div>
           </>
         )}

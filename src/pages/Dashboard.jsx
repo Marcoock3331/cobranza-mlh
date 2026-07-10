@@ -106,9 +106,9 @@ const ESTILOS_PRIORIDAD = {
   ANULADA: "bg-slate-100 text-slate-700 border-slate-200",
 };
 
-const formatearMoneda = (valor) =>
+const formatearMoneda = (valor, decimales = 0) =>
   (Number(valor) || 0).toLocaleString("es-MX", {
-    minimumFractionDigits: 0,
+    minimumFractionDigits: decimales,
     maximumFractionDigits: 2,
   });
 
@@ -923,9 +923,12 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <TarjetaKPI
-          etiqueta="Cartera total"
-          valor={`$${formatearMoneda(stats?.cartera_total)}`}
-          descripcion="Dinero total actualmente colocado."
+          etiqueta="Monto recuperado"
+          valor={`$${formatearMoneda(
+            stats?.monto_recuperado ?? stats?.cobrado_historico,
+            2,
+          )}`}
+          descripcion="Total recuperado en pagos registrados."
           icono={DollarSign}
           variante="azul"
         />

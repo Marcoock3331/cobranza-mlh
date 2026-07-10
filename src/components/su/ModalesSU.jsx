@@ -149,7 +149,7 @@ export default function ModalesSU({
                     })
                   }
                   className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-xs outline-none focus:bg-white focus:ring-2 focus:ring-[#ffd700] md:rounded md:px-3 md:py-1.5"
-                  placeholder="mlhcobranza.admin@gmail.com"
+                  placeholder="ejemplo@gmail.com"
                 />
                 <p className="mt-1 text-[10px] text-gray-400">
                   Firebase usará este correo para recuperación de contraseña.
@@ -186,10 +186,6 @@ export default function ModalesSU({
                   value="ADMIN - Operativo Ventas"
                   className="w-full cursor-not-allowed rounded-xl border border-gray-200 bg-gray-100 px-4 py-3 text-xs font-bold text-gray-500 md:rounded md:px-3 md:py-1.5"
                 />
-              </div>
-
-              <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 text-[11px] leading-relaxed text-blue-700">
-                El acceso se creará con correo real y alias de usuario. Ya no se generarán nuevas cuentas @mlh.local.
               </div>
             </form>
           )}
