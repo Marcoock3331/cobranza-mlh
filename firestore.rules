@@ -494,7 +494,11 @@ service cloud.firestore {
           (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
         );
 
-      allow delete: if isSU();
+      allow delete: if isSU()
+        && resource.data.get('abonos', []) is list
+        && resource.data.get('abonos', []).size() == 0
+        && resource.data.get('monto_pagado', 0) == 0
+        && resource.data.get('total_notas_credito', 0) == 0;
     }
 
     match /solicitudes/{solicitudId} {
@@ -804,6 +808,37 @@ service cloud.firestore {
         );
 
       allow delete: if false;
+    }
+
+    match /notificaciones_operativas/{notificacionId} {
+      allow read: if isStaff();
+
+      allow create: if isSU()
+        && actorValido()
+        && request.resource.data.keys().hasOnly([
+          'actor_uid', 'actor_nombre', 'tipo', 'titulo', 'descripcion',
+          'factura_id', 'folio', 'cliente_id', 'cliente', 'monto',
+          'activo', 'serverTime'
+        ])
+        && request.resource.data.actor_nombre is string
+        && request.resource.data.actor_nombre != ''
+        && request.resource.data.tipo == 'PAGO_ANULADO'
+        && request.resource.data.titulo == 'Pago anulado'
+        && request.resource.data.descripcion is string
+        && request.resource.data.descripcion != ''
+        && request.resource.data.factura_id is string
+        && request.resource.data.factura_id != ''
+        && request.resource.data.folio is string
+        && request.resource.data.cliente_id is string
+        && request.resource.data.cliente_id != ''
+        && request.resource.data.cliente is string
+        && request.resource.data.cliente != ''
+        && request.resource.data.monto is number
+        && request.resource.data.monto > 0
+        && request.resource.data.activo == true
+        && request.resource.data.serverTime is timestamp;
+
+      allow update, delete: if false;
     }
 
     match /actividad/{actividadId} {

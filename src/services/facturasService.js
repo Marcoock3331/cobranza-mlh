@@ -1,14 +1,16 @@
 import { auth, db } from "../config/firebase";
 import {
-  arrayRemove,
   arrayUnion,
   collection,
   doc,
-  getDoc,
+  getDocs,
   increment,
+  limit,
+  query,
   runTransaction,
   serverTimestamp,
   Timestamp,
+  where,
   writeBatch,
 } from "firebase/firestore";
 
@@ -24,6 +26,7 @@ const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
 const ABONOS_INDEX_COLLECTION = "abonos_index";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
+const NOTIFICACIONES_OPERATIVAS_COLLECTION = "notificaciones_operativas";
 
 const redondearMoneda = (valor) =>
   Math.round((Number(valor) || 0) * 100) / 100;
@@ -804,216 +807,369 @@ export const facturasService = {
       };
     }
 
+    const facturaIdSeguro = String(idFactura || "").trim();
+    const abonoIdSeguro = String(idAbono || "").trim();
+
+    if (!facturaIdSeguro || !abonoIdSeguro) {
+      return {
+        success: false,
+        error: "No se identificó correctamente la factura o el abono.",
+      };
+    }
+
     try {
       const actorUid = obtenerActorUidSeguro(actor_uid);
-      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
-      const facturaSnapshot = await getDoc(facturaRef);
-
-      if (!facturaSnapshot.exists()) {
-        throw new Error("La factura no fue encontrada.");
-      }
-
-      const factura = {
-        id: facturaSnapshot.id,
-        ...facturaSnapshot.data(),
-      };
-
-      const abonosFactura = Array.isArray(factura.abonos) ? factura.abonos : [];
-
-      const abonoTarget = abonosFactura.find((abono) => abono.id_abono === idAbono);
-
-      if (!abonoTarget) {
-        throw new Error("El abono no fue encontrado.");
-      }
-
-      if (!factura.cliente_id) {
-        throw new Error("La factura no contiene un cliente_id válido.");
-      }
-
-      const clienteRef = doc(db, CLIENTES_COLLECTION, factura.cliente_id);
-      const clienteSnapshot = await getDoc(clienteRef);
-
-      if (!clienteSnapshot.exists()) {
-        throw new Error("No se encontró el cliente enlazado mediante cliente_id.");
-      }
-
-      const clienteBD = {
-        id: clienteSnapshot.id,
-        ...clienteSnapshot.data(),
-      };
-
-      const montoAbono = Number(abonoTarget.monto) || 0;
-
-      if (montoAbono <= 0) {
-        throw new Error("El abono seleccionado contiene un monto inválido.");
-      }
-
-      const saldoActual = Number(factura.saldo_pendiente) || 0;
-      const montoTotal = Number(factura.monto_total) || 0;
-
-      const nuevoSaldo = redondearMoneda(saldoActual + montoAbono);
-
-      if (nuevoSaldo > montoTotal) {
-        throw new Error("La reversión produciría un saldo superior al monto total de la factura.");
-      }
-
-      const montoPagadoActual = Number.isFinite(Number(factura.monto_pagado))
-        ? Number(factura.monto_pagado)
-        : Math.max(0, montoTotal - saldoActual);
-
-      const nuevoMontoPagado = redondearMoneda(Math.max(0, montoPagadoActual - montoAbono));
-
-      const totalNotasCredito = Number(factura.total_notas_credito) || 0;
-      const validacionFinanciera = redondearMoneda(
-        nuevoSaldo + nuevoMontoPagado + totalNotasCredito,
-      ) === redondearMoneda(montoTotal);
-
-      if (!validacionFinanciera) {
-        throw new Error(
-          "La anulación dejaría la factura descuadrada: saldo + pagado + notas no coincide con el total.",
-        );
-      }
-
-      const pasaAVencida = nuevoSaldo > 0 && esFacturaVencida(factura);
-
-      const nuevoEstatus = pasaAVencida
-        ? "Vencida"
-        : nuevoSaldo > 0
-          ? "Pendiente"
-          : "Pagada";
-
-      const limiteCredito = redondearMoneda(clienteBD.limite_credito);
-      const creditoDisponibleActual = redondearMoneda(clienteBD.credito_disponible);
-      const nuevoCreditoDisponible =
-        limiteCredito > 0
-          ? Math.min(
-              limiteCredito,
-              Math.max(0, redondearMoneda(creditoDisponibleActual - montoAbono)),
-            )
-          : 0;
-
-      const resumenAnterior = abonoTarget.resumen_pago_anterior_cliente || null;
-
-      const esUltimoAbonoDelCliente =
-        clienteBD.ultimo_abono_id === idAbono &&
-        clienteBD.ultimo_abono_factura_id === idFactura;
-
-      const esAbonoLegacyQuePareceResumenActual =
-        abonoCoincideConResumenClienteLegacy(clienteBD, abonoTarget);
-
-      const debeRestaurarResumenPago =
-        esUltimoAbonoDelCliente || esAbonoLegacyQuePareceResumenActual;
-
-      const batch = writeBatch(db);
+      const facturaRef = doc(
+        db,
+        FACTURAS_COLLECTION,
+        facturaIdSeguro,
+      );
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const notificacionRef = doc(
+        collection(db, NOTIFICACIONES_OPERATIVAS_COLLECTION),
+      );
 
-      batch.set(auditRef, {
-        actor_uid: actorUid,
-        usuario: userName || "SU",
-        modulo: "Facturación",
-        tipo: "Anulación de Abono",
-        factura_id: idFactura,
-        folio: factura.folio || "S/F",
-        cliente: factura.cliente || clienteBD.nombre,
-        cliente_id: factura.cliente_id,
-        campos_modificados: ["saldo_pendiente", "monto_pagado", "estatus"],
-        valores_anteriores: {
-          saldo_pendiente: saldoActual,
-          monto_pagado: montoPagadoActual,
-          estatus: factura.estatus,
-        },
-        valores_nuevos: {
+      await runTransaction(db, async (transaction) => {
+        const facturaSnapshot = await transaction.get(facturaRef);
+
+        if (!facturaSnapshot.exists()) {
+          throw new Error("La factura no fue encontrada.");
+        }
+
+        const facturaActual = {
+          id: facturaSnapshot.id,
+          ...facturaSnapshot.data(),
+        };
+
+        const clienteId = String(facturaActual.cliente_id || "").trim();
+
+        if (!clienteId) {
+          throw new Error("La factura no contiene un cliente_id válido.");
+        }
+
+        const clienteRef = doc(db, CLIENTES_COLLECTION, clienteId);
+        const clienteSnapshot = await transaction.get(clienteRef);
+
+        if (!clienteSnapshot.exists()) {
+          throw new Error(
+            "No se encontró el cliente enlazado mediante cliente_id.",
+          );
+        }
+
+        const clienteActual = {
+          id: clienteSnapshot.id,
+          ...clienteSnapshot.data(),
+        };
+
+        const abonosActuales = Array.isArray(facturaActual.abonos)
+          ? facturaActual.abonos
+          : [];
+
+        const coincidenciasAbono = abonosActuales.filter(
+          (abono) => abono?.id_abono === abonoIdSeguro,
+        );
+
+        if (coincidenciasAbono.length === 0) {
+          throw new Error(
+            "El abono no fue encontrado o ya había sido anulado.",
+          );
+        }
+
+        if (coincidenciasAbono.length > 1) {
+          throw new Error(
+            "Se detectaron abonos duplicados con el mismo identificador. La anulación fue detenida para proteger la información.",
+          );
+        }
+
+        const abonoTarget = coincidenciasAbono[0];
+        const montoAbono = redondearMoneda(abonoTarget.monto);
+
+        if (montoAbono <= 0) {
+          throw new Error(
+            "El abono seleccionado contiene un monto inválido.",
+          );
+        }
+
+        const saldoActual = redondearMoneda(
+          facturaActual.saldo_pendiente,
+        );
+        const montoTotal = redondearMoneda(facturaActual.monto_total);
+        const totalNotasCredito = redondearMoneda(
+          facturaActual.total_notas_credito,
+        );
+
+        const montoPagadoGuardado = Number(facturaActual.monto_pagado);
+        const montoPagadoActual = Number.isFinite(montoPagadoGuardado)
+          ? redondearMoneda(montoPagadoGuardado)
+          : redondearMoneda(
+              Math.max(
+                0,
+                montoTotal - saldoActual - totalNotasCredito,
+              ),
+            );
+
+        const totalFinancieroActual = redondearMoneda(
+          saldoActual + montoPagadoActual + totalNotasCredito,
+        );
+
+        if (totalFinancieroActual !== montoTotal) {
+          throw new Error(
+            "La factura está descuadrada. Antes de anular el abono, revisa que saldo + pagado + notas coincida con el monto total.",
+          );
+        }
+
+        if (montoAbono > montoPagadoActual) {
+          throw new Error(
+            "El monto del abono es mayor que el total pagado registrado en la factura.",
+          );
+        }
+
+        const nuevoSaldo = redondearMoneda(
+          saldoActual + montoAbono,
+        );
+        const nuevoMontoPagado = redondearMoneda(
+          montoPagadoActual - montoAbono,
+        );
+
+        if (nuevoSaldo > montoTotal || nuevoMontoPagado < 0) {
+          throw new Error(
+            "La reversión produciría valores financieros inválidos.",
+          );
+        }
+
+        const totalFinancieroNuevo = redondearMoneda(
+          nuevoSaldo + nuevoMontoPagado + totalNotasCredito,
+        );
+
+        if (totalFinancieroNuevo !== montoTotal) {
+          throw new Error(
+            "La anulación dejaría la factura descuadrada y fue cancelada.",
+          );
+        }
+
+        const nuevoEstatus =
+          nuevoSaldo === 0
+            ? "Pagada"
+            : facturaActual.estatus === "Reprogramado"
+              ? "Reprogramado"
+              : esFacturaVencida(facturaActual)
+                ? "Vencida"
+                : "Pendiente";
+
+        const deudaActual = redondearMoneda(
+          clienteActual.deuda_actual,
+        );
+        const nuevaDeuda = redondearMoneda(
+          deudaActual + montoAbono,
+        );
+        const limiteCredito = redondearMoneda(
+          clienteActual.limite_credito,
+        );
+        const nuevoCreditoDisponible =
+          limiteCredito > 0
+            ? redondearMoneda(
+                Math.max(0, limiteCredito - nuevaDeuda),
+              )
+            : 0;
+
+        const nuevoEstadoLinea =
+          limiteCredito <= 0
+            ? "Sin línea"
+            : nuevaDeuda > limiteCredito
+              ? "Excedida"
+              : "Activa";
+
+        const resumenAnterior =
+          abonoTarget.resumen_pago_anterior_cliente || null;
+
+        const esUltimoAbonoDelCliente =
+          clienteActual.ultimo_abono_id === abonoIdSeguro &&
+          clienteActual.ultimo_abono_factura_id ===
+            facturaIdSeguro;
+
+        const esAbonoLegacyQuePareceResumenActual =
+          abonoCoincideConResumenClienteLegacy(
+            clienteActual,
+            abonoTarget,
+          );
+
+        const debeRestaurarResumenPago =
+          esUltimoAbonoDelCliente ||
+          esAbonoLegacyQuePareceResumenActual;
+
+        const abonosRestantes = abonosActuales.filter(
+          (abono) => abono?.id_abono !== abonoIdSeguro,
+        );
+
+        transaction.set(auditRef, {
+          actor_uid: actorUid,
+          usuario: userName || "SU",
+          modulo: "Facturación",
+          tipo: "Anulación de Abono",
+          factura_id: facturaIdSeguro,
+          folio: facturaActual.folio || "S/F",
+          cliente:
+            facturaActual.cliente ||
+            clienteActual.nombre ||
+            "S/N",
+          cliente_id: clienteId,
+          campos_modificados: [
+            "saldo_pendiente",
+            "monto_pagado",
+            "estatus",
+          ],
+          valores_anteriores: {
+            saldo_pendiente: saldoActual,
+            monto_pagado: montoPagadoActual,
+            estatus: facturaActual.estatus,
+          },
+          valores_nuevos: {
+            saldo_pendiente: nuevoSaldo,
+            monto_pagado: nuevoMontoPagado,
+            estatus: nuevoEstatus,
+          },
+          detalle: `Se canceló un pago de $${montoAbono.toLocaleString(
+            "es-MX",
+            {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            },
+          )} aplicado a la factura ${
+            facturaActual.folio || "S/F"
+          }. Ese monto volvió a quedar como saldo pendiente del cliente.`,
+          serverTime: serverTimestamp(),
+        });
+
+        const clienteNombre =
+          facturaActual.cliente ||
+          clienteActual.nombre ||
+          "S/N";
+        const folioFactura = facturaActual.folio || "S/F";
+        const montoAbonoTexto = montoAbono.toLocaleString("es-MX", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+
+        transaction.set(notificacionRef, {
+          actor_uid: actorUid,
+          actor_nombre: userName || "SU",
+          tipo: "PAGO_ANULADO",
+          titulo: "Pago anulado",
+          descripcion: `El Súper Usuario anuló un pago de $${montoAbonoTexto} para ${clienteNombre}, factura ${folioFactura}.`,
+          factura_id: facturaIdSeguro,
+          folio: folioFactura,
+          cliente_id: clienteId,
+          cliente: clienteNombre,
+          monto: montoAbono,
+          activo: true,
+          serverTime: serverTimestamp(),
+        });
+
+        transaction.update(facturaRef, {
           saldo_pendiente: nuevoSaldo,
           monto_pagado: nuevoMontoPagado,
           estatus: nuevoEstatus,
-        },
-        detalle: `Se canceló un pago de $${montoAbono.toLocaleString("es-MX")} aplicado a la factura ${factura.folio}. Ese monto volvió a quedar como saldo pendiente del cliente.`,
-        serverTime: serverTimestamp(),
-      });
+          abonos: abonosRestantes,
+          ultima_edicion_audit_id: auditRef.id,
+          ultima_edicion_actor_uid: actorUid,
+          ultima_edicion_at: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
 
-      batch.update(facturaRef, {
-        saldo_pendiente: nuevoSaldo,
-        monto_pagado: nuevoMontoPagado,
-        estatus: nuevoEstatus,
-        abonos: arrayRemove(abonoTarget),
-        ultima_edicion_audit_id: auditRef.id,
-        ultima_edicion_actor_uid: actorUid,
-        ultima_edicion_at: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+        const abonoIndexRef = doc(
+          db,
+          ABONOS_INDEX_COLLECTION,
+          construirAbonoIndexId(
+            facturaIdSeguro,
+            abonoIdSeguro,
+          ),
+        );
 
-      const abonoIndexRef = doc(
-        db,
-        ABONOS_INDEX_COLLECTION,
-        construirAbonoIndexId(idFactura, idAbono),
-      );
-
-      batch.set(
-        abonoIndexRef,
-        {
-          ...construirAbonoIndexPayload({
-            factura,
-            abono: abonoTarget,
-            actorUid,
-            userName: userName || "SU",
+        transaction.set(
+          abonoIndexRef,
+          {
+            ...construirAbonoIndexPayload({
+              factura: facturaActual,
+              abono: abonoTarget,
+              actorUid,
+              userName: userName || "SU",
+              estado: "CANCELADO",
+              activo: false,
+            }),
             estado: "CANCELADO",
             activo: false,
-          }),
-          estado: "CANCELADO",
-          activo: false,
-          cancelado_at: serverTimestamp(),
-          cancelado_por_uid: actorUid,
-          cancelado_por: userName || "SU",
-        },
-        { merge: true },
-      );
+            cancelado_at: serverTimestamp(),
+            cancelado_por_uid: actorUid,
+            cancelado_por: userName || "SU",
+          },
+          { merge: true },
+        );
 
-      const clienteUpdatePayload = {
-        deuda_actual: increment(montoAbono),
-        credito_disponible: nuevoCreditoDisponible,
-        updatedAt: serverTimestamp(),
-      };
+        const clienteUpdatePayload = {
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoCreditoDisponible,
+          linea_credito_estado: nuevoEstadoLinea,
+          updatedAt: serverTimestamp(),
+        };
 
-      if (debeRestaurarResumenPago) {
-        aplicarResumenPagoCliente(clienteUpdatePayload, resumenAnterior);
-      }
-
-      batch.update(clienteRef, clienteUpdatePayload);
-
-      const statsPayload = {
-        cartera_total: increment(montoAbono),
-        cobrado_historico: increment(-montoAbono),
-        abonos_registrados: increment(-montoAbono),
-        monto_recuperado: increment(-montoAbono),
-        ultima_actualizacion: serverTimestamp(),
-      };
-
-      if (esMismoMes(abonoTarget.fecha)) {
-        statsPayload.ingresos_mes = increment(-montoAbono);
-      }
-
-      if (esMismaSemana(abonoTarget.fecha)) {
-        statsPayload.ingresos_semana = increment(-montoAbono);
-      }
-
-      if (pasaAVencida) {
-        statsPayload.cartera_vencida = increment(montoAbono);
-      }
-
-      if (factura.estatus === "Pagada" && nuevoSaldo > 0) {
-        statsPayload.facturas_pagadas = increment(-1);
-        statsPayload.facturas_pendientes = increment(1);
-        statsPayload.total_liquidado = increment(-montoTotal);
-
-        if (pasaAVencida) {
-          statsPayload.facturas_vencidas = increment(1);
+        if (debeRestaurarResumenPago) {
+          aplicarResumenPagoCliente(
+            clienteUpdatePayload,
+            resumenAnterior,
+          );
         }
-      }
 
-      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
-      batch.set(statsRef, statsPayload, { merge: true });
+        transaction.update(clienteRef, clienteUpdatePayload);
 
-      await batch.commit();
+        const statsPayload = {
+          cartera_total: increment(montoAbono),
+          cobrado_historico: increment(-montoAbono),
+          abonos_registrados: increment(-montoAbono),
+          monto_recuperado: increment(-montoAbono),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        if (esMismoMes(abonoTarget.fecha)) {
+          statsPayload.ingresos_mes = increment(-montoAbono);
+        }
+
+        if (esMismaSemana(abonoTarget.fecha)) {
+          statsPayload.ingresos_semana =
+            increment(-montoAbono);
+        }
+
+        const quedaVencida =
+          nuevoSaldo > 0 && esFacturaVencida(facturaActual);
+
+        if (quedaVencida) {
+          statsPayload.cartera_vencida =
+            increment(montoAbono);
+        }
+
+        if (
+          facturaActual.estatus === "Pagada" &&
+          nuevoSaldo > 0
+        ) {
+          statsPayload.facturas_pagadas = increment(-1);
+          statsPayload.facturas_pendientes = increment(1);
+          statsPayload.total_liquidado =
+            increment(-montoTotal);
+
+          if (quedaVencida) {
+            statsPayload.facturas_vencidas = increment(1);
+          }
+        }
+
+        const statsRef = doc(
+          db,
+          STATS_COLLECTION,
+          STATS_DOC,
+        );
+
+        transaction.set(statsRef, statsPayload, {
+          merge: true,
+        });
+      });
 
       return { success: true };
     } catch (error) {
@@ -1989,7 +2145,9 @@ export const facturasService = {
       };
     }
 
-    if (!idFactura) {
+    const facturaIdSeguro = String(idFactura || "").trim();
+
+    if (!facturaIdSeguro) {
       return {
         success: false,
         error: "No se identificó la factura que será eliminada.",
@@ -1998,7 +2156,26 @@ export const facturasService = {
 
     try {
       const actorUid = obtenerActorUidSeguro(actor_uid);
-      const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
+
+      const solicitudesVinculadasSnapshot = await getDocs(
+        query(
+          collection(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION),
+          where("factura_id", "==", facturaIdSeguro),
+          limit(1),
+        ),
+      );
+
+      if (!solicitudesVinculadasSnapshot.empty) {
+        throw new Error(
+          "No se puede eliminar la factura porque conserva una solicitud o historial de nota de crédito. Anula o depura primero ese vínculo desde el flujo correspondiente.",
+        );
+      }
+
+      const facturaRef = doc(
+        db,
+        FACTURAS_COLLECTION,
+        facturaIdSeguro,
+      );
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
 
@@ -2040,15 +2217,44 @@ export const facturasService = {
         const saldoPendiente = redondearMoneda(
           factura.saldo_pendiente,
         );
+        const totalNotasCredito = redondearMoneda(
+          factura.total_notas_credito,
+        );
         const montoPagado = redondearMoneda(
           Number.isFinite(Number(factura.monto_pagado))
             ? factura.monto_pagado
-            : Math.max(0, montoTotal - saldoPendiente),
+            : Math.max(
+                0,
+                montoTotal - saldoPendiente - totalNotasCredito,
+              ),
         );
 
         const abonos = Array.isArray(factura.abonos)
           ? factura.abonos
           : [];
+        const notasCredito = Array.isArray(factura.notas_credito)
+          ? factura.notas_credito
+          : [];
+        const notasCreditoActivas = notasCredito.filter(
+          (nota) =>
+            nota?.cancelada !== true &&
+            !["Anulada", "Cancelada"].includes(nota?.estado),
+        );
+
+        if (abonos.length > 0 || montoPagado > 0) {
+          throw new Error(
+            "No se puede eliminar una factura que conserva abonos activos o un monto pagado. Anula primero los pagos desde el historial.",
+          );
+        }
+
+        if (
+          notasCreditoActivas.length > 0 ||
+          totalNotasCredito > 0
+        ) {
+          throw new Error(
+            "No se puede eliminar una factura con notas de crédito activas. Anula primero las notas desde su historial.",
+          );
+        }
 
         const totalAbonosRegistrados = redondearMoneda(
           abonos.reduce(
@@ -2166,7 +2372,7 @@ export const facturasService = {
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Eliminación de Factura",
-          factura_id: idFactura,
+          factura_id: facturaIdSeguro,
           folio: factura.folio || "S/F",
           cliente: factura.cliente || cliente.nombre || "S/N",
           cliente_id: factura.cliente_id,

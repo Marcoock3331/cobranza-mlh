@@ -1,4 +1,5 @@
 import { useContext, useEffect, useMemo, useState } from "react";
+import { doc, getDoc } from "firebase/firestore";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -15,6 +16,7 @@ import {
   Users,
 } from "lucide-react";
 
+import { db } from "../config/firebase";
 import { GlobalContext } from "../context/GlobalContext";
 import { useAgendaRango } from "../hooks/useAgendaRango";
 import {
@@ -55,6 +57,7 @@ const MS_POR_DIA = 24 * 60 * 60 * 1000;
 const FILTROS_ACTIVIDAD = [
   { id: "TODOS", label: "Todos" },
   { id: "SOLICITUDES", label: "Solicitudes" },
+  { id: "MOVIMIENTOS", label: "Movimientos" },
   { id: "HOY", label: "Hoy" },
 ];
 
@@ -83,6 +86,11 @@ const ESTILOS_CARD_ACTIVIDAD = {
     punto: "bg-red-500",
     hover: "hover:bg-red-50/70 hover:border-red-300",
     accion: "text-red-700 hover:text-red-900",
+  },
+  pago: {
+    punto: "bg-amber-500",
+    hover: "hover:bg-amber-50/70 hover:border-amber-300",
+    accion: "text-amber-700 hover:text-amber-900",
   },
   anulada: {
     punto: "bg-slate-500",
@@ -224,7 +232,10 @@ const cargarNotificacionesOcultas = () => {
   return {};
 };
 
-const depurarNotificacionesOcultas = (ocultas = {}, idsActuales = new Set()) => {
+const depurarNotificacionesOcultas = (
+  ocultas = {},
+  idsActuales = new Set(),
+) => {
   const ahora = Date.now();
   const maximoOcultoMs = DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS * MS_POR_DIA;
 
@@ -345,6 +356,7 @@ export default function Dashboard() {
     stats,
     solicitudes,
     solicitudesNotasCredito,
+    notificacionesOperativas,
     userRole,
     clientes,
     currentUser,
@@ -352,6 +364,7 @@ export default function Dashboard() {
 
   const [panelExpandido, setPanelExpandido] = useState(false);
   const [filtroActividad, setFiltroActividad] = useState("TODOS");
+  const [existenciaFacturasNotas, setExistenciaFacturasNotas] = useState({});
   const [notificacionesOcultas, setNotificacionesOcultas] = useState(
     cargarNotificacionesOcultas,
   );
@@ -426,8 +439,7 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" &&
-          evento.fechaClave === claveHoy,
+          evento.origen === "COMPROMISO" && evento.fechaClave === claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -436,8 +448,7 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.categoria === "POR_VENCER" &&
-          evento.fechaClave === claveHoy,
+          evento.categoria === "POR_VENCER" && evento.fechaClave === claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -446,8 +457,7 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" &&
-          evento.fechaClave < claveHoy,
+          evento.origen === "COMPROMISO" && evento.fechaClave < claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -456,8 +466,7 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" &&
-          evento.fechaClave > claveHoy,
+          evento.origen === "COMPROMISO" && evento.fechaClave > claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -466,8 +475,7 @@ export default function Dashboard() {
     () =>
       (clientes || []).filter((cliente) => {
         const activo =
-          cliente?.activo !== false &&
-          cliente?.estatus !== "Inactivo";
+          cliente?.activo !== false && cliente?.estatus !== "Inactivo";
 
         const tieneSaldo = Number(cliente?.deuda_actual) > 0;
 
@@ -516,6 +524,80 @@ export default function Dashboard() {
     obtenerTiempoFirestore(solicitud.resolvedAt) ||
     obtenerTiempoFirestore(solicitud.createdAt) ||
     obtenerTiempoFirestore(solicitud.fecha);
+
+  const solicitudesNotasCentroActividad = useMemo(
+    () =>
+      solicitudesNotasCreditoVisibles
+        .filter((solicitud) => {
+          const estatus = solicitud.estatus || "Pendiente";
+          const estaPendiente = estatus === "Pendiente";
+          const tiempo = obtenerTiempoSolicitudNota(solicitud);
+
+          if (userRole === "SU") {
+            return estaPendiente;
+          }
+
+          return estaPendiente || esTiempoReciente(tiempo, 7);
+        })
+        .slice()
+        .sort(
+          (primera, segunda) =>
+            obtenerTiempoSolicitudNota(segunda) -
+            obtenerTiempoSolicitudNota(primera),
+        )
+        .slice(0, 10),
+    [solicitudesNotasCreditoVisibles, userRole],
+  );
+
+  const idsFacturasNotasCentro = useMemo(
+    () => [
+      ...new Set(
+        solicitudesNotasCentroActividad
+          .map((solicitud) => String(solicitud.factura_id || "").trim())
+          .filter(Boolean),
+      ),
+    ],
+    [solicitudesNotasCentroActividad],
+  );
+
+  useEffect(() => {
+    if (idsFacturasNotasCentro.length === 0) {
+      return undefined;
+    }
+
+    let componenteActivo = true;
+
+    const verificarFacturas = async () => {
+      const resultados = await Promise.all(
+        idsFacturasNotasCentro.map(async (facturaId) => {
+          try {
+            const facturaSnapshot = await getDoc(
+              doc(db, "facturas", facturaId),
+            );
+
+            return [facturaId, facturaSnapshot.exists()];
+          } catch (error) {
+            console.error(
+              `No se pudo verificar la factura ${facturaId}:`,
+              error,
+            );
+
+            return [facturaId, true];
+          }
+        }),
+      );
+
+      if (!componenteActivo) return;
+
+      setExistenciaFacturasNotas(Object.fromEntries(resultados));
+    };
+
+    verificarFacturas();
+
+    return () => {
+      componenteActivo = false;
+    };
+  }, [idsFacturasNotasCentro]);
 
   const notificacionesFeed = useMemo(() => {
     const feed = [];
@@ -644,27 +726,58 @@ export default function Dashboard() {
       });
     }
 
-    solicitudesNotasCreditoVisibles
-      .filter((solicitud) => {
-        const estatus = solicitud.estatus || "Pendiente";
-        const estaPendiente = estatus === "Pendiente";
-        const tiempo = obtenerTiempoSolicitudNota(solicitud);
-
-        if (userRole === "SU") {
-          return estaPendiente;
-        }
-
-        return estaPendiente || esTiempoReciente(tiempo, 7);
-      })
-      .slice()
-      .sort(
-        (primera, segunda) =>
-          obtenerTiempoSolicitudNota(segunda) -
-          obtenerTiempoSolicitudNota(primera),
+    (notificacionesOperativas || [])
+      .filter(
+        (notificacion) =>
+          notificacion.activo !== false && notificacion.tipo === "PAGO_ANULADO",
+      )
+      .filter((notificacion) =>
+        esTiempoReciente(obtenerTiempoFirestore(notificacion.serverTime), 7),
       )
       .slice(0, 10)
+      .forEach((notificacion, indice) => {
+        const tiempo = obtenerTiempoFirestore(notificacion.serverTime);
+        const clienteId = String(notificacion.cliente_id || "").trim();
+        const facturaId = String(notificacion.factura_id || "").trim();
+        const ruta =
+          clienteId && facturaId
+            ? `/clientes/${clienteId}?facturaId=${encodeURIComponent(
+                facturaId,
+              )}&abrirFactura=1&origen=abonoAnulado`
+            : clienteId
+              ? `/clientes/${clienteId}`
+              : "/facturas";
+
+        feed.push({
+          id: `notificacion-operativa-${notificacion.id || indice}`,
+          tipo: "pago",
+          prioridad: esTiempoDeHoy(tiempo) ? "HOY" : null,
+          categoriaActividad: "MOVIMIENTOS",
+          esHoy: esTiempoDeHoy(tiempo),
+          orden: 25,
+          tiempoOrden: tiempo,
+          titulo: notificacion.titulo || "Pago anulado",
+          descripcion:
+            notificacion.descripcion ||
+            `Se anuló un pago de $${formatearMoneda(notificacion.monto, 2)}.`,
+          fecha: notificacion.fecha || "Movimiento reciente",
+          accionTexto: "Ver factura",
+          ruta,
+        });
+      });
+
+    solicitudesNotasCentroActividad
+      .filter((solicitud) => {
+        const facturaId = String(solicitud.factura_id || "").trim();
+
+        if (!facturaId) return true;
+
+        return existenciaFacturasNotas[facturaId] === true;
+      })
       .forEach((solicitud, indice) => {
-        const estatus = solicitud.nota_anulada ? "Anulada" : solicitud.estatus || "Pendiente";
+        const estatus = solicitud.nota_anulada
+          ? "Anulada"
+          : solicitud.estatus || "Pendiente";
         const estaPendiente = estatus === "Pendiente";
         const estaAutorizada = ["Autorizado", "Aprobado"].includes(estatus);
         const estaAnulada = estatus === "Anulada";
@@ -691,7 +804,11 @@ export default function Dashboard() {
               : estaAnulada
                 ? "anulada"
                 : "rechazada",
-          prioridad: estaPendiente ? "PENDIENTE" : estaAnulada ? "ANULADA" : "CRÉDITO",
+          prioridad: estaPendiente
+            ? "PENDIENTE"
+            : estaAnulada
+              ? "ANULADA"
+              : "CRÉDITO",
           categoriaActividad: "SOLICITUDES",
           esHoy: esTiempoDeHoy(tiempo),
           orden: estaPendiente ? 0 : 35,
@@ -714,9 +831,11 @@ export default function Dashboard() {
           fecha: estaPendiente
             ? "En espera de autorización del SU"
             : solicitud.fecha || "Resolución reciente",
-          accionTexto:
-            userRole === "SU" ? "Abrir panel SU" : "Ver factura",
-          ruta: userRole === "SU" ? "/panel-su?tab=creditos" : rutaFacturaExpediente,
+          accionTexto: userRole === "SU" ? "Abrir panel SU" : "Ver factura",
+          ruta:
+            userRole === "SU"
+              ? "/panel-su?tab=creditos"
+              : rutaFacturaExpediente,
         });
       });
 
@@ -738,8 +857,7 @@ export default function Dashboard() {
             ? `${solicitudesPendientes.length} solicitud(es) necesitan autorización o rechazo.`
             : `${solicitudesPendientes.length} solicitud(es) enviadas esperan resolución del SU.`,
         fecha: "En espera de resolución",
-        accionTexto:
-          userRole === "SU" ? "Revisar solicitudes" : "Ver clientes",
+        accionTexto: userRole === "SU" ? "Revisar solicitudes" : "Ver clientes",
         ruta: userRole === "SU" ? "/panel-su?tab=creditos" : "/clientes",
       });
     }
@@ -820,7 +938,9 @@ export default function Dashboard() {
     solicitudes,
     userRole,
     solicitudesPendientes,
-    solicitudesNotasCreditoVisibles,
+    solicitudesNotasCentroActividad,
+    existenciaFacturasNotas,
+    notificacionesOperativas,
     recordatoriosHoy,
     recordatoriosAtrasados,
     recordatoriosProximos,
@@ -873,7 +993,8 @@ export default function Dashboard() {
 
   const conteosActividad = {
     TODOS: notificacionesActivas.length,
-    SOLICITUDES: filtrarActividadPorFiltro(notificacionesActivas, "SOLICITUDES").length,
+    SOLICITUDES: filtrarActividadPorFiltro(notificacionesActivas, "SOLICITUDES")
+      .length,
     HOY: filtrarActividadPorFiltro(notificacionesActivas, "HOY").length,
   };
 
@@ -1058,9 +1179,7 @@ export default function Dashboard() {
                   <article
                     key={clave}
                     className={`relative overflow-hidden rounded-2xl border bg-white ${
-                      esHoy
-                        ? "border-blue-200 shadow-sm"
-                        : "border-gray-200"
+                      esHoy ? "border-blue-200 shadow-sm" : "border-gray-200"
                     }`}
                   >
                     <div
@@ -1299,9 +1418,7 @@ export default function Dashboard() {
                               ) && (
                                 <span
                                   className={`shrink-0 rounded-full border px-2 py-0.5 text-[7px] font-black uppercase tracking-wide ${
-                                    ESTILOS_PRIORIDAD[
-                                      notificacion.prioridad
-                                    ] ||
+                                    ESTILOS_PRIORIDAD[notificacion.prioridad] ||
                                     "bg-gray-100 text-gray-600 border-gray-200"
                                   }`}
                                 >
@@ -1385,9 +1502,7 @@ export default function Dashboard() {
             <div className="p-2 border-t border-gray-100 bg-gray-50/70">
               <button
                 type="button"
-                onClick={() =>
-                  setPanelExpandido((actual) => !actual)
-                }
+                onClick={() => setPanelExpandido((actual) => !actual)}
                 className="w-full py-2 text-[10px] font-black text-gray-500 flex items-center justify-center hover:text-[#0a192f]"
               >
                 {panelExpandido ? (

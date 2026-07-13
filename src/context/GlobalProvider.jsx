@@ -26,6 +26,7 @@ const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
 const SOLICITUDES_COLLECTION = "solicitudes";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
+const NOTIFICACIONES_OPERATIVAS_COLLECTION = "notificaciones_operativas";
 
 const ordenarFacturas = (lista) =>
   [...lista].sort((primera, segunda) => {
@@ -74,6 +75,7 @@ export const GlobalProvider = ({ children }) => {
       actividad: [],
       solicitudes: [],
       solicitudesNotasCredito: [],
+      notificacionesOperativas: [],
       usuarios: [],
     }),
     [authData],
@@ -105,6 +107,7 @@ function GlobalDataProvider({ authData, children }) {
   const [solicitudes, setSolicitudes] = useState([]);
   const [solicitudesNotasCredito, setSolicitudesNotasCredito] = useState([]);
   const [actividad, setActividad] = useState([]);
+  const [notificacionesOperativas, setNotificacionesOperativas] = useState([]);
   const [statsDB, setStatsDB] = useState({
     cartera_total: 0,
     cartera_vencida: 0,
@@ -160,6 +163,38 @@ function GlobalDataProvider({ authData, children }) {
         },
       );
     }
+
+    const qNotificacionesOperativas = query(
+      collection(db, NOTIFICACIONES_OPERATIVAS_COLLECTION),
+      orderBy("serverTime", "desc"),
+      limit(50),
+    );
+
+    const unsubNotificacionesOperativas = onSnapshot(
+      qNotificacionesOperativas,
+      (snap) => {
+        setNotificacionesOperativas(
+          snap.docs.map((documento) => {
+            const data = documento.data();
+
+            return {
+              id: documento.id,
+              ...data,
+              fecha: formatearFechaSegura(
+                data.serverTime,
+                "Sin fecha",
+              ),
+            };
+          }),
+        );
+      },
+      (error) => {
+        console.error(
+          "Error escuchando notificaciones operativas:",
+          error,
+        );
+      },
+    );
 
     const unsubClientes = onSnapshot(
       collection(db, CLIENTES_COLLECTION),
@@ -250,6 +285,7 @@ function GlobalDataProvider({ authData, children }) {
       unsubClientes();
       unsubStats();
       unsubActividad();
+      unsubNotificacionesOperativas();
       unsubSolicitudes();
       unsubSolicitudesNotasCredito();
     };
@@ -569,6 +605,7 @@ function GlobalDataProvider({ authData, children }) {
       setSolicitudes,
       solicitudesNotasCredito,
       setSolicitudesNotasCredito,
+      notificacionesOperativas,
       usuarios: [],
     }),
     [
@@ -589,6 +626,7 @@ function GlobalDataProvider({ authData, children }) {
       actividadVisible,
       solicitudes,
       solicitudesNotasCredito,
+      notificacionesOperativas,
     ],
   );
 
