@@ -1,4 +1,4 @@
-import { auth, db } from "../config/firebase";
+  import { auth, db } from "../config/firebase";
 import {
   arrayUnion,
   collection,
@@ -1277,18 +1277,43 @@ export const facturasService = {
         const saldoAnterior = redondearMoneda(
           facturaAnterior.saldo_pendiente,
         );
+        const totalNotasCredito = redondearMoneda(
+          facturaAnterior.total_notas_credito,
+        );
+        const montoPagadoGuardado = Number(facturaAnterior.monto_pagado);
         const montoPagado = redondearMoneda(
-          Number.isFinite(Number(facturaAnterior.monto_pagado))
-            ? facturaAnterior.monto_pagado
-            : montoAnterior - saldoAnterior,
+          Number.isFinite(montoPagadoGuardado)
+            ? montoPagadoGuardado
+            : Math.max(
+                0,
+                montoAnterior - saldoAnterior - totalNotasCredito,
+              ),
         );
         const abonos = Array.isArray(facturaAnterior.abonos)
           ? facturaAnterior.abonos
           : [];
+        const notasCredito = Array.isArray(facturaAnterior.notas_credito)
+          ? facturaAnterior.notas_credito
+          : [];
+        const totalFinancieroAnterior = redondearMoneda(
+          saldoAnterior + montoPagado + totalNotasCredito,
+        );
 
-        if (cambiaCliente && (montoPagado > 0 || abonos.length > 0)) {
+        if (totalFinancieroAnterior !== montoAnterior) {
           throw new Error(
-            "No se puede cambiar el cliente de una factura que ya tiene abonos. Corrige los demás datos o revierte primero sus pagos.",
+            "La factura está descuadrada. Antes de editarla, revisa que saldo + pagado + notas de crédito coincida con el monto total.",
+          );
+        }
+
+        const tieneHistorialFinanciero =
+          montoPagado > 0 ||
+          abonos.length > 0 ||
+          totalNotasCredito > 0 ||
+          notasCredito.length > 0;
+
+        if (cambiaCliente && tieneHistorialFinanciero) {
+          throw new Error(
+            "No se puede cambiar el cliente de una factura que ya tiene pagos o notas de crédito. Conserva el cliente actual o revierte primero todo su historial financiero.",
           );
         }
 
@@ -1300,9 +1325,19 @@ export const facturasService = {
           );
         }
 
-        if (montoNuevo < montoPagado) {
+        const montoYaAplicado = redondearMoneda(
+          montoPagado + totalNotasCredito,
+        );
+
+        if (montoNuevo < montoYaAplicado) {
           throw new Error(
-            `El nuevo monto no puede ser menor a los $${montoPagado.toLocaleString("es-MX")} que ya fueron pagados.`,
+            `El nuevo monto no puede ser menor a los $${montoYaAplicado.toLocaleString(
+              "es-MX",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              },
+            )} que ya están aplicados entre pagos y notas de crédito.`,
           );
         }
 
@@ -1323,7 +1358,19 @@ export const facturasService = {
           throw new Error("El folio de la factura es obligatorio.");
         }
 
-        const saldoNuevo = redondearMoneda(montoNuevo - montoPagado);
+        const saldoNuevo = redondearMoneda(
+          montoNuevo - montoPagado - totalNotasCredito,
+        );
+        const totalFinancieroNuevo = redondearMoneda(
+          saldoNuevo + montoPagado + totalNotasCredito,
+        );
+
+        if (saldoNuevo < 0 || totalFinancieroNuevo !== montoNuevo) {
+          throw new Error(
+            "La edición produciría una factura descuadrada y fue cancelada.",
+          );
+        }
+
         const estatusAnteriorReal = calcularEstatusFinanciero({
           saldo: saldoAnterior,
           vencimiento: facturaAnterior.vencimiento,
@@ -1615,6 +1662,12 @@ export const facturasService = {
           campos_modificados: camposModificados,
           valores_anteriores: anterioresAudit,
           valores_nuevos: nuevosAudit,
+          contexto_financiero: {
+            monto_pagado: montoPagado,
+            total_notas_credito: totalNotasCredito,
+            saldo_anterior: saldoAnterior,
+            saldo_nuevo: saldoNuevo,
+          },
           detalle: detalleCambios.join(" | "),
           serverTime: serverTimestamp(),
         });
@@ -1754,6 +1807,15 @@ export const facturasService = {
           const montoSolicitud = redondearMoneda(solicitudNota.monto_nota);
           if (solicitudNota.factura_id !== facturaActual.id) {
             throw new Error("La solicitud no pertenece a esta factura.");
+          }
+
+          if (
+            solicitudNota.cliente_id &&
+            solicitudNota.cliente_id !== facturaActual.cliente_id
+          ) {
+            throw new Error(
+              "La solicitud pertenece a otro cliente y ya no puede aplicarse a esta factura.",
+            );
           }
 
           if (montoSolicitud !== monto) {

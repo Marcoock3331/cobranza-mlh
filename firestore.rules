@@ -85,10 +85,30 @@ service cloud.firestore {
     }
 
     function saldoFacturaEditadaCuadra() {
-      let saldoEsperado = request.resource.data.monto_total - request.resource.data.monto_pagado;
+      let saldoEsperado = request.resource.data.monto_total
+        - request.resource.data.monto_pagado
+        - totalNotasCreditoNuevo();
 
       return request.resource.data.saldo_pendiente >= saldoEsperado - 0.011
         && request.resource.data.saldo_pendiente <= saldoEsperado + 0.011;
+    }
+
+    function cambioClienteFacturaPermitido() {
+      let cambiaCliente = request.resource.data.cliente_id != resource.data.cliente_id;
+      let sinNotasGuardadas = !resource.data.keys().hasAny(['notas_credito'])
+        || (
+          resource.data.notas_credito is list
+          && resource.data.notas_credito.size() == 0
+        );
+
+      return !cambiaCliente
+        || (
+          resource.data.monto_pagado == 0
+          && totalNotasCreditoActual() == 0
+          && resource.data.abonos is list
+          && resource.data.abonos.size() == 0
+          && sinNotasGuardadas
+        );
     }
 
     function auditoriaEdicionFacturaValida(facturaId) {
@@ -450,8 +470,12 @@ service cloud.firestore {
         && request.resource.data.folio != ''
         && request.resource.data.monto_total is number
         && request.resource.data.monto_total > 0
-        && request.resource.data.monto_total >= request.resource.data.monto_pagado
+        && totalNotasCreditoNuevo() == totalNotasCreditoActual()
+        && request.resource.data.notas_credito == resource.data.notas_credito
+        && request.resource.data.monto_total
+          >= request.resource.data.monto_pagado + totalNotasCreditoNuevo()
         && request.resource.data.saldo_pendiente is number
+        && request.resource.data.saldo_pendiente >= 0
         && saldoFacturaEditadaCuadra()
         && request.resource.data.emision is timestamp
         && request.resource.data.vencimiento is timestamp
@@ -461,6 +485,7 @@ service cloud.firestore {
           (request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || 
           (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
         )
+        && cambioClienteFacturaPermitido()
         && clientesEdicionFacturaValidos()
         && auditoriaEdicionFacturaValida(facturaId);
 
