@@ -160,6 +160,110 @@ service cloud.firestore {
         );
     }
 
+
+    function resumenNotaPath(clienteId) {
+      return /databases/$(database)/documents/notas_credito_resumen_clientes/$(clienteId);
+    }
+
+    function resumenNotaAutorizadaValido() {
+      let path = resumenNotaPath(resource.data.cliente_id);
+
+      return resource.data.cliente_id is string
+        && resource.data.cliente_id != ''
+        && exists(path)
+        && existsAfter(path)
+        && get(path).data.get('pendientes', 0) >= 1
+        && getAfter(path).data.id == resource.data.cliente_id
+        && getAfter(path).data.cliente_id == resource.data.cliente_id
+        && getAfter(path).data.get('total_solicitudes', 0)
+          == get(path).data.get('total_solicitudes', 0)
+        && getAfter(path).data.get('pendientes', 0)
+          == get(path).data.get('pendientes', 0) - 1
+        && getAfter(path).data.get('autorizadas', 0)
+          == get(path).data.get('autorizadas', 0) + 1
+        && getAfter(path).data.get('rechazadas', 0)
+          == get(path).data.get('rechazadas', 0)
+        && getAfter(path).data.get('anuladas', 0)
+          == get(path).data.get('anuladas', 0)
+        && getAfter(path).data.get('monto_total_notas', 0)
+          == get(path).data.get('monto_total_notas', 0)
+        && getAfter(path).data.get('ultimo_solicitado_por', '')
+          == get(path).data.get('ultimo_solicitado_por', '')
+        && getAfter(path).data.ultimo_estado == 'Autorizado'
+        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
+        && getAfter(path).data.ultimo_folio == resource.data.folio
+        && getAfter(path).data.ultimo_movimiento_at is timestamp
+        && getAfter(path).data.ultimo_resuelto_por is string
+        && getAfter(path).data.ultimo_resuelto_por != ''
+        && getAfter(path).data.activo == true;
+    }
+
+    function resumenNotaRechazadaValido() {
+      let path = resumenNotaPath(resource.data.cliente_id);
+
+      return resource.data.cliente_id is string
+        && resource.data.cliente_id != ''
+        && exists(path)
+        && existsAfter(path)
+        && get(path).data.get('pendientes', 0) >= 1
+        && getAfter(path).data.id == resource.data.cliente_id
+        && getAfter(path).data.cliente_id == resource.data.cliente_id
+        && getAfter(path).data.get('total_solicitudes', 0)
+          == get(path).data.get('total_solicitudes', 0)
+        && getAfter(path).data.get('pendientes', 0)
+          == get(path).data.get('pendientes', 0) - 1
+        && getAfter(path).data.get('autorizadas', 0)
+          == get(path).data.get('autorizadas', 0)
+        && getAfter(path).data.get('rechazadas', 0)
+          == get(path).data.get('rechazadas', 0) + 1
+        && getAfter(path).data.get('anuladas', 0)
+          == get(path).data.get('anuladas', 0)
+        && getAfter(path).data.get('monto_total_notas', 0)
+          == get(path).data.get('monto_total_notas', 0)
+        && getAfter(path).data.get('ultimo_solicitado_por', '')
+          == get(path).data.get('ultimo_solicitado_por', '')
+        && getAfter(path).data.ultimo_estado == 'Rechazado'
+        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
+        && getAfter(path).data.ultimo_folio == resource.data.folio
+        && getAfter(path).data.ultimo_movimiento_at is timestamp
+        && getAfter(path).data.ultimo_resuelto_por is string
+        && getAfter(path).data.ultimo_resuelto_por != ''
+        && getAfter(path).data.activo == true;
+    }
+
+    function resumenNotaAnuladaValido() {
+      let path = resumenNotaPath(resource.data.cliente_id);
+
+      return resource.data.cliente_id is string
+        && resource.data.cliente_id != ''
+        && exists(path)
+        && existsAfter(path)
+        && get(path).data.get('autorizadas', 0) >= 1
+        && getAfter(path).data.id == resource.data.cliente_id
+        && getAfter(path).data.cliente_id == resource.data.cliente_id
+        && getAfter(path).data.get('total_solicitudes', 0)
+          == get(path).data.get('total_solicitudes', 0)
+        && getAfter(path).data.get('pendientes', 0)
+          == get(path).data.get('pendientes', 0)
+        && getAfter(path).data.get('autorizadas', 0)
+          == get(path).data.get('autorizadas', 0) - 1
+        && getAfter(path).data.get('rechazadas', 0)
+          == get(path).data.get('rechazadas', 0)
+        && getAfter(path).data.get('anuladas', 0)
+          == get(path).data.get('anuladas', 0) + 1
+        && getAfter(path).data.get('monto_total_notas', 0)
+          == get(path).data.get('monto_total_notas', 0)
+        && getAfter(path).data.get('ultimo_solicitado_por', '')
+          == get(path).data.get('ultimo_solicitado_por', '')
+        && getAfter(path).data.ultimo_estado == 'Anulada'
+        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
+        && getAfter(path).data.ultimo_folio == resource.data.folio
+        && getAfter(path).data.ultimo_movimiento_at is timestamp
+        && getAfter(path).data.ultimo_resuelto_por is string
+        && getAfter(path).data.ultimo_resuelto_por != ''
+        && getAfter(path).data.activo == true;
+    }
+
     function movimientoLineaPath(movimientoId) {
       return /databases/$(database)/documents/lineas_credito_movimientos/$(movimientoId);
     }
@@ -509,6 +613,20 @@ service cloud.firestore {
         && request.resource.data.total_notas_credito is number
         && request.resource.data.total_notas_credito >= 0
         && request.resource.data.notas_credito is list
+        && montosFacturaCuadran()
+        && (
+          (
+            totalNotasCreditoNuevo() > totalNotasCreditoActual()
+            && request.resource.data.notas_credito.size()
+              == resource.data.get('notas_credito', []).size() + 1
+          )
+          ||
+          (
+            totalNotasCreditoNuevo() < totalNotasCreditoActual()
+            && request.resource.data.notas_credito.size()
+              == resource.data.get('notas_credito', []).size()
+          )
+        )
         && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Pagada']
         && (
           request.resource.data.saldo_pendiente != resource.data.saldo_pendiente
@@ -605,6 +723,17 @@ service cloud.firestore {
             && request.resource.data.resolvedAt is timestamp
             && request.resource.data.resolvedBy is string
             && request.resource.data.resolvedByUid == request.auth.uid
+            && (
+              (
+                request.resource.data.estatus == 'Autorizado'
+                && resumenNotaAutorizadaValido()
+              )
+              ||
+              (
+                request.resource.data.estatus == 'Rechazado'
+                && resumenNotaRechazadaValido()
+              )
+            )
           )
           ||
           (
@@ -619,6 +748,7 @@ service cloud.firestore {
             && request.resource.data.anuladaBy is string
             && request.resource.data.anuladaByUid == request.auth.uid
             && request.resource.data.motivo_anulacion is string
+            && resumenNotaAnuladaValido()
           )
         );
 
@@ -639,12 +769,12 @@ service cloud.firestore {
         && request.resource.data.cliente_id == clienteId
         && request.resource.data.cliente is string
         && request.resource.data.cliente != ''
-        && (!request.resource.data.keys().hasAny(['total_solicitudes']) || request.resource.data.total_solicitudes is number)
-        && (!request.resource.data.keys().hasAny(['pendientes']) || request.resource.data.pendientes is number)
-        && (!request.resource.data.keys().hasAny(['autorizadas']) || request.resource.data.autorizadas is number)
-        && (!request.resource.data.keys().hasAny(['rechazadas']) || request.resource.data.rechazadas is number)
-        && (!request.resource.data.keys().hasAny(['anuladas']) || request.resource.data.anuladas is number)
-        && (!request.resource.data.keys().hasAny(['monto_total_notas']) || request.resource.data.monto_total_notas is number)
+        && (!request.resource.data.keys().hasAny(['total_solicitudes']) || (request.resource.data.total_solicitudes is number && request.resource.data.total_solicitudes >= 0))
+        && (!request.resource.data.keys().hasAny(['pendientes']) || (request.resource.data.pendientes is number && request.resource.data.pendientes >= 0))
+        && (!request.resource.data.keys().hasAny(['autorizadas']) || (request.resource.data.autorizadas is number && request.resource.data.autorizadas >= 0))
+        && (!request.resource.data.keys().hasAny(['rechazadas']) || (request.resource.data.rechazadas is number && request.resource.data.rechazadas >= 0))
+        && (!request.resource.data.keys().hasAny(['anuladas']) || (request.resource.data.anuladas is number && request.resource.data.anuladas >= 0))
+        && (!request.resource.data.keys().hasAny(['monto_total_notas']) || (request.resource.data.monto_total_notas is number && request.resource.data.monto_total_notas >= 0))
         && request.resource.data.ultimo_estado in ['Pendiente', 'Autorizado', 'Aprobado', 'Rechazado', 'Anulada']
         && (!request.resource.data.keys().hasAny(['ultimo_monto_nota']) || request.resource.data.ultimo_monto_nota is number)
         && (!request.resource.data.keys().hasAny(['ultimo_folio']) || request.resource.data.ultimo_folio is string)

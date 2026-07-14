@@ -51,8 +51,11 @@ const CATEGORIAS = {
 const STORAGE_NOTIFICACIONES_DESCARTADAS =
   "mlh_cobranza_notificaciones_descartadas";
 
-const DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS = 30;
+const DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS = 7;
 const MS_POR_DIA = 24 * 60 * 60 * 1000;
+
+const obtenerClaveNotificacionesOcultas = (uid = "") =>
+  `${STORAGE_NOTIFICACIONES_DESCARTADAS}:${String(uid || "sin-usuario").trim()}`;
 
 const FILTROS_ACTIVIDAD = [
   { id: "TODOS", label: "Todos" },
@@ -187,15 +190,23 @@ const telefonoValido = (telefono = "") => {
 const correoValido = (correo = "") =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(correo || "").trim());
 
-const cargarNotificacionesOcultas = () => {
+const cargarNotificacionesOcultas = (uid = "") => {
   if (typeof window === "undefined") return {};
 
   try {
-    const valorGuardado = window.localStorage.getItem(
+    const claveUsuario = obtenerClaveNotificacionesOcultas(uid);
+    const valorUsuario = window.localStorage.getItem(claveUsuario);
+    const valorLegacy = window.localStorage.getItem(
       STORAGE_NOTIFICACIONES_DESCARTADAS,
     );
+    const valorGuardado = valorUsuario || valorLegacy;
 
     if (!valorGuardado) return {};
+
+    if (!valorUsuario && valorLegacy) {
+      window.localStorage.setItem(claveUsuario, valorLegacy);
+      window.localStorage.removeItem(STORAGE_NOTIFICACIONES_DESCARTADAS);
+    }
 
     const valor = JSON.parse(valorGuardado);
     const ahoraIso = new Date().toISOString();
@@ -232,16 +243,11 @@ const cargarNotificacionesOcultas = () => {
   return {};
 };
 
-const depurarNotificacionesOcultas = (
-  ocultas = {},
-  idsActuales = new Set(),
-) => {
+const depurarNotificacionesOcultas = (ocultas = {}) => {
   const ahora = Date.now();
   const maximoOcultoMs = DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS * MS_POR_DIA;
 
   return Object.entries(ocultas).reduce((acumulado, [id, detalle]) => {
-    if (!idsActuales.has(id)) return acumulado;
-
     const hiddenAt = detalle?.hiddenAt || new Date().toISOString();
     const tiempoOculto = new Date(hiddenAt).getTime();
 
@@ -365,8 +371,11 @@ export default function Dashboard() {
   const [panelExpandido, setPanelExpandido] = useState(false);
   const [filtroActividad, setFiltroActividad] = useState("TODOS");
   const [existenciaFacturasNotas, setExistenciaFacturasNotas] = useState({});
-  const [notificacionesOcultas, setNotificacionesOcultas] = useState(
-    cargarNotificacionesOcultas,
+  const claveNotificacionesOcultas = obtenerClaveNotificacionesOcultas(
+    currentUser?.uid,
+  );
+  const [notificacionesOcultas, setNotificacionesOcultas] = useState(() =>
+    cargarNotificacionesOcultas(currentUser?.uid),
   );
 
   const guardarNotificacionesOcultas = (ocultas) => {
@@ -374,9 +383,10 @@ export default function Dashboard() {
 
     if (typeof window !== "undefined") {
       window.localStorage.setItem(
-        STORAGE_NOTIFICACIONES_DESCARTADAS,
+        claveNotificacionesOcultas,
         JSON.stringify(ocultas),
       );
+      window.localStorage.removeItem(STORAGE_NOTIFICACIONES_DESCARTADAS);
     }
   };
 
@@ -439,7 +449,8 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" && evento.fechaClave === claveHoy,
+          evento.origen === "COMPROMISO" &&
+          evento.fechaClave === claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -448,7 +459,8 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.categoria === "POR_VENCER" && evento.fechaClave === claveHoy,
+          evento.categoria === "POR_VENCER" &&
+          evento.fechaClave === claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -457,7 +469,8 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" && evento.fechaClave < claveHoy,
+          evento.origen === "COMPROMISO" &&
+          evento.fechaClave < claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -466,7 +479,8 @@ export default function Dashboard() {
     () =>
       eventosActivos.filter(
         (evento) =>
-          evento.origen === "COMPROMISO" && evento.fechaClave > claveHoy,
+          evento.origen === "COMPROMISO" &&
+          evento.fechaClave > claveHoy,
       ),
     [eventosActivos, claveHoy],
   );
@@ -475,7 +489,8 @@ export default function Dashboard() {
     () =>
       (clientes || []).filter((cliente) => {
         const activo =
-          cliente?.activo !== false && cliente?.estatus !== "Inactivo";
+          cliente?.activo !== false &&
+          cliente?.estatus !== "Inactivo";
 
         const tieneSaldo = Number(cliente?.deuda_actual) > 0;
 
@@ -550,13 +565,14 @@ export default function Dashboard() {
   );
 
   const idsFacturasNotasCentro = useMemo(
-    () => [
-      ...new Set(
-        solicitudesNotasCentroActividad
-          .map((solicitud) => String(solicitud.factura_id || "").trim())
-          .filter(Boolean),
-      ),
-    ],
+    () =>
+      [
+        ...new Set(
+          solicitudesNotasCentroActividad
+            .map((solicitud) => String(solicitud.factura_id || "").trim())
+            .filter(Boolean),
+        ),
+      ],
     [solicitudesNotasCentroActividad],
   );
 
@@ -589,7 +605,9 @@ export default function Dashboard() {
 
       if (!componenteActivo) return;
 
-      setExistenciaFacturasNotas(Object.fromEntries(resultados));
+      setExistenciaFacturasNotas(
+        Object.fromEntries(resultados),
+      );
     };
 
     verificarFacturas();
@@ -729,16 +747,26 @@ export default function Dashboard() {
     (notificacionesOperativas || [])
       .filter(
         (notificacion) =>
-          notificacion.activo !== false && notificacion.tipo === "PAGO_ANULADO",
+          notificacion.activo !== false &&
+          notificacion.tipo === "PAGO_ANULADO",
       )
       .filter((notificacion) =>
-        esTiempoReciente(obtenerTiempoFirestore(notificacion.serverTime), 7),
+        esTiempoReciente(
+          obtenerTiempoFirestore(notificacion.serverTime),
+          7,
+        ),
       )
       .slice(0, 10)
       .forEach((notificacion, indice) => {
-        const tiempo = obtenerTiempoFirestore(notificacion.serverTime);
-        const clienteId = String(notificacion.cliente_id || "").trim();
-        const facturaId = String(notificacion.factura_id || "").trim();
+        const tiempo = obtenerTiempoFirestore(
+          notificacion.serverTime,
+        );
+        const clienteId = String(
+          notificacion.cliente_id || "",
+        ).trim();
+        const facturaId = String(
+          notificacion.factura_id || "",
+        ).trim();
         const ruta =
           clienteId && facturaId
             ? `/clientes/${clienteId}?facturaId=${encodeURIComponent(
@@ -759,7 +787,10 @@ export default function Dashboard() {
           titulo: notificacion.titulo || "Pago anulado",
           descripcion:
             notificacion.descripcion ||
-            `Se anuló un pago de $${formatearMoneda(notificacion.monto, 2)}.`,
+            `Se anuló un pago de $${formatearMoneda(
+              notificacion.monto,
+              2,
+            )}.`,
           fecha: notificacion.fecha || "Movimiento reciente",
           accionTexto: "Ver factura",
           ruta,
@@ -768,16 +799,16 @@ export default function Dashboard() {
 
     solicitudesNotasCentroActividad
       .filter((solicitud) => {
-        const facturaId = String(solicitud.factura_id || "").trim();
+        const facturaId = String(
+          solicitud.factura_id || "",
+        ).trim();
 
         if (!facturaId) return true;
 
         return existenciaFacturasNotas[facturaId] === true;
       })
       .forEach((solicitud, indice) => {
-        const estatus = solicitud.nota_anulada
-          ? "Anulada"
-          : solicitud.estatus || "Pendiente";
+        const estatus = solicitud.nota_anulada ? "Anulada" : solicitud.estatus || "Pendiente";
         const estaPendiente = estatus === "Pendiente";
         const estaAutorizada = ["Autorizado", "Aprobado"].includes(estatus);
         const estaAnulada = estatus === "Anulada";
@@ -804,11 +835,7 @@ export default function Dashboard() {
               : estaAnulada
                 ? "anulada"
                 : "rechazada",
-          prioridad: estaPendiente
-            ? "PENDIENTE"
-            : estaAnulada
-              ? "ANULADA"
-              : "CRÉDITO",
+          prioridad: estaPendiente ? "PENDIENTE" : estaAnulada ? "ANULADA" : "CRÉDITO",
           categoriaActividad: "SOLICITUDES",
           esHoy: esTiempoDeHoy(tiempo),
           orden: estaPendiente ? 0 : 35,
@@ -831,11 +858,9 @@ export default function Dashboard() {
           fecha: estaPendiente
             ? "En espera de autorización del SU"
             : solicitud.fecha || "Resolución reciente",
-          accionTexto: userRole === "SU" ? "Abrir panel SU" : "Ver factura",
-          ruta:
-            userRole === "SU"
-              ? "/panel-su?tab=creditos"
-              : rutaFacturaExpediente,
+          accionTexto:
+            userRole === "SU" ? "Abrir panel SU" : "Ver factura",
+          ruta: userRole === "SU" ? "/panel-su?tab=creditos" : rutaFacturaExpediente,
         });
       });
 
@@ -857,7 +882,8 @@ export default function Dashboard() {
             ? `${solicitudesPendientes.length} solicitud(es) necesitan autorización o rechazo.`
             : `${solicitudesPendientes.length} solicitud(es) enviadas esperan resolución del SU.`,
         fecha: "En espera de resolución",
-        accionTexto: userRole === "SU" ? "Revisar solicitudes" : "Ver clientes",
+        accionTexto:
+          userRole === "SU" ? "Revisar solicitudes" : "Ver clientes",
         ruta: userRole === "SU" ? "/panel-su?tab=creditos" : "/clientes",
       });
     }
@@ -950,12 +976,8 @@ export default function Dashboard() {
   ]);
 
   useEffect(() => {
-    const idsActuales = new Set(
-      notificacionesFeed.map((notificacion) => notificacion.id),
-    );
     const ocultasDepuradas = depurarNotificacionesOcultas(
       notificacionesOcultas,
-      idsActuales,
     );
 
     if (mapasIguales(notificacionesOcultas, ocultasDepuradas)) {
@@ -966,17 +988,17 @@ export default function Dashboard() {
       setNotificacionesOcultas(ocultasDepuradas);
 
       window.localStorage.setItem(
-        STORAGE_NOTIFICACIONES_DESCARTADAS,
+        claveNotificacionesOcultas,
         JSON.stringify(ocultasDepuradas),
       );
+      window.localStorage.removeItem(STORAGE_NOTIFICACIONES_DESCARTADAS);
     }, 0);
 
     return () => window.clearTimeout(temporizador);
-  }, [notificacionesFeed, notificacionesOcultas]);
+  }, [claveNotificacionesOcultas, notificacionesOcultas]);
 
   const notificacionesOcultasVigentes = depurarNotificacionesOcultas(
     notificacionesOcultas,
-    new Set(notificacionesFeed.map((notificacion) => notificacion.id)),
   );
 
   const idsDescartados = new Set(Object.keys(notificacionesOcultasVigentes));
@@ -993,8 +1015,7 @@ export default function Dashboard() {
 
   const conteosActividad = {
     TODOS: notificacionesActivas.length,
-    SOLICITUDES: filtrarActividadPorFiltro(notificacionesActivas, "SOLICITUDES")
-      .length,
+    SOLICITUDES: filtrarActividadPorFiltro(notificacionesActivas, "SOLICITUDES").length,
     HOY: filtrarActividadPorFiltro(notificacionesActivas, "HOY").length,
   };
 
@@ -1179,7 +1200,9 @@ export default function Dashboard() {
                   <article
                     key={clave}
                     className={`relative overflow-hidden rounded-2xl border bg-white ${
-                      esHoy ? "border-blue-200 shadow-sm" : "border-gray-200"
+                      esHoy
+                        ? "border-blue-200 shadow-sm"
+                        : "border-gray-200"
                     }`}
                   >
                     <div
@@ -1418,7 +1441,9 @@ export default function Dashboard() {
                               ) && (
                                 <span
                                   className={`shrink-0 rounded-full border px-2 py-0.5 text-[7px] font-black uppercase tracking-wide ${
-                                    ESTILOS_PRIORIDAD[notificacion.prioridad] ||
+                                    ESTILOS_PRIORIDAD[
+                                      notificacion.prioridad
+                                    ] ||
                                     "bg-gray-100 text-gray-600 border-gray-200"
                                   }`}
                                 >
@@ -1502,7 +1527,9 @@ export default function Dashboard() {
             <div className="p-2 border-t border-gray-100 bg-gray-50/70">
               <button
                 type="button"
-                onClick={() => setPanelExpandido((actual) => !actual)}
+                onClick={() =>
+                  setPanelExpandido((actual) => !actual)
+                }
                 className="w-full py-2 text-[10px] font-black text-gray-500 flex items-center justify-center hover:text-[#0a192f]"
               >
                 {panelExpandido ? (

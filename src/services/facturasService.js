@@ -1,4 +1,4 @@
-  import { auth, db } from "../config/firebase";
+import { auth, db } from "../config/firebase";
 import {
   arrayUnion,
   collection,
@@ -26,6 +26,7 @@ const STATS_DOC = "stats_actuales";
 const ACTIVIDAD_COLLECTION = "actividad";
 const ABONOS_INDEX_COLLECTION = "abonos_index";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
+const RESUMEN_NOTAS_CREDITO_COLLECTION = "notas_credito_resumen_clientes";
 const NOTIFICACIONES_OPERATIVAS_COLLECTION = "notificaciones_operativas";
 
 const redondearMoneda = (valor) =>
@@ -1723,6 +1724,8 @@ export const facturasService = {
     try {
       const actorUid = obtenerActorUidSeguro(actor_uid);
       const monto = redondearMoneda(montoNota);
+      const notaId = `nc-${crypto.randomUUID()}`;
+      const fechaNota = Timestamp.now();
 
       if (monto <= 0) {
         throw new Error("La nota de crédito debe ser mayor a cero.");
@@ -1790,11 +1793,51 @@ export const facturasService = {
           throw new Error("No se encontró el cliente enlazado a la factura.");
         }
 
+        let resumenNotaRef = null;
+        let resumenNotaSnap = null;
+
+        if (solicitudNota) {
+          resumenNotaRef = doc(
+            db,
+            RESUMEN_NOTAS_CREDITO_COLLECTION,
+            facturaActual.cliente_id,
+          );
+          resumenNotaSnap = await transaction.get(resumenNotaRef);
+
+          if (!resumenNotaSnap.exists()) {
+            throw new Error(
+              "No existe el resumen de notas de crédito del cliente. Reconstrúyelo antes de autorizar la solicitud.",
+            );
+          }
+        }
+
         const cliente = clienteSnap.data();
+        const montoTotal = redondearMoneda(facturaActual.monto_total);
         const saldoAnterior = redondearMoneda(facturaActual.saldo_pendiente);
+        const totalNotasActual = redondearMoneda(
+          facturaActual.total_notas_credito || 0,
+        );
+        const montoPagadoGuardado = Number(facturaActual.monto_pagado);
+        const montoPagado = Number.isFinite(montoPagadoGuardado)
+          ? redondearMoneda(montoPagadoGuardado)
+          : redondearMoneda(
+              Math.max(0, montoTotal - saldoAnterior - totalNotasActual),
+            );
+
+        const totalFinancieroActual = redondearMoneda(
+          saldoAnterior + montoPagado + totalNotasActual,
+        );
+
+        if (totalFinancieroActual !== montoTotal) {
+          throw new Error(
+            "La factura está descuadrada. Antes de aplicar la nota, revisa que saldo + pagado + notas coincida con el monto total.",
+          );
+        }
 
         if (saldoAnterior <= 0) {
-          throw new Error("No se puede aplicar nota de crédito a una factura liquidada.");
+          throw new Error(
+            "No se puede aplicar nota de crédito a una factura liquidada.",
+          );
         }
 
         if (monto > saldoAnterior) {
@@ -1805,6 +1848,7 @@ export const facturasService = {
 
         if (solicitudNota) {
           const montoSolicitud = redondearMoneda(solicitudNota.monto_nota);
+
           if (solicitudNota.factura_id !== facturaActual.id) {
             throw new Error("La solicitud no pertenece a esta factura.");
           }
@@ -1819,16 +1863,38 @@ export const facturasService = {
           }
 
           if (montoSolicitud !== monto) {
-            throw new Error("El monto solicitado no coincide con el monto autorizado.");
+            throw new Error(
+              "El monto solicitado no coincide con el monto autorizado.",
+            );
+          }
+
+          const resumenNota = resumenNotaSnap.data();
+          const pendientesResumen = Number(resumenNota.pendientes);
+          const autorizadasResumen = Number(resumenNota.autorizadas);
+
+          if (
+            !Number.isFinite(pendientesResumen) ||
+            pendientesResumen < 1 ||
+            !Number.isFinite(autorizadasResumen) ||
+            autorizadasResumen < 0
+          ) {
+            throw new Error(
+              "El resumen de notas de crédito está desalineado y la autorización fue bloqueada.",
+            );
           }
         }
 
         const saldoRestante = redondearMoneda(saldoAnterior - monto);
-        const montoPagado = redondearMoneda(facturaActual.monto_pagado);
-        const totalNotasActual = redondearMoneda(
-          facturaActual.total_notas_credito || 0,
-        );
         const totalNotasNuevo = redondearMoneda(totalNotasActual + monto);
+        const totalFinancieroNuevo = redondearMoneda(
+          saldoRestante + montoPagado + totalNotasNuevo,
+        );
+
+        if (totalFinancieroNuevo !== montoTotal) {
+          throw new Error(
+            "La nota de crédito produciría una factura descuadrada y fue cancelada.",
+          );
+        }
 
         const nuevoEstatus =
           saldoRestante === 0
@@ -1838,14 +1904,16 @@ export const facturasService = {
               : "Pendiente";
 
         const nuevaNota = {
-          id_nota: `nc-${Date.now()}`,
-          fecha: Timestamp.now(),
+          id_nota: notaId,
+          fecha: fechaNota,
           monto,
           motivo: String(motivo || "").trim(),
           observaciones: String(observaciones || "").trim(),
           aplicado_por_uid: actorUid,
           aplicado_por: userName || "SU",
-          origen: solicitudNota ? "Solicitud ADMIN autorizada" : "Aplicación directa SU",
+          origen: solicitudNota
+            ? "Solicitud ADMIN autorizada"
+            : "Aplicación directa SU",
           solicitud_nota_id: solicitudNota?.id || "",
           saldo_anterior: saldoAnterior,
           saldo_restante: saldoRestante,
@@ -1861,7 +1929,7 @@ export const facturasService = {
           ultima_accion: {
             tipo: "Nota de crédito",
             monto,
-            fecha: Timestamp.now(),
+            fecha: fechaNota,
             usuario: userName || "SU",
           },
           updatedAt: serverTimestamp(),
@@ -1870,21 +1938,37 @@ export const facturasService = {
         const limiteCredito = redondearMoneda(cliente.limite_credito);
         const deudaActual = redondearMoneda(cliente.deuda_actual);
         const creditoDisponible = redondearMoneda(cliente.credito_disponible);
+        const nuevaDeuda = Math.max(
+          0,
+          redondearMoneda(deudaActual - monto),
+        );
+        const nuevoCreditoDisponible =
+          limiteCredito > 0
+            ? Math.min(
+                limiteCredito,
+                Math.max(
+                  0,
+                  redondearMoneda(creditoDisponible + monto),
+                ),
+              )
+            : 0;
+        const nuevoEstadoLinea =
+          limiteCredito <= 0
+            ? "Sin línea"
+            : nuevaDeuda > limiteCredito
+              ? "Excedida"
+              : "Activa";
 
         transaction.update(clienteRef, {
-          deuda_actual: Math.max(0, redondearMoneda(deudaActual - monto)),
-          credito_disponible:
-            limiteCredito > 0
-              ? Math.min(
-                  limiteCredito,
-                  Math.max(0, redondearMoneda(creditoDisponible + monto)),
-                )
-              : 0,
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoCreditoDisponible,
+          linea_credito_estado: nuevoEstadoLinea,
           updatedAt: serverTimestamp(),
         });
 
         const estabaVencida =
           saldoAnterior > 0 && esFacturaVencida(facturaActual);
+        const quedaPagada = saldoRestante === 0;
 
         const statsUpdate = {
           cartera_total: increment(-monto),
@@ -1896,9 +1980,10 @@ export const facturasService = {
           statsUpdate.cartera_vencida = increment(-monto);
         }
 
-        if (saldoRestante === 0) {
+        if (quedaPagada) {
           statsUpdate.facturas_pagadas = increment(1);
           statsUpdate.facturas_pendientes = increment(-1);
+          statsUpdate.total_liquidado = increment(montoTotal);
 
           if (estabaVencida) {
             statsUpdate.facturas_vencidas = increment(-1);
@@ -1907,7 +1992,12 @@ export const facturasService = {
 
         transaction.set(statsRef, statsUpdate, { merge: true });
 
-        if (solicitudNotaRef && solicitudNota) {
+        if (
+          solicitudNotaRef &&
+          solicitudNota &&
+          resumenNotaRef &&
+          resumenNotaSnap
+        ) {
           transaction.update(solicitudNotaRef, {
             estatus: "Autorizado",
             resolvedAt: serverTimestamp(),
@@ -1916,6 +2006,28 @@ export const facturasService = {
             nota_credito_id: nuevaNota.id_nota,
             saldo_restante: saldoRestante,
           });
+
+          transaction.set(
+            resumenNotaRef,
+            {
+              id: facturaActual.cliente_id,
+              cliente_id: facturaActual.cliente_id,
+              cliente:
+                facturaActual.cliente ||
+                cliente.nombre ||
+                solicitudNota.cliente ||
+                "S/N",
+              pendientes: increment(-1),
+              autorizadas: increment(1),
+              ultimo_estado: "Autorizado",
+              ultimo_monto_nota: monto,
+              ultimo_folio: solicitudNota.folio || facturaActual.folio || "S/F",
+              ultimo_movimiento_at: serverTimestamp(),
+              ultimo_resuelto_por: userName || "SU",
+              activo: true,
+            },
+            { merge: true },
+          );
         }
 
         transaction.set(auditRef, {
@@ -2006,31 +2118,90 @@ export const facturasService = {
           ? facturaActual.notas_credito
           : [];
 
-        const notaObjetivo = notasCredito.find(
+        const notasObjetivo = notasCredito.filter(
           (nota) => nota.id_nota === idNota,
         );
 
-        if (!notaObjetivo) {
+        if (notasObjetivo.length === 0) {
           throw new Error("No se encontró la nota de crédito seleccionada.");
         }
 
+        if (notasObjetivo.length > 1) {
+          throw new Error(
+            "La factura contiene notas duplicadas con el mismo identificador. La anulación fue bloqueada.",
+          );
+        }
+
+        const notaObjetivo = notasObjetivo[0];
         const montoNota = redondearMoneda(notaObjetivo.monto);
 
         if (montoNota <= 0) {
           throw new Error("La nota de crédito contiene un monto inválido.");
         }
 
-        if (notaObjetivo.cancelada === true || ["Anulada", "Cancelada"].includes(notaObjetivo.estado)) {
+        if (
+          notaObjetivo.cancelada === true ||
+          ["Anulada", "Cancelada"].includes(notaObjetivo.estado)
+        ) {
           throw new Error("La nota de crédito ya está anulada.");
         }
 
         const solicitudNotaRef = notaObjetivo.solicitud_nota_id
-          ? doc(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION, notaObjetivo.solicitud_nota_id)
+          ? doc(
+              db,
+              SOLICITUDES_NOTAS_CREDITO_COLLECTION,
+              notaObjetivo.solicitud_nota_id,
+            )
           : null;
 
         const solicitudNotaSnap = solicitudNotaRef
           ? await transaction.get(solicitudNotaRef)
           : null;
+
+        if (solicitudNotaRef && !solicitudNotaSnap?.exists()) {
+          throw new Error(
+            "La nota está vinculada a una solicitud que ya no existe. La anulación fue bloqueada para proteger el historial.",
+          );
+        }
+
+        const solicitudNota = solicitudNotaSnap?.exists()
+          ? {
+              id: solicitudNotaSnap.id,
+              ...solicitudNotaSnap.data(),
+            }
+          : null;
+
+        if (solicitudNota) {
+          if (!["Autorizado", "Aprobado"].includes(solicitudNota.estatus)) {
+            throw new Error(
+              `La solicitud vinculada tiene estado ${solicitudNota.estatus || "desconocido"} y no puede anularse.`,
+            );
+          }
+
+          if (solicitudNota.factura_id !== facturaActual.id) {
+            throw new Error(
+              "La solicitud vinculada no pertenece a esta factura.",
+            );
+          }
+
+          if (
+            solicitudNota.cliente_id &&
+            solicitudNota.cliente_id !== facturaActual.cliente_id
+          ) {
+            throw new Error(
+              "La solicitud vinculada pertenece a otro cliente.",
+            );
+          }
+
+          if (
+            solicitudNota.nota_credito_id &&
+            solicitudNota.nota_credito_id !== idNota
+          ) {
+            throw new Error(
+              "La solicitud vinculada apunta a otra nota de crédito.",
+            );
+          }
+        }
 
         const clienteRef = doc(
           db,
@@ -2044,26 +2215,86 @@ export const facturasService = {
           throw new Error("No se encontró el cliente enlazado a la factura.");
         }
 
-        const cliente = clienteSnap.data();
+        let resumenNotaRef = null;
+        let resumenNotaSnap = null;
 
+        if (solicitudNota) {
+          resumenNotaRef = doc(
+            db,
+            RESUMEN_NOTAS_CREDITO_COLLECTION,
+            facturaActual.cliente_id,
+          );
+          resumenNotaSnap = await transaction.get(resumenNotaRef);
+
+          if (!resumenNotaSnap.exists()) {
+            throw new Error(
+              "No existe el resumen de notas de crédito del cliente. Reconstrúyelo antes de anular la nota.",
+            );
+          }
+
+          const resumenNota = resumenNotaSnap.data();
+          const autorizadasResumen = Number(resumenNota.autorizadas);
+          const anuladasResumen = Number(resumenNota.anuladas);
+
+          if (
+            !Number.isFinite(autorizadasResumen) ||
+            autorizadasResumen < 1 ||
+            !Number.isFinite(anuladasResumen) ||
+            anuladasResumen < 0
+          ) {
+            throw new Error(
+              "El resumen de notas de crédito está desalineado y la anulación fue bloqueada.",
+            );
+          }
+        }
+
+        const cliente = clienteSnap.data();
         const montoTotal = redondearMoneda(facturaActual.monto_total);
-        const montoPagado = redondearMoneda(facturaActual.monto_pagado);
         const saldoActual = redondearMoneda(facturaActual.saldo_pendiente);
         const totalNotasActual = redondearMoneda(
           facturaActual.total_notas_credito || 0,
         );
-        const totalNotasNuevo = Math.max(
-          0,
-          redondearMoneda(totalNotasActual - montoNota),
+        const montoPagadoGuardado = Number(facturaActual.monto_pagado);
+        const montoPagado = Number.isFinite(montoPagadoGuardado)
+          ? redondearMoneda(montoPagadoGuardado)
+          : redondearMoneda(
+              Math.max(0, montoTotal - saldoActual - totalNotasActual),
+            );
+
+        const totalFinancieroActual = redondearMoneda(
+          saldoActual + montoPagado + totalNotasActual,
         );
 
-        const saldoNuevo = Math.max(
-          0,
-          redondearMoneda(montoTotal - montoPagado - totalNotasNuevo),
+        if (totalFinancieroActual !== montoTotal) {
+          throw new Error(
+            "La factura está descuadrada. Antes de anular la nota, revisa que saldo + pagado + notas coincida con el monto total.",
+          );
+        }
+
+        if (montoNota > totalNotasActual) {
+          throw new Error(
+            "El monto de la nota supera el total de notas activas guardado en la factura.",
+          );
+        }
+
+        const totalNotasNuevo = redondearMoneda(
+          totalNotasActual - montoNota,
+        );
+        const saldoNuevo = redondearMoneda(
+          montoTotal - montoPagado - totalNotasNuevo,
+        );
+        const totalFinancieroNuevo = redondearMoneda(
+          saldoNuevo + montoPagado + totalNotasNuevo,
         );
 
-        if (saldoNuevo < saldoActual) {
-          throw new Error("La eliminación calculó un saldo inválido.");
+        if (
+          saldoNuevo < 0 ||
+          saldoNuevo < saldoActual ||
+          totalFinancieroNuevo !== montoTotal
+        ) {
+          throw new Error(
+            "La anulación produciría una factura descuadrada y fue bloqueada.",
+          );
         }
 
         const nuevoEstatus =
@@ -2097,9 +2328,9 @@ export const facturasService = {
           notas_credito: notasActualizadas,
           total_notas_credito: totalNotasNuevo,
           ultima_accion: {
-            tipo: "Eliminación de nota de crédito",
+            tipo: "Anulación de nota de crédito",
             monto: montoNota,
-            fecha: Timestamp.now(),
+            fecha: fechaAnulacion,
             usuario: userName || "SU",
           },
           updatedAt: serverTimestamp(),
@@ -2108,18 +2339,44 @@ export const facturasService = {
         const limiteCredito = redondearMoneda(cliente.limite_credito);
         const deudaActual = redondearMoneda(cliente.deuda_actual);
         const creditoDisponible = redondearMoneda(cliente.credito_disponible);
+        const nuevaDeuda = redondearMoneda(deudaActual + montoNota);
+        const nuevoCreditoDisponible =
+          limiteCredito > 0
+            ? Math.min(
+                limiteCredito,
+                Math.max(
+                  0,
+                  redondearMoneda(creditoDisponible - montoNota),
+                ),
+              )
+            : 0;
+        const nuevoEstadoLinea =
+          limiteCredito <= 0
+            ? "Sin línea"
+            : nuevaDeuda > limiteCredito
+              ? "Excedida"
+              : "Activa";
+
+        if (
+          nuevaDeuda < 0 ||
+          nuevoCreditoDisponible < 0 ||
+          nuevoCreditoDisponible > limiteCredito
+        ) {
+          throw new Error(
+            "La anulación produciría valores inválidos en la deuda o el crédito disponible del cliente.",
+          );
+        }
 
         transaction.update(clienteRef, {
-          deuda_actual: redondearMoneda(deudaActual + montoNota),
-          credito_disponible:
-            limiteCredito > 0
-              ? Math.max(0, redondearMoneda(creditoDisponible - montoNota))
-              : 0,
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoCreditoDisponible,
+          linea_credito_estado: nuevoEstadoLinea,
           updatedAt: serverTimestamp(),
         });
 
-        const quedaVencida = saldoNuevo > 0 && esFacturaVencida(facturaActual);
-        const estabaPagada = saldoActual === 0;
+        const quedaVencida =
+          saldoNuevo > 0 && esFacturaVencida(facturaActual);
+        const reabreFactura = saldoActual === 0 && saldoNuevo > 0;
 
         const statsUpdate = {
           cartera_total: increment(montoNota),
@@ -2131,27 +2388,54 @@ export const facturasService = {
           statsUpdate.cartera_vencida = increment(montoNota);
         }
 
-        if (estabaPagada && saldoNuevo > 0) {
+        if (reabreFactura) {
           statsUpdate.facturas_pagadas = increment(-1);
+          statsUpdate.facturas_pendientes = increment(1);
+          statsUpdate.total_liquidado = increment(-montoTotal);
 
           if (quedaVencida) {
             statsUpdate.facturas_vencidas = increment(1);
-          } else {
-            statsUpdate.facturas_pendientes = increment(1);
           }
         }
 
         transaction.set(statsRef, statsUpdate, { merge: true });
 
-        if (solicitudNotaRef && solicitudNotaSnap?.exists()) {
+        if (
+          solicitudNotaRef &&
+          solicitudNota &&
+          resumenNotaRef &&
+          resumenNotaSnap
+        ) {
           transaction.update(solicitudNotaRef, {
             estatus: "Anulada",
             nota_anulada: true,
             anuladaAt: serverTimestamp(),
             anuladaBy: userName || "SU",
             anuladaByUid: actorUid,
-            motivo_anulacion: String(motivoCancelacion || "").trim(),
+            motivo_anulacion: motivoAnulacion,
           });
+
+          transaction.set(
+            resumenNotaRef,
+            {
+              id: facturaActual.cliente_id,
+              cliente_id: facturaActual.cliente_id,
+              cliente:
+                facturaActual.cliente ||
+                cliente.nombre ||
+                solicitudNota.cliente ||
+                "S/N",
+              autorizadas: increment(-1),
+              anuladas: increment(1),
+              ultimo_estado: "Anulada",
+              ultimo_monto_nota: montoNota,
+              ultimo_folio: solicitudNota.folio || facturaActual.folio || "S/F",
+              ultimo_movimiento_at: serverTimestamp(),
+              ultimo_resuelto_por: userName || "SU",
+              activo: true,
+            },
+            { merge: true },
+          );
         }
 
         transaction.set(auditRef, {
@@ -2165,7 +2449,7 @@ export const facturasService = {
           cliente_id: facturaActual.cliente_id,
           monto: montoNota,
           motivo: notaObjetivo.motivo || "Sin motivo",
-          motivo_cancelacion: String(motivoCancelacion || "").trim(),
+          motivo_cancelacion: motivoAnulacion,
           detalle: `El SU anuló/revirtió una nota de crédito por $${montoNota.toLocaleString("es-MX")} de la factura ${facturaActual.folio || "S/F"}. La nota quedó visible como ANULADA en el historial.`,
           serverTime: serverTimestamp(),
         });

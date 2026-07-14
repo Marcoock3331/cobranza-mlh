@@ -94,14 +94,6 @@ const setResumenResolucionNota = (writer, solicitud, decision, actorNombre) => {
   );
 };
 
-const actualizarResumenNotaAutorizada = async (solicitud, actorNombre) => {
-  if (!solicitud?.cliente_id) return;
-
-  const batch = writeBatch(db);
-  setResumenResolucionNota(batch, solicitud, "Autorizado", actorNombre);
-  await batch.commit();
-};
-
 export const solicitudesService = {
   crearSolicitudAumento: async ({
     cliente_id,
@@ -401,7 +393,7 @@ export const solicitudesService = {
       }
 
       if (decision === "Autorizado") {
-        const resultadoAutorizacion = await facturasService.aplicarNotaCredito({
+        return facturasService.aplicarNotaCredito({
           factura: { id: solicitudData.factura_id },
           montoNota: solicitudData.monto_nota,
           motivo: solicitudData.motivo,
@@ -410,15 +402,6 @@ export const solicitudesService = {
           actor_uid,
           solicitudNotaId: solicitudData.id,
         });
-
-        if (resultadoAutorizacion.success) {
-          await actualizarResumenNotaAutorizada(
-            solicitudData,
-            actor_nombre || "SU",
-          );
-        }
-
-        return resultadoAutorizacion;
       }
 
       await runTransaction(db, async (transaction) => {
@@ -433,6 +416,36 @@ export const solicitudesService = {
         if (solicitud.estatus !== "Pendiente") {
           throw new Error(
             `La solicitud ya fue resuelta como ${solicitud.estatus}.`,
+          );
+        }
+
+        if (!solicitud.cliente_id) {
+          throw new Error(
+            "La solicitud no contiene un cliente_id válido.",
+          );
+        }
+
+        const resumenRef = resumenNotaRefPorCliente(solicitud.cliente_id);
+        const resumenSnap = await transaction.get(resumenRef);
+
+        if (!resumenSnap.exists()) {
+          throw new Error(
+            "No existe el resumen de notas de crédito del cliente. Reconstrúyelo antes de rechazar la solicitud.",
+          );
+        }
+
+        const resumen = resumenSnap.data();
+        const pendientesResumen = Number(resumen.pendientes);
+        const rechazadasResumen = Number(resumen.rechazadas);
+
+        if (
+          !Number.isFinite(pendientesResumen) ||
+          pendientesResumen < 1 ||
+          !Number.isFinite(rechazadasResumen) ||
+          rechazadasResumen < 0
+        ) {
+          throw new Error(
+            "El resumen de notas de crédito está desalineado y el rechazo fue bloqueado.",
           );
         }
 
