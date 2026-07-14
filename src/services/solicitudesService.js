@@ -1,5 +1,6 @@
-import { db } from "../config/firebase";
+import { auth, db } from "../config/firebase";
 import { facturasService } from "./facturasService";
+import { lineaCreditoService } from "./lineaCreditoService";
 import {
   collection,
   doc,
@@ -13,7 +14,6 @@ import {
 const SOLICITUDES_COLLECTION = "solicitudes";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
 const RESUMEN_NOTAS_CREDITO_COLLECTION = "notas_credito_resumen_clientes";
-const CLIENTES_COLLECTION = "clientes";
 const ACTIVIDAD_COLLECTION = "actividad";
 
 const mapearErrorFirestore = (error) => {
@@ -34,6 +34,32 @@ const mapearErrorFirestore = (error) => {
   }
 
   return error?.message || "No se pudo completar la operación de crédito.";
+};
+
+const redondearMoneda = (valor) =>
+  Math.round((Number(valor) || 0) * 100) / 100;
+
+const textoLimpio = (valor) => String(valor || "").trim();
+
+const obtenerActorUidSeguro = (actorUidRecibido = "") => {
+  const actorUidSesion = auth.currentUser?.uid || "";
+  const actorUidSolicitado = textoLimpio(actorUidRecibido);
+
+  if (!actorUidSesion) {
+    throw new Error("No existe una sesión activa de Firebase Authentication.");
+  }
+
+  if (actorUidSolicitado && actorUidSolicitado !== actorUidSesion) {
+    console.warn(
+      "actor_uid distinto al UID autenticado. Se utilizará el UID real de Firebase Auth.",
+      {
+        actor_uid_recibido: actorUidSolicitado,
+        uid_auth_real: actorUidSesion,
+      },
+    );
+  }
+
+  return actorUidSesion;
 };
 
 const resumenNotaRefPorCliente = (clienteId) =>
@@ -104,20 +130,21 @@ export const solicitudesService = {
     solicitado_por_uid,
     solicitado_por_nombre,
   }) => {
+    void limite_anterior;
+
     try {
-      if (!cliente_id) {
+      const clienteId = textoLimpio(cliente_id);
+      const actorUid = obtenerActorUidSeguro(solicitado_por_uid);
+      const actorNombre =
+        textoLimpio(solicitado_por_nombre) || "ADMIN";
+      const monto = redondearMoneda(monto_incremento);
+      const motivoLimpio = textoLimpio(motivo);
+
+      if (!clienteId) {
         throw new Error(
           "El identificador del cliente es obligatorio.",
         );
       }
-
-      if (!solicitado_por_uid) {
-        throw new Error(
-          "No se identificó al usuario solicitante.",
-        );
-      }
-
-      const monto = Number(monto_incremento);
 
       if (!Number.isFinite(monto) || monto <= 0) {
         throw new Error(
@@ -125,48 +152,78 @@ export const solicitudesService = {
         );
       }
 
-      const limiteAnterior =
-        Number(limite_anterior) || 0;
+      if (!motivoLimpio) {
+        throw new Error(
+          "El motivo de la solicitud de aumento es obligatorio.",
+        );
+      }
 
       const solicitudRef = doc(
         collection(db, SOLICITUDES_COLLECTION),
       );
-
-      const payload = {
-        id: solicitudRef.id,
-        cliente_id,
-        cliente: String(cliente || "S/N"),
-        monto_incremento: monto,
-        limite_anterior: limiteAnterior,
-        nuevo_limite_propuesto:
-          limiteAnterior + monto,
-        motivo: String(motivo || "").trim(),
-        estatus: "Pendiente",
-        solicitado_por_uid,
-        solicitado_por_nombre:
-          solicitado_por_nombre || "ADMIN",
-        createdAt: serverTimestamp(),
-      };
-
-      const batch = writeBatch(db);
-      batch.set(solicitudRef, payload);
-
+      const clienteRef = doc(db, "clientes", clienteId);
       const actividadRef = doc(
         collection(db, ACTIVIDAD_COLLECTION),
       );
 
-      batch.set(actividadRef, {
-        actor_uid: solicitado_por_uid,
-        usuario:
-          solicitado_por_nombre || "ADMIN",
-        modulo: "Crédito",
-        tipo: "Solicitud de Aumento",
-        cliente: payload.cliente,
-        detalle: `Solicitó un aumento de $${monto.toLocaleString("es-MX")} para la línea de crédito. La solicitud quedó pendiente de autorización.`,
-        serverTime: serverTimestamp(),
-      });
+      const payload = await runTransaction(db, async (transaction) => {
+        const clienteSnap = await transaction.get(clienteRef);
 
-      await batch.commit();
+        if (!clienteSnap.exists()) {
+          throw new Error("El cliente asociado no existe.");
+        }
+
+        const clienteData = clienteSnap.data();
+
+        if (
+          clienteData.activo === false ||
+          clienteData.estatus === "Inactivo"
+        ) {
+          throw new Error(
+            "No se puede solicitar crédito para un cliente inactivo.",
+          );
+        }
+
+        const limiteAnteriorActual = redondearMoneda(
+          clienteData.limite_credito,
+        );
+        const nuevoLimitePropuesto = redondearMoneda(
+          limiteAnteriorActual + monto,
+        );
+        const clienteNombre =
+          textoLimpio(clienteData.nombre) ||
+          textoLimpio(cliente) ||
+          "S/N";
+
+        const solicitudPayload = {
+          id: solicitudRef.id,
+          cliente_id: clienteId,
+          cliente: clienteNombre,
+          monto_incremento: monto,
+          limite_anterior: limiteAnteriorActual,
+          nuevo_limite_propuesto: nuevoLimitePropuesto,
+          motivo: motivoLimpio,
+          estatus: "Pendiente",
+          solicitado_por_uid: actorUid,
+          solicitado_por_nombre: actorNombre,
+          createdAt: serverTimestamp(),
+        };
+
+        transaction.set(solicitudRef, solicitudPayload);
+        transaction.set(actividadRef, {
+          actor_uid: actorUid,
+          usuario: actorNombre,
+          modulo: "Crédito",
+          tipo: "Solicitud de Aumento",
+          cliente: clienteNombre,
+          cliente_id: clienteId,
+          solicitud_id: solicitudRef.id,
+          detalle: `Solicitó un aumento de $${monto.toLocaleString("es-MX")} para la línea de crédito. La solicitud quedó pendiente de autorización.`,
+          serverTime: serverTimestamp(),
+        });
+
+        return solicitudPayload;
+      });
 
       return {
         success: true,
@@ -193,73 +250,20 @@ export const solicitudesService = {
     actor_uid,
     actor_nombre,
   }) => {
-    try {
-      if (!cliente_id) {
-        throw new Error(
-          "El identificador del cliente es obligatorio.",
-        );
-      }
+    void cliente_nombre;
+    void limite_actual;
 
-      if (!actor_uid) {
-        throw new Error(
-          "No se identificó al Súper Usuario responsable.",
-        );
-      }
-
-      const monto = Number(monto_incremento);
-
-      if (!Number.isFinite(monto) || monto <= 0) {
-        throw new Error(
-          "El monto del incremento debe ser mayor a cero.",
-        );
-      }
-
-      const batch = writeBatch(db);
-      const clienteRef = doc(
-        db,
-        CLIENTES_COLLECTION,
-        cliente_id,
-      );
-
-      batch.update(clienteRef, {
-        limite_credito: increment(monto),
-        credito_disponible: increment(monto),
-        updatedAt: serverTimestamp(),
-      });
-
-      const nuevoLimiteTotal =
-        (Number(limite_actual) || 0) + monto;
-
-      const actividadRef = doc(
-        collection(db, ACTIVIDAD_COLLECTION),
-      );
-
-      batch.set(actividadRef, {
-        actor_uid,
-        usuario: actor_nombre || "SU",
-        modulo: "Crédito",
-        tipo: "Aumento Directo",
-        cliente: cliente_nombre || "S/N",
-        detalle: `El SU autorizó directamente un aumento de $${monto.toLocaleString("es-MX")}. El límite quedó en $${nuevoLimiteTotal.toLocaleString("es-MX")}.`,
-        serverTime: serverTimestamp(),
-      });
-
-      await batch.commit();
-
-      return { success: true };
-    } catch (error) {
-      console.error(
-        "Error aplicando aumento directo:",
-        error,
-      );
-
-      return {
-        success: false,
-        error: mapearErrorFirestore(error),
-      };
-    }
+    return lineaCreditoService.registrarMovimientoLineaCredito({
+      cliente_id,
+      tipo_movimiento: "AUMENTO",
+      monto_movimiento: monto_incremento,
+      personal_autoriza: actor_nombre || "SU",
+      motivo: "Aumento directo autorizado por el Súper Usuario.",
+      actor_uid,
+      actor_nombre: actor_nombre || "SU",
+      actor_rol: "SU",
+    });
   },
-
 
   crearSolicitudNotaCredito: async ({
     factura,
@@ -503,91 +507,71 @@ export const solicitudesService = {
     actor_nombre,
   }) => {
     try {
-      if (!solicitud_id || !decision || !actor_uid) {
+      const solicitudId = textoLimpio(solicitud_id);
+      const decisionSegura = textoLimpio(decision);
+      const actorUid = obtenerActorUidSeguro(actor_uid);
+      const actorNombre = textoLimpio(actor_nombre) || "SU";
+
+      if (!solicitudId || !decisionSegura) {
         throw new Error("Faltan datos obligatorios para resolver la solicitud.");
       }
 
-      if (!["Autorizado", "Rechazado"].includes(decision)) {
+      if (!["Autorizado", "Rechazado"].includes(decisionSegura)) {
         throw new Error("La decisión indicada no es válida.");
       }
 
-      await runTransaction(
+      if (decisionSegura === "Autorizado") {
+        return lineaCreditoService.autorizarSolicitudAumento({
+          solicitud_id: solicitudId,
+          actor_uid: actorUid,
+          actor_nombre: actorNombre,
+        });
+      }
+
+      const solicitudRef = doc(
         db,
-        async (transaction) => {
-          const solicitudRef = doc(db, SOLICITUDES_COLLECTION, solicitud_id);
-          const solicitudSnap = await transaction.get(solicitudRef);
-
-          if (!solicitudSnap.exists()) {
-            throw new Error("La solicitud no existe.");
-          }
-
-          const solicitudData = solicitudSnap.data();
-
-          if (solicitudData.estatus !== "Pendiente") {
-            throw new Error(
-              `La solicitud ya fue resuelta como ${solicitudData.estatus}.`,
-            );
-          }
-
-          const montoIncremento = Number(solicitudData.monto_incremento) || 0;
-
-          if (decision === "Autorizado") {
-            if (!Number.isFinite(montoIncremento) || montoIncremento <= 0) {
-              throw new Error("La solicitud contiene un monto inválido.");
-            }
-
-            if (!solicitudData.cliente_id) {
-              throw new Error("La solicitud no contiene un cliente_id válido.");
-            }
-
-            const clienteRef = doc(
-              db,
-              CLIENTES_COLLECTION,
-              solicitudData.cliente_id,
-            );
-            const clienteSnap = await transaction.get(clienteRef);
-
-            if (!clienteSnap.exists()) {
-              throw new Error("El cliente asociado no existe.");
-            }
-
-            const clienteData = clienteSnap.data();
-
-            if (
-              clienteData.activo === false ||
-              clienteData.estatus === "Inactivo"
-            ) {
-              throw new Error(
-                "No se puede autorizar crédito para un cliente inactivo.",
-              );
-            }
-
-            transaction.update(clienteRef, {
-              limite_credito: increment(montoIncremento),
-              credito_disponible: increment(montoIncremento),
-              updatedAt: serverTimestamp(),
-            });
-          }
-
-          transaction.update(solicitudRef, {
-            estatus: decision,
-            resolvedAt: serverTimestamp(),
-            resolvedBy: actor_nombre || "SU",
-            resolvedByUid: actor_uid,
-          });
-
-          transaction.set(doc(collection(db, ACTIVIDAD_COLLECTION)), {
-            actor_uid,
-            usuario: actor_nombre || "SU",
-            modulo: "Crédito",
-            tipo: `Resolución (${decision})`,
-            cliente: solicitudData.cliente || "S/N",
-            detalle: `El SU resolvió como ${decision.toUpperCase()} la solicitud de aumento por $${montoIncremento.toLocaleString("es-MX")}.`,
-            serverTime: serverTimestamp(),
-          });
-        },
-        { maxAttempts: 1 },
+        SOLICITUDES_COLLECTION,
+        solicitudId,
       );
+
+      await runTransaction(db, async (transaction) => {
+        const solicitudSnap = await transaction.get(solicitudRef);
+
+        if (!solicitudSnap.exists()) {
+          throw new Error("La solicitud no existe.");
+        }
+
+        const solicitudData = solicitudSnap.data();
+
+        if (solicitudData.estatus !== "Pendiente") {
+          throw new Error(
+            `La solicitud ya fue resuelta como ${solicitudData.estatus}.`,
+          );
+        }
+
+        const montoIncremento = redondearMoneda(
+          solicitudData.monto_incremento,
+        );
+
+        transaction.update(solicitudRef, {
+          estatus: "Rechazado",
+          resolvedAt: serverTimestamp(),
+          resolvedBy: actorNombre,
+          resolvedByUid: actorUid,
+        });
+
+        transaction.set(doc(collection(db, ACTIVIDAD_COLLECTION)), {
+          actor_uid: actorUid,
+          usuario: actorNombre,
+          modulo: "Crédito",
+          tipo: "Resolución (Rechazado)",
+          cliente: solicitudData.cliente || "S/N",
+          cliente_id: solicitudData.cliente_id || "",
+          solicitud_id: solicitudId,
+          detalle: `El SU resolvió como RECHAZADO la solicitud de aumento por $${montoIncremento.toLocaleString("es-MX")}.`,
+          serverTime: serverTimestamp(),
+        });
+      });
 
       return { success: true };
     } catch (error) {

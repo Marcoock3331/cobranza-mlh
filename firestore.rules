@@ -1,3 +1,4 @@
+// MLH_LINEA_CREDITO_PERMANENTE_V7_STAFF_2026_07_14
 rules_version = '2';
 
 service cloud.firestore {
@@ -23,7 +24,7 @@ service cloud.firestore {
     }
 
     function isStaff() {
-      return userExists()
+      return isAuthenticated()
         && userData().activo == true
         && userData().rol in ['SU', 'ADMIN'];
     }
@@ -264,22 +265,355 @@ service cloud.firestore {
         && getAfter(path).data.activo == true;
     }
 
+    function casiIguales(primero, segundo) {
+      return primero is number
+        && segundo is number
+        && primero >= segundo - 0.011
+        && primero <= segundo + 0.011;
+    }
+
+    function clienteLineaPath(clienteId) {
+      return /databases/$(database)/documents/clientes/$(clienteId);
+    }
+
     function movimientoLineaPath(movimientoId) {
       return /databases/$(database)/documents/lineas_credito_movimientos/$(movimientoId);
     }
 
+    function resumenLineaPath(clienteId) {
+      return /databases/$(database)/documents/lineas_credito_resumen_clientes/$(clienteId);
+    }
+
+    function actividadLineaPath(actividadId) {
+      return /databases/$(database)/documents/actividad/$(actividadId);
+    }
+
+    function solicitudLineaPath(solicitudId) {
+      return /databases/$(database)/documents/solicitudes/$(solicitudId);
+    }
+
+    function tipoMovimientoLineaValido(movimiento) {
+      return (
+          movimiento.tipo_movimiento == 'ALTA_INICIAL'
+          && movimiento.limite_anterior == 0
+          && movimiento.limite_nuevo >= 0
+        )
+        || (
+          movimiento.tipo_movimiento == 'AUMENTO'
+          && movimiento.limite_nuevo > movimiento.limite_anterior
+        )
+        || (
+          movimiento.tipo_movimiento == 'DISMINUCION'
+          && movimiento.limite_nuevo < movimiento.limite_anterior
+        )
+        || (
+          movimiento.tipo_movimiento == 'CORRECCION'
+          && !casiIguales(
+            movimiento.limite_nuevo,
+            movimiento.limite_anterior
+          )
+        );
+    }
+
+    function estadoMovimientoLineaValido(movimiento) {
+      return (
+          movimiento.limite_nuevo == 0
+          && movimiento.deuda_actual == 0
+          && movimiento.credito_disponible_resultante == 0
+          && movimiento.estado_resultante == 'Sin línea'
+        )
+        || (
+          movimiento.limite_nuevo > 0
+          && movimiento.deuda_actual <= movimiento.limite_nuevo
+          && casiIguales(
+            movimiento.credito_disponible_resultante,
+            movimiento.limite_nuevo - movimiento.deuda_actual
+          )
+          && movimiento.estado_resultante == 'Activa'
+        );
+    }
+
+    function clienteAnteriorMovimientoLineaValido(movimiento, clienteId) {
+      let cliente = get(clienteLineaPath(clienteId)).data;
+
+      return cliente.activo == true
+        && cliente.estatus == 'Activo'
+        && cliente.nombre == movimiento.cliente
+        && casiIguales(cliente.limite_credito, movimiento.limite_anterior)
+        && casiIguales(cliente.deuda_actual, movimiento.deuda_actual);
+    }
+
+    function origenMovimientoLineaValido(movimiento, clienteId) {
+      let clientePath = clienteLineaPath(clienteId);
+
+      return (
+          movimiento.origen == 'CLIENTE_NUEVO'
+          && movimiento.solicitud_id == ''
+          && !exists(clientePath)
+          && movimiento.tipo_movimiento == 'ALTA_INICIAL'
+          && movimiento.limite_anterior == 0
+        )
+        || (
+          movimiento.origen == 'MOVIMIENTO_DIRECTO'
+          && movimiento.solicitud_id == ''
+          && clienteAnteriorMovimientoLineaValido(movimiento, clienteId)
+          && (
+            movimiento.tipo_movimiento != 'ALTA_INICIAL'
+            || (
+              movimiento.limite_anterior == 0
+              && movimiento.limite_nuevo > 0
+            )
+          )
+        )
+        || (
+          movimiento.origen == 'SOLICITUD_AUTORIZADA'
+          && movimiento.solicitud_id != ''
+          && movimiento.tipo_movimiento == 'AUMENTO'
+          && clienteAnteriorMovimientoLineaValido(movimiento, clienteId)
+        );
+    }
+
+    function actividadMovimientoLineaValida(movimiento) {
+      let path = actividadLineaPath(movimiento.actividad_id);
+      let actividad = getAfter(path).data;
+
+      return movimiento.actividad_id is string
+        && movimiento.actividad_id != ''
+        && actividad.actor_uid == request.auth.uid
+        && actividad.usuario == movimiento.registrado_por_nombre
+        && actividad.cliente_id == movimiento.cliente_id
+        && actividad.movimiento_linea_credito_id == movimiento.id
+        && actividad.get('solicitud_id', '') == movimiento.solicitud_id
+        && actividad.serverTime is timestamp
+        && (
+          (
+            movimiento.origen == 'CLIENTE_NUEVO'
+            && actividad.modulo == 'Clientes'
+            && actividad.tipo == 'Creación'
+          )
+          ||
+          (
+            movimiento.origen == 'MOVIMIENTO_DIRECTO'
+            && actividad.modulo == 'Crédito'
+            && actividad.tipo == 'Movimiento de Línea'
+          )
+          ||
+          (
+            movimiento.origen == 'SOLICITUD_AUTORIZADA'
+            && actividad.modulo == 'Crédito'
+            && actividad.tipo == 'Autorización de Línea'
+          )
+        );
+    }
+
+    function solicitudAutorizadaMovimientoLineaValida(movimiento) {
+      let solicitudAnterior = get(
+        solicitudLineaPath(movimiento.solicitud_id)
+      ).data;
+
+      // El movimiento valida únicamente el estado anterior de la solicitud.
+      // La regla de actualización de /solicitudes valida después el movimiento.
+      // Así evitamos una dependencia circular solicitud <-> movimiento.
+      return solicitudAnterior.estatus == 'Pendiente'
+        && solicitudAnterior.cliente_id == movimiento.cliente_id
+        && casiIguales(
+          solicitudAnterior.monto_incremento,
+          movimiento.diferencia
+        );
+    }
+
+    function solicitudMovimientoLineaValida(movimiento) {
+      return (
+          movimiento.origen in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO']
+          && movimiento.solicitud_id is string
+          && movimiento.solicitud_id == ''
+        )
+        || (
+          movimiento.origen == 'SOLICITUD_AUTORIZADA'
+          && movimiento.solicitud_id is string
+          && movimiento.solicitud_id != ''
+          && solicitudAutorizadaMovimientoLineaValida(movimiento)
+        );
+    }
+
+    function datosMovimientoLineaValidos(movimiento, movimientoId) {
+      return movimiento.id == movimientoId
+        && movimiento.actor_uid == request.auth.uid
+        && movimiento.cliente_id is string
+        && movimiento.cliente_id != ''
+        && movimiento.cliente is string
+        && movimiento.cliente != ''
+        && movimiento.tipo_movimiento
+          in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION']
+        && movimiento.limite_anterior is number
+        && movimiento.limite_anterior >= 0
+        && movimiento.limite_nuevo is number
+        && movimiento.limite_nuevo >= 0
+        && movimiento.diferencia is number
+        && casiIguales(
+          movimiento.diferencia,
+          movimiento.limite_nuevo - movimiento.limite_anterior
+        )
+        && movimiento.deuda_actual is number
+        && movimiento.deuda_actual >= 0
+        && movimiento.credito_disponible_resultante is number
+        && movimiento.credito_disponible_resultante >= 0
+        && movimiento.estado_resultante in ['Sin línea', 'Activa', 'Excedida']
+        && movimiento.personal_autoriza is string
+        && movimiento.personal_autoriza != ''
+        && movimiento.motivo is string
+        && movimiento.motivo != ''
+        && movimiento.registrado_por_uid == request.auth.uid
+        && movimiento.registrado_por_nombre is string
+        && movimiento.registrado_por_nombre != ''
+        && movimiento.registrado_por_rol == userData().rol
+        && movimiento.origen
+          in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO', 'SOLICITUD_AUTORIZADA']
+        && movimiento.solicitud_id is string
+        && movimiento.actividad_id is string
+        && movimiento.actividad_id != ''
+        && movimiento.createdAt is timestamp
+        && tipoMovimientoLineaValido(movimiento)
+        && estadoMovimientoLineaValido(movimiento)
+        && origenMovimientoLineaValido(movimiento, movimiento.cliente_id);
+    }
+
+    function bundleMovimientoLineaValido(movimiento, movimientoId) {
+      // Orden acíclico de integridad:
+      // actividad -> movimiento -> resumen -> cliente.
+      // El movimiento valida datos locales, cliente anterior y actividad,
+      // pero no vuelve a depender del cliente/resumen posteriores.
+      return datosMovimientoLineaValidos(movimiento, movimientoId)
+        && actividadMovimientoLineaValida(movimiento)
+        && solicitudMovimientoLineaValida(movimiento);
+    }
+
     function movimientoLineaCreditoValido(clienteId) {
-      let movimientoId = request.resource.data.linea_credito_ultimo_movimiento;
+      let movimientoId =
+        request.resource.data.linea_credito_ultimo_movimiento;
+      let movimiento = getAfter(
+        movimientoLineaPath(movimientoId)
+      ).data;
+      let resumen = getAfter(resumenLineaPath(clienteId)).data;
+
+      // El cliente es el último nodo de la cadena: solo puede cambiar cuando
+      // ya existen en el estado final el movimiento y su resumen coincidente.
+      return movimientoId is string
+        && movimientoId != ''
+        && movimiento.id == movimientoId
+        && movimiento.actor_uid == request.auth.uid
+        && movimiento.registrado_por_uid == request.auth.uid
+        && movimiento.registrado_por_rol == userData().rol
+        && movimiento.cliente_id == clienteId
+        && casiIguales(
+          movimiento.limite_nuevo,
+          request.resource.data.limite_credito
+        )
+        && casiIguales(
+          movimiento.deuda_actual,
+          request.resource.data.deuda_actual
+        )
+        && casiIguales(
+          movimiento.credito_disponible_resultante,
+          request.resource.data.credito_disponible
+        )
+        && movimiento.estado_resultante
+          == request.resource.data.linea_credito_estado
+        && movimiento.personal_autoriza
+          == request.resource.data.linea_credito_autorizado_por
+        && resumen.id == clienteId
+        && resumen.cliente_id == clienteId
+        && resumen.ultimo_movimiento_id == movimientoId
+        && resumen.ultimo_registrado_por_uid == request.auth.uid
+        && resumen.ultimo_registrado_por_rol == movimiento.registrado_por_rol
+        && resumen.ultimo_tipo_movimiento == movimiento.tipo_movimiento
+        && casiIguales(
+          resumen.limite_actual,
+          request.resource.data.limite_credito
+        )
+        && casiIguales(
+          resumen.deuda_actual,
+          request.resource.data.deuda_actual
+        )
+        && casiIguales(
+          resumen.credito_disponible_actual,
+          request.resource.data.credito_disponible
+        )
+        && resumen.estado_resultante
+          == request.resource.data.linea_credito_estado
+        && resumen.activo == true;
+    }
+
+    function resumenLineaCreditoCoincideMovimiento(clienteId) {
+      // El resumen depende del movimiento, pero el movimiento ya no depende
+      // del resumen. Esto elimina el ciclo que provocaba permission-denied.
+      let movimientoId = request.resource.data.ultimo_movimiento_id;
       let path = movimientoLineaPath(movimientoId);
+      let movimiento = getAfter(path).data;
 
       return movimientoId is string
         && movimientoId != ''
-        && existsAfter(path)
-        && getAfter(path).data.id == movimientoId
-        && getAfter(path).data.cliente_id == clienteId
-        && getAfter(path).data.actor_uid == request.auth.uid
-        && getAfter(path).data.registrado_por_uid == request.auth.uid
-        && getAfter(path).data.tipo_movimiento in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION'];
+        && movimiento.id == movimientoId
+        && movimiento.actor_uid == request.auth.uid
+        && movimiento.registrado_por_uid == request.auth.uid
+        && movimiento.registrado_por_rol == userData().rol
+        && movimiento.cliente_id == clienteId
+        && request.resource.data.cliente == movimiento.cliente
+        && casiIguales(
+          request.resource.data.limite_actual,
+          movimiento.limite_nuevo
+        )
+        && casiIguales(
+          request.resource.data.deuda_actual,
+          movimiento.deuda_actual
+        )
+        && casiIguales(
+          request.resource.data.credito_disponible_actual,
+          movimiento.credito_disponible_resultante
+        )
+        && request.resource.data.estado_resultante
+          == movimiento.estado_resultante
+        && request.resource.data.ultimo_tipo_movimiento
+          == movimiento.tipo_movimiento
+        && request.resource.data.ultimo_personal_autoriza
+          == movimiento.personal_autoriza
+        && request.resource.data.ultimo_registrado_por
+          == movimiento.registrado_por_nombre
+        && request.resource.data.ultimo_registrado_por_uid
+          == request.auth.uid
+        && request.resource.data.ultimo_registrado_por_rol
+          == movimiento.registrado_por_rol
+        && request.resource.data.ultimo_movimiento_at is timestamp
+        && request.resource.data.activo == true;
+    }
+
+    function solicitudAumentoAutorizadaValida(solicitudId) {
+      let movimientoId =
+        request.resource.data.movimiento_linea_credito_id;
+      let path = movimientoLineaPath(movimientoId);
+      let movimiento = getAfter(path).data;
+
+      return movimientoId is string
+        && movimientoId != ''
+        && movimiento.id == movimientoId
+        && movimiento.actor_uid == request.auth.uid
+        && movimiento.registrado_por_uid == request.auth.uid
+        && movimiento.registrado_por_rol == 'SU'
+        && movimiento.solicitud_id == solicitudId
+        && movimiento.origen == 'SOLICITUD_AUTORIZADA'
+        && movimiento.cliente_id == resource.data.cliente_id
+        && casiIguales(
+          movimiento.diferencia,
+          resource.data.monto_incremento
+        )
+        && casiIguales(
+          request.resource.data.limite_aplicado_anterior,
+          movimiento.limite_anterior
+        )
+        && casiIguales(
+          request.resource.data.limite_aplicado_nuevo,
+          movimiento.limite_nuevo
+        );
     }
 
     // ==========================================
@@ -382,7 +716,12 @@ service cloud.firestore {
         && request.resource.data.estatus == 'Activo'
         && request.resource.data.linea_credito_estado in ['Sin línea', 'Activa', 'Excedida']
         && request.resource.data.linea_credito_autorizado_por is string
+        && request.resource.data.linea_credito_autorizado_por != ''
         && request.resource.data.linea_credito_ultimo_movimiento is string
+        && request.resource.data.linea_credito_actualizada_en is timestamp
+        && request.resource.data.linea_credito_actualizada_por is string
+        && request.resource.data.linea_credito_actualizada_por != ''
+        && request.resource.data.linea_credito_actualizada_por_uid == request.auth.uid
         && movimientoLineaCreditoValido(clienteId);
 
       allow update: if isStaff()
@@ -419,11 +758,26 @@ service cloud.firestore {
         && request.resource.data.limite_credito >= 0
         && request.resource.data.credito_disponible is number
         && request.resource.data.credito_disponible >= 0
-        && request.resource.data.credito_disponible <= request.resource.data.limite_credito
+        && casiIguales(
+          request.resource.data.credito_disponible,
+          request.resource.data.limite_credito - request.resource.data.deuda_actual
+        )
         && request.resource.data.deuda_actual == resource.data.deuda_actual
         && request.resource.data.activo == resource.data.activo
         && request.resource.data.estatus == resource.data.estatus
-        && request.resource.data.linea_credito_estado in ['Sin línea', 'Activa', 'Excedida']
+        && (
+          (
+            request.resource.data.limite_credito == 0
+            && request.resource.data.deuda_actual == 0
+            && request.resource.data.linea_credito_estado == 'Sin línea'
+          )
+          ||
+          (
+            request.resource.data.limite_credito > 0
+            && request.resource.data.deuda_actual <= request.resource.data.limite_credito
+            && request.resource.data.linea_credito_estado == 'Activa'
+          )
+        )
         && request.resource.data.linea_credito_autorizado_por is string
         && request.resource.data.linea_credito_autorizado_por != ''
         && request.resource.data.linea_credito_actualizada_en is timestamp
@@ -644,39 +998,76 @@ service cloud.firestore {
         && resource.data.get('total_notas_credito', 0) == 0;
     }
 
+
     match /solicitudes/{solicitudId} {
       allow read: if isStaff();
 
       allow create: if isADMIN()
         && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'monto_incremento', 'limite_anterior', 
-          'nuevo_limite_propuesto', 'motivo', 'estatus', 'solicitado_por_uid', 
+          'id', 'cliente_id', 'cliente', 'monto_incremento', 'limite_anterior',
+          'nuevo_limite_propuesto', 'motivo', 'estatus', 'solicitado_por_uid',
           'solicitado_por_nombre', 'createdAt'
         ])
         && request.resource.data.id == solicitudId
         && request.resource.data.cliente_id is string
         && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente is string
+        && exists(clienteLineaPath(request.resource.data.cliente_id))
+        && get(clienteLineaPath(request.resource.data.cliente_id)).data.activo == true
+        && get(clienteLineaPath(request.resource.data.cliente_id)).data.estatus == 'Activo'
+        && request.resource.data.cliente
+          == get(clienteLineaPath(request.resource.data.cliente_id)).data.nombre
         && request.resource.data.monto_incremento is number
         && request.resource.data.monto_incremento > 0
         && request.resource.data.limite_anterior is number
         && request.resource.data.limite_anterior >= 0
+        && casiIguales(
+          request.resource.data.limite_anterior,
+          get(clienteLineaPath(request.resource.data.cliente_id)).data.limite_credito
+        )
         && request.resource.data.nuevo_limite_propuesto is number
-        && request.resource.data.nuevo_limite_propuesto == request.resource.data.limite_anterior + request.resource.data.monto_incremento
+        && casiIguales(
+          request.resource.data.nuevo_limite_propuesto,
+          request.resource.data.limite_anterior
+            + request.resource.data.monto_incremento
+        )
+        && request.resource.data.motivo is string
+        && request.resource.data.motivo != ''
         && request.resource.data.estatus == 'Pendiente'
         && request.resource.data.solicitado_por_uid == request.auth.uid
         && request.resource.data.solicitado_por_nombre is string
+        && request.resource.data.solicitado_por_nombre != ''
         && request.resource.data.createdAt is timestamp;
 
       allow update: if isSU()
         && resource.data.estatus == 'Pendiente'
-        && request.resource.data.estatus in ['Autorizado', 'Rechazado']
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid'
-          ])
-        && request.resource.data.resolvedAt is timestamp
-        && request.resource.data.resolvedBy is string
-        && request.resource.data.resolvedByUid == request.auth.uid;
+        && (
+          (
+            request.resource.data.estatus == 'Rechazado'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid'
+            ])
+            && request.resource.data.resolvedAt is timestamp
+            && request.resource.data.resolvedBy is string
+            && request.resource.data.resolvedBy != ''
+            && request.resource.data.resolvedByUid == request.auth.uid
+          )
+          ||
+          (
+            request.resource.data.estatus == 'Autorizado'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid',
+              'movimiento_linea_credito_id', 'limite_aplicado_anterior',
+              'limite_aplicado_nuevo'
+            ])
+            && request.resource.data.resolvedAt is timestamp
+            && request.resource.data.resolvedBy is string
+            && request.resource.data.resolvedBy != ''
+            && request.resource.data.resolvedByUid == request.auth.uid
+            && request.resource.data.limite_aplicado_anterior is number
+            && request.resource.data.limite_aplicado_nuevo is number
+            && solicitudAumentoAutorizadaValida(solicitudId)
+          )
+        );
 
       allow delete: if false;
     }
@@ -848,80 +1239,57 @@ service cloud.firestore {
       allow delete: if isSU();
     }
 
+
     match /lineas_credito_movimientos/{movimientoId} {
       allow read: if isStaff();
 
       allow create: if isStaff()
         && actorValido()
         && request.resource.data.keys().hasOnly([
-          'id', 'actor_uid', 'cliente_id', 'cliente', 'tipo_movimiento', 
-          'limite_anterior', 'limite_nuevo', 'diferencia', 'deuda_actual', 
-          'credito_disponible_resultante', 'estado_resultante', 'personal_autoriza', 
-          'motivo', 'registrado_por_uid', 'registrado_por_nombre', 
-          'registrado_por_rol', 'createdAt'
+          'id', 'actor_uid', 'cliente_id', 'cliente', 'tipo_movimiento',
+          'limite_anterior', 'limite_nuevo', 'diferencia', 'deuda_actual',
+          'credito_disponible_resultante', 'estado_resultante',
+          'personal_autoriza', 'motivo', 'registrado_por_uid',
+          'registrado_por_nombre', 'registrado_por_rol', 'origen',
+          'solicitud_id', 'actividad_id', 'createdAt'
         ])
-        && request.resource.data.id == movimientoId
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente is string
-        && request.resource.data.tipo_movimiento in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION']
-        && request.resource.data.limite_anterior is number
-        && request.resource.data.limite_anterior >= 0
-        && request.resource.data.limite_nuevo is number
-        && request.resource.data.limite_nuevo >= 0
-        && request.resource.data.diferencia is number
-        && request.resource.data.deuda_actual is number
-        && request.resource.data.deuda_actual >= 0
-        && request.resource.data.credito_disponible_resultante is number
-        && request.resource.data.credito_disponible_resultante >= 0
-        && request.resource.data.estado_resultante in ['Sin línea', 'Activa', 'Excedida']
-        && request.resource.data.personal_autoriza is string
-        && request.resource.data.personal_autoriza != ''
-        && request.resource.data.motivo is string
-        && request.resource.data.motivo != ''
-        && request.resource.data.registrado_por_uid == request.auth.uid
-        && request.resource.data.registrado_por_nombre is string
-        && request.resource.data.registrado_por_rol in ['SU', 'ADMIN']
-        && request.resource.data.createdAt is timestamp;
+        && bundleMovimientoLineaValido(request.resource.data, movimientoId);
 
       allow update, delete: if false;
     }
 
     match /lineas_credito_resumen_clientes/{clienteId} {
-      allow read: if isSU();
+      allow read: if isStaff();
 
-      allow create, update: if isStaff()
+      allow create: if isStaff()
         && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual', 
-          'credito_disponible_actual', 'estado_resultante', 'ultimo_tipo_movimiento', 
-          'ultimo_personal_autoriza', 'ultimo_registrado_por', 'ultimo_registrado_por_uid', 
-          'ultimo_registrado_por_rol', 'ultimo_movimiento_id', 'ultimo_movimiento_at', 
-          'total_movimientos', 'activo'
+          'id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual',
+          'credito_disponible_actual', 'estado_resultante',
+          'ultimo_tipo_movimiento', 'ultimo_personal_autoriza',
+          'ultimo_registrado_por', 'ultimo_registrado_por_uid',
+          'ultimo_registrado_por_rol', 'ultimo_movimiento_id',
+          'ultimo_movimiento_at', 'total_movimientos', 'activo'
         ])
         && request.resource.data.id == clienteId
         && request.resource.data.cliente_id == clienteId
-        && request.resource.data.cliente is string
-        && request.resource.data.cliente != ''
-        && request.resource.data.limite_actual is number
-        && request.resource.data.limite_actual >= 0
-        && request.resource.data.deuda_actual is number
-        && request.resource.data.deuda_actual >= 0
-        && request.resource.data.credito_disponible_actual is number
-        && request.resource.data.credito_disponible_actual >= 0
-        && request.resource.data.estado_resultante in ['Sin línea', 'Activa', 'Excedida']
-        && request.resource.data.ultimo_tipo_movimiento in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION']
-        && request.resource.data.ultimo_personal_autoriza is string
-        && request.resource.data.ultimo_personal_autoriza != ''
-        && request.resource.data.ultimo_registrado_por is string
-        // ✅ FIX: Se permite que el UID sea el del usuario actual o el del registro anterior para no bloquear la anulación de abonos.
-        && (request.resource.data.ultimo_registrado_por_uid == request.auth.uid || request.resource.data.ultimo_registrado_por_uid == resource.data.ultimo_registrado_por_uid)
-        && request.resource.data.ultimo_registrado_por_rol in ['SU', 'ADMIN']
-        && request.resource.data.ultimo_movimiento_id is string
-        && request.resource.data.ultimo_movimiento_id != ''
-        && request.resource.data.ultimo_movimiento_at is timestamp
-        && request.resource.data.total_movimientos is number
-        && request.resource.data.total_movimientos >= 1
-        && request.resource.data.activo is bool;
+        && request.resource.data.total_movimientos == 1
+        && resumenLineaCreditoCoincideMovimiento(clienteId);
+
+      allow update: if isStaff()
+        && request.resource.data.keys().hasOnly([
+          'id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual',
+          'credito_disponible_actual', 'estado_resultante',
+          'ultimo_tipo_movimiento', 'ultimo_personal_autoriza',
+          'ultimo_registrado_por', 'ultimo_registrado_por_uid',
+          'ultimo_registrado_por_rol', 'ultimo_movimiento_id',
+          'ultimo_movimiento_at', 'total_movimientos', 'activo'
+        ])
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && resource.data.total_movimientos is number
+        && request.resource.data.total_movimientos
+          == resource.data.total_movimientos + 1
+        && resumenLineaCreditoCoincideMovimiento(clienteId);
 
       allow delete: if false;
     }

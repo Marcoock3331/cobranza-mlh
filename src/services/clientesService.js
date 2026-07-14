@@ -163,6 +163,8 @@ export const clientesService = {
         );
       }
 
+      const actividadRef = doc(collection(db, "actividad"));
+
       batch.set(nuevoDocRef, clienteProcesado);
 
       batch.set(movimientoLineaRef, {
@@ -182,6 +184,9 @@ export const clientesService = {
         registrado_por_uid: actor_uid,
         registrado_por_nombre: userName || "Sistema",
         registrado_por_rol: rolResponsable,
+        origen: "CLIENTE_NUEVO",
+        solicitud_id: "",
+        actividad_id: actividadRef.id,
         createdAt: serverTimestamp(),
       });
 
@@ -204,14 +209,15 @@ export const clientesService = {
         activo: true,
       });
 
-      const actividadRef = doc(collection(db, "actividad"));
-
       batch.set(actividadRef, {
         actor_uid,
         usuario: userName || "Sistema",
         modulo: "Clientes",
         tipo: "Creación",
         cliente: clienteProcesado.nombre,
+        cliente_id: nuevoDocRef.id,
+        movimiento_linea_credito_id: movimientoLineaRef.id,
+        personal_autoriza: autorizadoPor,
         detalle: `Se registró un nuevo cliente por ${rolResponsable} con un límite de crédito inicial de $${limiteAsignado.toLocaleString("es-MX")} y pagaré inicial: ${pagareInicial ? "Sí" : "No"}.`,
         serverTime: serverTimestamp(),
       });
