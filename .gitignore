@@ -58,3 +58,5 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+# Reportes temporales generados por Repomix
+repomix-*.md
