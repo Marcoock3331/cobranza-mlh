@@ -1,4 +1,4 @@
-// MLH_LINEA_CREDITO_PERMANENTE_V7_STAFF_2026_07_14
+// MLH_PASO7A_FACTURA_TRANSACCIONAL_V1_2026_07_14
 rules_version = '2';
 
 service cloud.firestore {
@@ -162,6 +162,7 @@ service cloud.firestore {
     }
 
 
+
     function resumenNotaPath(clienteId) {
       return /databases/$(database)/documents/notas_credito_resumen_clientes/$(clienteId);
     }
@@ -271,6 +272,112 @@ service cloud.firestore {
         && primero >= segundo - 0.011
         && primero <= segundo + 0.011;
     }
+
+    function grupoClienteDocumento(cliente) {
+      return cliente.keys().hasAny(['grupo'])
+        && cliente.grupo is string
+        && cliente.grupo != ''
+          ? cliente.grupo
+          : 'GENERAL';
+    }
+
+    function clienteCreacionFacturaValido() {
+      let clientePath = /databases/$(database)/documents/clientes/$(request.resource.data.cliente_id);
+      let clienteAntes = get(clientePath).data;
+      let clienteDespues = getAfter(clientePath).data;
+      let monto = request.resource.data.monto_total;
+
+      return exists(clientePath)
+        && clienteAntes.activo == true
+        && clienteAntes.estatus == 'Activo'
+        && clienteAntes.nombre == request.resource.data.cliente
+        && grupoClienteDocumento(clienteAntes) == request.resource.data.grupo
+        && clienteAntes.limite_credito is number
+        && clienteAntes.limite_credito > 0
+        && clienteAntes.linea_credito_estado == 'Activa'
+        && clienteAntes.deuda_actual is number
+        && clienteAntes.deuda_actual >= 0
+        && clienteAntes.credito_disponible is number
+        && clienteAntes.credito_disponible >= 0
+        && casiIguales(
+          clienteAntes.credito_disponible,
+          clienteAntes.limite_credito - clienteAntes.deuda_actual
+        )
+        && monto <= clienteAntes.credito_disponible + 0.011
+        && clienteDespues.diff(clienteAntes).affectedKeys().hasOnly([
+          'deuda_actual', 'credito_disponible', 'updatedAt'
+        ])
+        && casiIguales(
+          clienteDespues.deuda_actual,
+          clienteAntes.deuda_actual + monto
+        )
+        && casiIguales(
+          clienteDespues.credito_disponible,
+          clienteAntes.credito_disponible - monto
+        )
+        && clienteDespues.updatedAt is timestamp;
+    }
+
+    function auditoriaCreacionFacturaValida(facturaId) {
+      let auditId = request.resource.data.creacion_audit_id;
+      let auditPath = /databases/$(database)/documents/actividad/$(auditId);
+      let auditoria = getAfter(auditPath).data;
+
+      return auditId is string
+        && auditId != ''
+        && request.resource.data.creacion_actor_uid == request.auth.uid
+        && request.resource.data.creacion_at is timestamp
+        && auditoria.actor_uid == request.auth.uid
+        && auditoria.modulo == 'Facturación'
+        && auditoria.tipo == 'Creación'
+        && auditoria.factura_id == facturaId
+        && auditoria.folio == request.resource.data.folio
+        && auditoria.cliente_id == request.resource.data.cliente_id
+        && auditoria.cliente == request.resource.data.cliente
+        && auditoria.grupo == request.resource.data.grupo
+        && casiIguales(
+          auditoria.monto_total,
+          request.resource.data.monto_total
+        )
+        && auditoria.detalle is string
+        && auditoria.detalle != ''
+        && auditoria.serverTime is timestamp;
+    }
+
+    function metricasCreacionFacturaValidas() {
+      let path = /databases/$(database)/documents/metricas_globales/stats_actuales;
+      let antes = get(path).data;
+      let despues = getAfter(path).data;
+      let monto = request.resource.data.monto_total;
+      let incrementoVencida = request.resource.data.estatus == 'Vencida' ? 1 : 0;
+      let montoVencido = request.resource.data.estatus == 'Vencida' ? monto : 0;
+
+      return exists(path)
+        && despues.diff(antes).affectedKeys().hasOnly([
+          'facturas_total', 'facturas_pendientes', 'facturas_vencidas',
+          'cartera_total', 'cartera_vencida', 'total_facturado',
+          'ultima_actualizacion'
+        ])
+        && despues.facturas_total == antes.get('facturas_total', 0) + 1
+        && despues.facturas_pendientes
+          == antes.get('facturas_pendientes', 0) + 1
+        && despues.facturas_vencidas
+          == antes.get('facturas_vencidas', 0) + incrementoVencida
+        && casiIguales(
+          despues.cartera_total,
+          antes.get('cartera_total', 0) + monto
+        )
+        && casiIguales(
+          despues.cartera_vencida,
+          antes.get('cartera_vencida', 0) + montoVencido
+        )
+        && casiIguales(
+          despues.total_facturado,
+          antes.get('total_facturado', 0) + monto
+        )
+        && despues.ultima_actualizacion is timestamp;
+    }
+
 
     function clienteLineaPath(clienteId) {
       return /databases/$(database)/documents/clientes/$(clienteId);
@@ -820,24 +927,46 @@ service cloud.firestore {
       allow read: if isStaff();
 
       allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+          'id', 'cliente_id', 'cliente', 'grupo', 'folio', 'monto_total',
+          'monto_pagado', 'saldo_pendiente', 'moneda', 'emision',
+          'vencimiento', 'observaciones', 'estatus', 'abonos',
+          'notas_credito', 'total_notas_credito', 'creacion_audit_id',
+          'creacion_actor_uid', 'creacion_at', 'createdAt'
+        ])
         && request.resource.data.id == facturaId
         && request.resource.data.cliente_id is string
         && request.resource.data.cliente_id != ''
         && request.resource.data.cliente is string
+        && request.resource.data.cliente != ''
+        && request.resource.data.grupo is string
+        && request.resource.data.grupo != ''
         && request.resource.data.folio is string
+        && request.resource.data.folio != ''
         && request.resource.data.monto_total is number
         && request.resource.data.monto_total > 0
         && request.resource.data.monto_pagado is number
         && request.resource.data.monto_pagado == 0
         && request.resource.data.saldo_pendiente is number
-        && request.resource.data.saldo_pendiente == request.resource.data.monto_total
-        && request.resource.data.estatus == 'Pendiente'
+        && casiIguales(
+          request.resource.data.saldo_pendiente,
+          request.resource.data.monto_total
+        )
+        && request.resource.data.moneda == 'MXN'
+        && request.resource.data.estatus in ['Pendiente', 'Vencida']
         && request.resource.data.abonos is list
         && request.resource.data.abonos.size() == 0
+        && request.resource.data.notas_credito is list
+        && request.resource.data.notas_credito.size() == 0
+        && request.resource.data.total_notas_credito == 0
         && request.resource.data.emision is timestamp
         && request.resource.data.vencimiento is timestamp
         && request.resource.data.vencimiento >= request.resource.data.emision
-        && request.resource.data.createdAt is timestamp;
+        && request.resource.data.observaciones is string
+        && request.resource.data.createdAt is timestamp
+        && clienteCreacionFacturaValido()
+        && auditoriaCreacionFacturaValida(facturaId)
+        && metricasCreacionFacturaValidas();
 
       // Registrar abono: SU y ADMIN
       allow update: if isStaff()
@@ -924,6 +1053,10 @@ service cloud.firestore {
         && request.resource.data.cliente_id is string
         && request.resource.data.cliente_id != ''
         && request.resource.data.cliente == get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data.nombre
+        && request.resource.data.grupo
+          == grupoClienteDocumento(
+            get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data
+          )
         && request.resource.data.folio is string
         && request.resource.data.folio != ''
         && request.resource.data.monto_total is number

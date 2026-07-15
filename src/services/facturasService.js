@@ -11,7 +11,6 @@ import {
   serverTimestamp,
   Timestamp,
   where,
-  writeBatch,
 } from "firebase/firestore";
 
 import {
@@ -294,7 +293,6 @@ const esMismaSemana = (fechaTarget) => {
 export const facturasService = {
   crearFactura: async ({
     formData,
-    clientes,
     userName,
     actor_uid,
   }) => {
@@ -307,26 +305,18 @@ export const facturasService = {
 
     try {
       const actorUid = obtenerActorUidSeguro(actor_uid);
-      const clienteBD = clientes.find(
-        (cliente) => cliente.id === formData.cliente_id,
-      );
+      const clienteId = String(formData?.cliente_id || "").trim();
+      const montoTotal = redondearMoneda(formData?.monto_total);
+      const folio = String(formData?.folio || "").trim();
+      const observaciones = String(
+        formData?.observaciones || "",
+      ).trim();
 
-      if (!clienteBD) {
+      if (!clienteId) {
         throw new Error(
-          "El cliente seleccionado no está enlazado correctamente mediante cliente_id.",
+          "Selecciona un cliente enlazado correctamente mediante cliente_id.",
         );
       }
-
-      if (
-        clienteBD.activo === false ||
-        clienteBD.estatus === "Inactivo"
-      ) {
-        throw new Error(
-          "No se pueden crear facturas para un cliente inactivo.",
-        );
-      }
-
-      const montoTotal = redondearMoneda(formData.monto_total);
 
       if (montoTotal <= 0) {
         throw new Error(
@@ -334,43 +324,17 @@ export const facturasService = {
         );
       }
 
-      const limiteCredito =
-        Number(clienteBD.limite_credito) || 0;
-
-      const deudaActual =
-        Number(clienteBD.deuda_actual) || 0;
-
-      const creditoDisponibleGuardado = Number(
-        clienteBD.credito_disponible,
-      );
-
-      const creditoDisponible = Number.isFinite(
-        creditoDisponibleGuardado,
-      )
-        ? creditoDisponibleGuardado
-        : Math.max(0, limiteCredito - deudaActual);
-
-      if (limiteCredito <= 0) {
+      if (!folio) {
         throw new Error(
-          "El cliente no tiene una línea de crédito asignada.",
-        );
-      }
-
-      if (montoTotal > creditoDisponible) {
-        throw new Error(
-          `El cliente solo dispone de $${Math.max(
-            0,
-            creditoDisponible,
-          ).toLocaleString("es-MX")} de crédito.`,
+          "El número o folio de la factura es obligatorio.",
         );
       }
 
       const fechaEmision = convertirFechaFormulario(
-        formData.emision,
+        formData?.emision,
       );
-
       const fechaVencimiento = convertirFechaFormulario(
-        formData.vencimiento,
+        formData?.vencimiento,
       );
 
       if (fechaVencimiento < fechaEmision) {
@@ -379,93 +343,223 @@ export const facturasService = {
         );
       }
 
-      const batch = writeBatch(db);
       const facturaRef = doc(
         collection(db, FACTURAS_COLLECTION),
       );
-
-      const payload = {
-        id: facturaRef.id,
-        cliente_id: clienteBD.id,
-        cliente: clienteBD.nombre || formData.cliente || "S/N",
-        grupo: String(
-          formData.grupo || clienteBD.grupo || "General",
-        ),
-        folio: String(formData.folio || "").trim(),
-        monto_total: montoTotal,
-        monto_pagado: 0,
-        saldo_pendiente: montoTotal,
-        moneda: "MXN",
-        emision: Timestamp.fromDate(fechaEmision),
-        vencimiento: Timestamp.fromDate(fechaVencimiento),
-        observaciones: String(
-          formData.observaciones || "",
-        ).trim(),
-        estatus: "Pendiente",
-        abonos: [],
-        notas_credito: [],
-        total_notas_credito: 0,
-        createdAt: serverTimestamp(),
-      };
-
-      if (!payload.folio) {
-        throw new Error(
-          "El número o folio de la factura es obligatorio.",
-        );
-      }
-
-      batch.set(facturaRef, payload);
-
       const clienteRef = doc(
         db,
         CLIENTES_COLLECTION,
-        clienteBD.id,
+        clienteId,
       );
-
-      batch.update(clienteRef, {
-        deuda_actual: increment(montoTotal),
-        credito_disponible: increment(-montoTotal),
-        updatedAt: serverTimestamp(),
-      });
-
-      const naceVencida = esFacturaVencida(payload);
-
-      const statsPayload = {
-        facturas_total: increment(1),
-        facturas_pendientes: increment(1),
-        cartera_total: increment(montoTotal),
-        total_facturado: increment(montoTotal),
-        ultima_actualizacion: serverTimestamp(),
-      };
-
-      if (naceVencida) {
-        statsPayload.facturas_vencidas = increment(1);
-        statsPayload.cartera_vencida = increment(montoTotal);
-      }
-
       const statsRef = doc(
         db,
         STATS_COLLECTION,
         STATS_DOC,
       );
-
-      batch.set(statsRef, statsPayload, { merge: true });
-
       const auditRef = doc(
         collection(db, ACTIVIDAD_COLLECTION),
       );
 
-      batch.set(auditRef, {
-        actor_uid: actorUid,
-        usuario: userName || "Usuario",
-        modulo: "Facturación",
-        tipo: "Creación",
-        cliente: payload.cliente,
-        detalle: `Se generó la factura ${payload.folio} por $${montoTotal.toLocaleString("es-MX")}.`,
-        serverTime: serverTimestamp(),
-      });
+      const payload = await runTransaction(db, async (transaction) => {
+        const clienteSnapshot = await transaction.get(clienteRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
-      await batch.commit();
+        if (!clienteSnapshot.exists()) {
+          throw new Error(
+            "El cliente seleccionado ya no existe en Firestore.",
+          );
+        }
+
+        if (!statsSnapshot.exists()) {
+          throw new Error(
+            "Las métricas globales no están inicializadas. Reconstrúyelas antes de emitir facturas.",
+          );
+        }
+
+        const clienteActual = clienteSnapshot.data();
+
+        if (
+          clienteActual.activo === false ||
+          clienteActual.estatus === "Inactivo"
+        ) {
+          throw new Error(
+            "No se pueden crear facturas para un cliente inactivo.",
+          );
+        }
+
+        const nombreCliente = String(
+          clienteActual.nombre || "",
+        ).trim();
+        const grupoCliente =
+          String(clienteActual.grupo || "").trim() || "GENERAL";
+        const limiteCreditoGuardado = Number(
+          clienteActual.limite_credito,
+        );
+        const deudaActualGuardada = Number(
+          clienteActual.deuda_actual,
+        );
+        const creditoDisponibleGuardado = Number(
+          clienteActual.credito_disponible,
+        );
+
+        if (
+          !Number.isFinite(limiteCreditoGuardado) ||
+          !Number.isFinite(deudaActualGuardada) ||
+          !Number.isFinite(creditoDisponibleGuardado)
+        ) {
+          throw new Error(
+            "La línea de crédito del cliente contiene valores inválidos.",
+          );
+        }
+
+        const limiteCredito = redondearMoneda(
+          limiteCreditoGuardado,
+        );
+        const deudaActual = redondearMoneda(
+          deudaActualGuardada,
+        );
+        const creditoDisponible = redondearMoneda(
+          creditoDisponibleGuardado,
+        );
+        const disponibleEsperado = redondearMoneda(
+          limiteCredito - deudaActual,
+        );
+
+        if (!nombreCliente) {
+          throw new Error(
+            "El cliente seleccionado no tiene un nombre válido.",
+          );
+        }
+
+        if (
+          limiteCredito <= 0 ||
+          clienteActual.linea_credito_estado !== "Activa"
+        ) {
+          throw new Error(
+            "El cliente no tiene una línea de crédito activa.",
+          );
+        }
+
+        if (
+          deudaActual < 0 ||
+          creditoDisponible < 0 ||
+          Math.abs(creditoDisponible - disponibleEsperado) > 0.011
+        ) {
+          throw new Error(
+            "La línea de crédito del cliente está desalineada. Revisa límite, deuda y disponible antes de facturar.",
+          );
+        }
+
+        if (montoTotal > creditoDisponible) {
+          throw new Error(
+            `El cliente solo dispone de $${Math.max(
+              0,
+              creditoDisponible,
+            ).toLocaleString("es-MX")} de crédito.`,
+          );
+        }
+
+        const nuevaDeuda = redondearMoneda(
+          deudaActual + montoTotal,
+        );
+        const nuevoDisponible = redondearMoneda(
+          creditoDisponible - montoTotal,
+        );
+        const fechaEmisionTimestamp =
+          Timestamp.fromDate(fechaEmision);
+        const fechaVencimientoTimestamp =
+          Timestamp.fromDate(fechaVencimiento);
+        const estatusInicial = calcularEstatusFinanciero({
+          saldo: montoTotal,
+          vencimiento: fechaVencimiento,
+        });
+
+        const facturaPayload = {
+          id: facturaRef.id,
+          cliente_id: clienteSnapshot.id,
+          cliente: nombreCliente,
+          grupo: grupoCliente,
+          folio,
+          monto_total: montoTotal,
+          monto_pagado: 0,
+          saldo_pendiente: montoTotal,
+          moneda: "MXN",
+          emision: fechaEmisionTimestamp,
+          vencimiento: fechaVencimientoTimestamp,
+          observaciones,
+          estatus: estatusInicial,
+          abonos: [],
+          notas_credito: [],
+          total_notas_credito: 0,
+          creacion_audit_id: auditRef.id,
+          creacion_actor_uid: actorUid,
+          creacion_at: serverTimestamp(),
+          createdAt: serverTimestamp(),
+        };
+
+        const statsActual = statsSnapshot.data();
+        const leerMetrica = (campo) => {
+          const valor = Number(statsActual?.[campo] ?? 0);
+
+          if (!Number.isFinite(valor) || valor < 0) {
+            throw new Error(
+              `La métrica ${campo} contiene un valor inválido.`,
+            );
+          }
+
+          return valor;
+        };
+
+        const naceVencida = estatusInicial === "Vencida";
+        const statsPayload = {
+          facturas_total: leerMetrica("facturas_total") + 1,
+          facturas_pendientes:
+            leerMetrica("facturas_pendientes") + 1,
+          facturas_vencidas:
+            leerMetrica("facturas_vencidas") +
+            (naceVencida ? 1 : 0),
+          cartera_total: redondearMoneda(
+            leerMetrica("cartera_total") + montoTotal,
+          ),
+          cartera_vencida: redondearMoneda(
+            leerMetrica("cartera_vencida") +
+              (naceVencida ? montoTotal : 0),
+          ),
+          total_facturado: redondearMoneda(
+            leerMetrica("total_facturado") + montoTotal,
+          ),
+          ultima_actualizacion: serverTimestamp(),
+        };
+
+        transaction.set(facturaRef, facturaPayload);
+
+        transaction.update(clienteRef, {
+          deuda_actual: nuevaDeuda,
+          credito_disponible: nuevoDisponible,
+          updatedAt: serverTimestamp(),
+        });
+
+        transaction.update(statsRef, statsPayload);
+
+        transaction.set(auditRef, {
+          actor_uid: actorUid,
+          usuario: userName || "Usuario",
+          modulo: "Facturación",
+          tipo: "Creación",
+          factura_id: facturaRef.id,
+          folio,
+          cliente_id: clienteSnapshot.id,
+          cliente: nombreCliente,
+          grupo: grupoCliente,
+          monto_total: montoTotal,
+          detalle: `Se generó la factura ${folio} por $${montoTotal.toLocaleString(
+            "es-MX",
+          )}.`,
+          serverTime: serverTimestamp(),
+        });
+
+        return facturaPayload;
+      });
 
       return {
         success: true,
@@ -1496,7 +1590,8 @@ export const facturasService = {
         const valoresNuevos = {
           cliente_id: clienteNuevoId,
           cliente: clienteNuevo.nombre || "S/N",
-          grupo: String(formData?.grupo || clienteNuevo.grupo || "General"),
+          grupo:
+            String(clienteNuevo.grupo || "").trim() || "GENERAL",
           folio: folioNuevo,
           monto_total: montoNuevo,
           emision: convertirFechaAString(fechaEmision),

@@ -34,36 +34,11 @@ import {
 } from "lucide-react";
 
 const FACTURAS_POR_PAGINA = 25;
-const GRUPOS_FACTURA = [
-  "Carpintería",
-  "Cruce",
-  "Familiares",
-  "General",
-  "Prioridad",
-  "IHB",
-  "RC Intercomerce",
-  "Torre Las Americas",
-  "Nuevo",
-];
 
-const normalizarGrupoFactura = (valor = "") => {
-  const normalizado = valor
-    .toString()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toUpperCase();
+const obtenerGrupoCliente = (cliente = {}) => {
+  const grupo = String(cliente?.grupo || "").trim();
 
-  return (
-    GRUPOS_FACTURA.find(
-      (grupo) =>
-        grupo
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toUpperCase() === normalizado,
-    ) || "General"
-  );
+  return grupo || "GENERAL";
 };
 
 const normalizarTextoBusqueda = (valor = "") =>
@@ -239,7 +214,6 @@ const crearFormularioFactura = (factura = null) => {
     return {
       cliente_id: "",
       cliente: "",
-      grupo: "General",
       folio: "",
       monto_total: "",
       moneda: "MXN",
@@ -252,7 +226,6 @@ const crearFormularioFactura = (factura = null) => {
   return {
     cliente_id: factura.cliente_id || "",
     cliente: factura.cliente || "",
-    grupo: normalizarGrupoFactura(factura.grupo),
     folio: factura.folio || "",
     monto_total: factura.monto_total ?? "",
     moneda: "MXN",
@@ -454,6 +427,14 @@ export default function Facturacion() {
         cliente: c,
       }));
   }, [clientes]);
+
+  const clienteFacturaSeleccionado = useMemo(
+    () =>
+      (clientes || []).find(
+        (cliente) => cliente.id === invoiceForm.cliente_id,
+      ) || null,
+    [clientes, invoiceForm.cliente_id],
+  );
 
   const clientesSugeridos = useMemo(() => {
     const texto = normalizarTextoBusqueda(busqueda);
@@ -676,7 +657,6 @@ export default function Facturacion() {
       const payloadFactura = {
         cliente_id: clienteBD.id,
         cliente: clienteBD.nombre,
-        grupo: normalizarGrupoFactura(invoiceForm.grupo),
         folio: invoiceForm.folio.trim(),
         monto_total: nuevoMonto,
         moneda: "MXN",
@@ -2416,9 +2396,6 @@ export default function Facturacion() {
                               ...invoiceForm,
                               cliente_id: selected ? selected.cliente.id : "",
                               cliente: selected ? selected.cliente.nombre : "",
-                              grupo: selected
-                                ? normalizarGrupoFactura(selected.cliente.grupo)
-                                : invoiceForm.grupo,
                             })
                           }
                           placeholder="Buscar cliente..."
@@ -2451,24 +2428,17 @@ export default function Facturacion() {
 
                       <div>
                         <label className="block text-[10px] font-black text-gray-500 uppercase mb-1.5">
-                          Grupo
+                          Grupo asignado
                         </label>
-                        <select
-                          value={invoiceForm.grupo}
-                          onChange={(e) =>
-                            setInvoiceForm({
-                              ...invoiceForm,
-                              grupo: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-3 md:py-2 border border-gray-300 rounded-xl md:rounded-lg focus:outline-none focus:ring-2 focus:ring-[#ffd700] bg-gray-50 focus:bg-white font-medium text-sm"
-                        >
-                          {GRUPOS_FACTURA.map((grupo) => (
-                            <option key={grupo} value={grupo}>
-                              {grupo}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="w-full min-h-[42px] px-3 py-3 md:py-2 border border-gray-200 rounded-xl md:rounded-lg bg-gray-100 text-sm font-bold text-gray-700 flex items-center">
+                          {clienteFacturaSeleccionado
+                            ? obtenerGrupoCliente(clienteFacturaSeleccionado)
+                            : "Selecciona un cliente"}
+                        </div>
+                        <p className="mt-1 text-[10px] font-medium text-gray-400">
+                          La factura hereda automáticamente el grupo vigente del
+                          cliente.
+                        </p>
                       </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
