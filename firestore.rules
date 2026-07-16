@@ -1,4 +1,4 @@
-// MLH_PASO7A_FACTURA_TRANSACCIONAL_V1_2026_07_14
+// MLH_PASO7B_SPARK_SIMPLE_V2_6_ROLES_2026_07_16
 rules_version = '2';
 
 service cloud.firestore {
@@ -23,18 +23,29 @@ service cloud.firestore {
       return get(userPath()).data;
     }
 
+    function perfilStaffValido(perfil) {
+      return perfil.activo == true
+        && perfil.rol in ['SU', 'ADMIN'];
+    }
+
+    function perfilRolValido(perfil, rolEsperado) {
+      return perfil.activo == true
+        && perfil.rol == rolEsperado;
+    }
+
     function isStaff() {
       return isAuthenticated()
-        && userData().activo == true
-        && userData().rol in ['SU', 'ADMIN'];
+        && perfilStaffValido(get(userPath()).data);
     }
 
     function isSU() {
-      return isStaff() && userData().rol == 'SU';
+      return isAuthenticated()
+        && perfilRolValido(get(userPath()).data, 'SU');
     }
 
     function isADMIN() {
-      return isStaff() && userData().rol == 'ADMIN';
+      return isAuthenticated()
+        && perfilRolValido(get(userPath()).data, 'ADMIN');
     }
 
     function actorValido() {
@@ -287,8 +298,7 @@ service cloud.firestore {
       let clienteDespues = getAfter(clientePath).data;
       let monto = request.resource.data.monto_total;
 
-      return exists(clientePath)
-        && clienteAntes.activo == true
+      return clienteAntes.activo == true
         && clienteAntes.estatus == 'Activo'
         && clienteAntes.nombre == request.resource.data.cliente
         && grupoClienteDocumento(clienteAntes) == request.resource.data.grupo
@@ -344,38 +354,919 @@ service cloud.firestore {
         && auditoria.serverTime is timestamp;
     }
 
-    function metricasCreacionFacturaValidas() {
-      let path = /databases/$(database)/documents/metricas_globales/stats_actuales;
+    function metricasStatsPath() {
+      return /databases/$(database)/documents/metricas_globales/stats_actuales;
+    }
+
+    function metricasMovimientoPath(movimientoId) {
+      return /databases/$(database)/documents/metricas_movimientos/$(movimientoId);
+    }
+
+    function deltasMetricasValidos(deltas) {
+      return deltas is map
+        && deltas.keys().hasOnly([
+          'cartera_total', 'cartera_vencida', 'ingresos_mes',
+          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
+          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
+          'total_facturado', 'total_liquidado', 'cobrado_historico',
+          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
+          'total_notas_credito'
+        ])
+        && deltas.cartera_total is number
+        && deltas.cartera_vencida is number
+        && deltas.ingresos_mes is number
+        && deltas.ingresos_semana is number
+        && deltas.clientes_activos is number
+        && deltas.facturas_vencidas is number
+        && deltas.facturas_pendientes is number
+        && deltas.facturas_pagadas is number
+        && deltas.facturas_total is number
+        && deltas.total_facturado is number
+        && deltas.total_liquidado is number
+        && deltas.cobrado_historico is number
+        && deltas.abonos_registrados is number
+        && deltas.abonos_cantidad is number
+        && deltas.monto_recuperado is number
+        && deltas.total_notas_credito is number;
+    }
+
+    function metricasNoNegativas(metricas) {
+      return metricas.cartera_total is number
+        && metricas.cartera_total >= 0
+        && metricas.cartera_vencida is number
+        && metricas.cartera_vencida >= 0
+        && metricas.ingresos_mes is number
+        && metricas.ingresos_mes >= 0
+        && metricas.ingresos_semana is number
+        && metricas.ingresos_semana >= 0
+        && metricas.clientes_activos is number
+        && metricas.clientes_activos >= 0
+        && metricas.facturas_vencidas is number
+        && metricas.facturas_vencidas >= 0
+        && metricas.facturas_pendientes is number
+        && metricas.facturas_pendientes >= 0
+        && metricas.facturas_pagadas is number
+        && metricas.facturas_pagadas >= 0
+        && metricas.facturas_total is number
+        && metricas.facturas_total >= 0
+        && metricas.total_facturado is number
+        && metricas.total_facturado >= 0
+        && metricas.total_liquidado is number
+        && metricas.total_liquidado >= 0
+        && metricas.cobrado_historico is number
+        && metricas.cobrado_historico >= 0
+        && metricas.abonos_registrados is number
+        && metricas.abonos_registrados >= 0
+        && metricas.abonos_cantidad is number
+        && metricas.abonos_cantidad >= 0
+        && metricas.monto_recuperado is number
+        && metricas.monto_recuperado >= 0
+        && metricas.total_notas_credito is number
+        && metricas.total_notas_credito >= 0;
+    }
+
+    function facturaGuardadaVencida(factura) {
+      return factura.get('saldo_pendiente', 0) > 0
+        && factura.get('estatus', '') == 'Vencida';
+    }
+
+    function facturaGuardadaPagada(factura) {
+      return factura.get('saldo_pendiente', 0) == 0;
+    }
+
+    function deltasComunesActualizacionFacturaValidos(antes, despues, deltas) {
+      let vencidaAntes = facturaGuardadaVencida(antes);
+      let vencidaDespues = facturaGuardadaVencida(despues);
+      let pagadaAntes = facturaGuardadaPagada(antes);
+      let pagadaDespues = facturaGuardadaPagada(despues);
+
+      return casiIguales(
+          deltas.cartera_total,
+          despues.saldo_pendiente - antes.saldo_pendiente
+        )
+        && casiIguales(
+          deltas.cartera_vencida,
+          (vencidaDespues ? despues.saldo_pendiente : 0)
+            - (vencidaAntes ? antes.saldo_pendiente : 0)
+        )
+        && deltas.clientes_activos == 0
+        && deltas.facturas_vencidas
+          == (vencidaDespues ? 1 : 0) - (vencidaAntes ? 1 : 0)
+        && deltas.facturas_pendientes
+          == (despues.saldo_pendiente > 0 ? 1 : 0)
+            - (antes.saldo_pendiente > 0 ? 1 : 0)
+        && deltas.facturas_pagadas
+          == (pagadaDespues ? 1 : 0) - (pagadaAntes ? 1 : 0)
+        && deltas.facturas_total == 0
+        && casiIguales(
+          deltas.total_facturado,
+          despues.monto_total - antes.monto_total
+        )
+        && casiIguales(
+          deltas.total_liquidado,
+          (pagadaDespues ? despues.monto_total : 0)
+            - (pagadaAntes ? antes.monto_total : 0)
+        )
+        && casiIguales(
+          deltas.total_notas_credito,
+          despues.get('total_notas_credito', 0)
+            - antes.get('total_notas_credito', 0)
+        );
+    }
+
+    function deltasFacturaCreadaValidos() {
+      let factura = getAfter(
+        /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)
+      ).data;
+      let deltas = request.resource.data.deltas_fuente;
+      let vencida = facturaGuardadaVencida(factura);
+
+      return request.resource.data.factura_id == request.resource.data.entidad_id
+        && casiIguales(deltas.cartera_total, factura.monto_total)
+        && casiIguales(
+          deltas.cartera_vencida,
+          vencida ? factura.monto_total : 0
+        )
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == 0
+        && deltas.facturas_vencidas == (vencida ? 1 : 0)
+        && deltas.facturas_pendientes == 1
+        && deltas.facturas_pagadas == 0
+        && deltas.facturas_total == 1
+        && casiIguales(deltas.total_facturado, factura.monto_total)
+        && deltas.total_liquidado == 0
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && deltas.total_notas_credito == 0;
+    }
+
+    function deltasActualizacionFacturaValidos() {
+      let path = /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id);
       let antes = get(path).data;
       let despues = getAfter(path).data;
-      let monto = request.resource.data.monto_total;
-      let incrementoVencida = request.resource.data.estatus == 'Vencida' ? 1 : 0;
-      let montoVencido = request.resource.data.estatus == 'Vencida' ? monto : 0;
+      let deltas = request.resource.data.deltas_fuente;
+      let tipo = request.resource.data.tipo;
+      let montoAbono = antes.saldo_pendiente - despues.saldo_pendiente;
+      let montoAnulado = despues.saldo_pendiente - antes.saldo_pendiente;
 
-      return exists(path)
-        && despues.diff(antes).affectedKeys().hasOnly([
-          'facturas_total', 'facturas_pendientes', 'facturas_vencidas',
-          'cartera_total', 'cartera_vencida', 'total_facturado',
-          'ultima_actualizacion'
-        ])
-        && despues.facturas_total == antes.get('facturas_total', 0) + 1
-        && despues.facturas_pendientes
-          == antes.get('facturas_pendientes', 0) + 1
-        && despues.facturas_vencidas
-          == antes.get('facturas_vencidas', 0) + incrementoVencida
+      return request.resource.data.factura_id == request.resource.data.entidad_id
+        && deltasComunesActualizacionFacturaValidos(
+          antes,
+          despues,
+          deltas
+        )
+        && (
+          (
+            tipo == 'ABONO_REGISTRADO'
+            && montoAbono > 0
+            && casiIguales(deltas.ingresos_mes, montoAbono)
+            && casiIguales(deltas.ingresos_semana, montoAbono)
+            && casiIguales(deltas.cobrado_historico, montoAbono)
+            && casiIguales(deltas.abonos_registrados, montoAbono)
+            && deltas.abonos_cantidad == 1
+            && casiIguales(deltas.monto_recuperado, montoAbono)
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'ABONO_ANULADO'
+            && montoAnulado > 0
+            && (
+              deltas.ingresos_mes == 0
+              || casiIguales(deltas.ingresos_mes, -montoAnulado)
+            )
+            && (
+              deltas.ingresos_semana == 0
+              || casiIguales(deltas.ingresos_semana, -montoAnulado)
+            )
+            && casiIguales(deltas.cobrado_historico, -montoAnulado)
+            && casiIguales(deltas.abonos_registrados, -montoAnulado)
+            && deltas.abonos_cantidad == -1
+            && casiIguales(deltas.monto_recuperado, -montoAnulado)
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'FACTURA_EDITADA'
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'NOTA_CREDITO_APLICADA'
+            && deltas.total_notas_credito > 0
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+          )
+          ||
+          (
+            tipo == 'NOTA_CREDITO_ANULADA'
+            && deltas.total_notas_credito < 0
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+          )
+        );
+    }
+
+    function deltasFacturaEliminadaValidos() {
+      let factura = get(
+        /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)
+      ).data;
+      let deltas = request.resource.data.deltas_fuente;
+      let vencida = facturaGuardadaVencida(factura);
+      let pagada = facturaGuardadaPagada(factura);
+
+      return request.resource.data.factura_id == request.resource.data.entidad_id
         && casiIguales(
-          despues.cartera_total,
-          antes.get('cartera_total', 0) + monto
+          deltas.cartera_total,
+          -factura.get('saldo_pendiente', 0)
         )
         && casiIguales(
-          despues.cartera_vencida,
-          antes.get('cartera_vencida', 0) + montoVencido
+          deltas.cartera_vencida,
+          vencida ? -factura.get('saldo_pendiente', 0) : 0
+        )
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == 0
+        && deltas.facturas_vencidas == (vencida ? -1 : 0)
+        && deltas.facturas_pendientes
+          == (factura.get('saldo_pendiente', 0) > 0 ? -1 : 0)
+        && deltas.facturas_pagadas == (pagada ? -1 : 0)
+        && deltas.facturas_total == -1
+        && casiIguales(deltas.total_facturado, -factura.monto_total)
+        && casiIguales(
+          deltas.total_liquidado,
+          pagada ? -factura.monto_total : 0
+        )
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && casiIguales(
+          deltas.total_notas_credito,
+          -factura.get('total_notas_credito', 0)
+        );
+    }
+
+    function deltasClienteValidos() {
+      let deltas = request.resource.data.deltas_fuente;
+      let tipo = request.resource.data.tipo;
+      let deltaEsperado = tipo == 'CLIENTE_INACTIVADO' ? -1 : 1;
+
+      return request.resource.data.cliente_id == request.resource.data.entidad_id
+        && deltas.cartera_total == 0
+        && deltas.cartera_vencida == 0
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == deltaEsperado
+        && deltas.facturas_vencidas == 0
+        && deltas.facturas_pendientes == 0
+        && deltas.facturas_pagadas == 0
+        && deltas.facturas_total == 0
+        && deltas.total_facturado == 0
+        && deltas.total_liquidado == 0
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && deltas.total_notas_credito == 0;
+    }
+
+    function deltasFuenteLigadosAEntidad() {
+      let tipo = request.resource.data.tipo;
+
+      return (
+          tipo == 'FACTURA_CREADA'
+          && deltasFacturaCreadaValidos()
+        )
+        || (
+          tipo in [
+            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
+            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
+          ]
+          && deltasActualizacionFacturaValidos()
+        )
+        || (
+          tipo == 'FACTURA_ELIMINADA'
+          && deltasFacturaEliminadaValidos()
+        )
+        || (
+          tipo in [
+            'CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'
+          ]
+          && deltasClienteValidos()
+        )
+        || (
+          tipo == 'RECONSTRUCCION_METRICAS'
+          && isSU()
+        );
+    }
+
+    function movimientoMetricasLigadoAEntidad(movimientoId) {
+      let tipo = request.resource.data.tipo;
+      let entidadId = request.resource.data.entidad_id;
+      let facturaPath = /databases/$(database)/documents/facturas/$(entidadId);
+      let clientePath = /databases/$(database)/documents/clientes/$(entidadId);
+
+      return (
+          tipo == 'FACTURA_CREADA'
+          && !exists(facturaPath)
+          && getAfter(facturaPath).data.metricas_movimiento_id == movimientoId
+        )
+        || (
+          tipo in [
+            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
+            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
+          ]
+          && exists(facturaPath)
+          && getAfter(facturaPath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(facturaPath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo == 'FACTURA_ELIMINADA'
+          && exists(facturaPath)
+          && !existsAfter(facturaPath)
+        )
+        || (
+          tipo == 'CLIENTE_CREADO'
+          && !exists(clientePath)
+          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo in ['CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO']
+          && exists(clientePath)
+          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo == 'RECONSTRUCCION_METRICAS'
+          && isSU()
+          && request.resource.data.entidad_tipo == 'METRICAS'
+          && request.resource.data.entidad_id == 'stats_actuales'
+        );
+    }
+
+    function actividadMovimientoMetricasValida() {
+      let actividadId = request.resource.data.actividad_id;
+      let actividadPath = /databases/$(database)/documents/actividad/$(actividadId);
+      let actividad = getAfter(actividadPath).data;
+
+      return actividadId is string
+        && actividadId != ''
+        && actividad.actor_uid == request.auth.uid
+        && actividad.metricas_movimiento_id == request.resource.data.id
+        && actividad.serverTime is timestamp;
+    }
+
+    function deltasAplicadosMetricasValidos() {
+      let stats = get(metricasStatsPath()).data;
+      let fuente = request.resource.data.deltas_fuente;
+      let aplicado = request.resource.data.deltas_aplicados;
+      let reiniciaMes = request.resource.data.reinicio_mes;
+      let reiniciaSemana = request.resource.data.reinicio_semana;
+      let mesAnterior = stats.get('periodo_mes', '');
+      let semanaAnterior = stats.get('periodo_semana', '');
+
+      return exists(metricasStatsPath())
+        && request.resource.data.periodo_mes_anterior == mesAnterior
+        && request.resource.data.periodo_semana_anterior == semanaAnterior
+        && request.resource.data.periodo_mes_nuevo is string
+        && request.resource.data.periodo_mes_nuevo != ''
+        && request.resource.data.periodo_semana_nuevo is string
+        && request.resource.data.periodo_semana_nuevo != ''
+        && reiniciaMes is bool
+        && reiniciaSemana is bool
+        && (
+          (
+            reiniciaMes == true
+            && mesAnterior != ''
+            && mesAnterior != request.resource.data.periodo_mes_nuevo
+            && casiIguales(
+              aplicado.ingresos_mes,
+              fuente.ingresos_mes - stats.get('ingresos_mes', 0)
+            )
+          )
+          ||
+          (
+            reiniciaMes == false
+            && (
+              mesAnterior == ''
+              || mesAnterior == request.resource.data.periodo_mes_nuevo
+            )
+            && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes)
+          )
+        )
+        && (
+          (
+            reiniciaSemana == true
+            && semanaAnterior != ''
+            && semanaAnterior != request.resource.data.periodo_semana_nuevo
+            && casiIguales(
+              aplicado.ingresos_semana,
+              fuente.ingresos_semana - stats.get('ingresos_semana', 0)
+            )
+          )
+          ||
+          (
+            reiniciaSemana == false
+            && (
+              semanaAnterior == ''
+              || semanaAnterior == request.resource.data.periodo_semana_nuevo
+            )
+            && casiIguales(
+              aplicado.ingresos_semana,
+              fuente.ingresos_semana
+            )
+          )
+        )
+        && casiIguales(aplicado.cartera_total, fuente.cartera_total)
+        && casiIguales(aplicado.cartera_vencida, fuente.cartera_vencida)
+        && casiIguales(aplicado.clientes_activos, fuente.clientes_activos)
+        && casiIguales(aplicado.facturas_vencidas, fuente.facturas_vencidas)
+        && casiIguales(aplicado.facturas_pendientes, fuente.facturas_pendientes)
+        && casiIguales(aplicado.facturas_pagadas, fuente.facturas_pagadas)
+        && casiIguales(aplicado.facturas_total, fuente.facturas_total)
+        && casiIguales(aplicado.total_facturado, fuente.total_facturado)
+        && casiIguales(aplicado.total_liquidado, fuente.total_liquidado)
+        && casiIguales(aplicado.cobrado_historico, fuente.cobrado_historico)
+        && casiIguales(aplicado.abonos_registrados, fuente.abonos_registrados)
+        && casiIguales(aplicado.abonos_cantidad, fuente.abonos_cantidad)
+        && casiIguales(aplicado.monto_recuperado, fuente.monto_recuperado)
+        && casiIguales(
+          aplicado.total_notas_credito,
+          fuente.total_notas_credito
+        );
+    }
+
+    function metricasDespuesCoincidenMovimiento(movimiento) {
+      let deltas = movimiento.deltas_aplicados;
+
+      return casiIguales(
+          request.resource.data.cartera_total,
+          resource.data.get('cartera_total', 0) + deltas.cartera_total
         )
         && casiIguales(
-          despues.total_facturado,
-          antes.get('total_facturado', 0) + monto
+          request.resource.data.cartera_vencida,
+          resource.data.get('cartera_vencida', 0) + deltas.cartera_vencida
         )
-        && despues.ultima_actualizacion is timestamp;
+        && casiIguales(
+          request.resource.data.ingresos_mes,
+          resource.data.get('ingresos_mes', 0) + deltas.ingresos_mes
+        )
+        && casiIguales(
+          request.resource.data.ingresos_semana,
+          resource.data.get('ingresos_semana', 0) + deltas.ingresos_semana
+        )
+        && request.resource.data.clientes_activos
+          == resource.data.get('clientes_activos', 0) + deltas.clientes_activos
+        && request.resource.data.facturas_vencidas
+          == resource.data.get('facturas_vencidas', 0)
+            + deltas.facturas_vencidas
+        && request.resource.data.facturas_pendientes
+          == resource.data.get('facturas_pendientes', 0)
+            + deltas.facturas_pendientes
+        && request.resource.data.facturas_pagadas
+          == resource.data.get('facturas_pagadas', 0)
+            + deltas.facturas_pagadas
+        && request.resource.data.facturas_total
+          == resource.data.get('facturas_total', 0) + deltas.facturas_total
+        && casiIguales(
+          request.resource.data.total_facturado,
+          resource.data.get('total_facturado', 0) + deltas.total_facturado
+        )
+        && casiIguales(
+          request.resource.data.total_liquidado,
+          resource.data.get('total_liquidado', 0) + deltas.total_liquidado
+        )
+        && casiIguales(
+          request.resource.data.cobrado_historico,
+          resource.data.get('cobrado_historico', 0)
+            + deltas.cobrado_historico
+        )
+        && casiIguales(
+          request.resource.data.abonos_registrados,
+          resource.data.get('abonos_registrados', 0)
+            + deltas.abonos_registrados
+        )
+        && request.resource.data.abonos_cantidad
+          == resource.data.get('abonos_cantidad', 0)
+            + deltas.abonos_cantidad
+        && casiIguales(
+          request.resource.data.monto_recuperado,
+          resource.data.get('monto_recuperado', 0)
+            + deltas.monto_recuperado
+        )
+        && casiIguales(
+          request.resource.data.total_notas_credito,
+          resource.data.get('total_notas_credito', 0)
+            + deltas.total_notas_credito
+        )
+        && request.resource.data.periodo_mes
+          == movimiento.periodo_mes_nuevo
+        && request.resource.data.periodo_semana
+          == movimiento.periodo_semana_nuevo
+        && request.resource.data.ultimo_movimiento_id == movimiento.id
+        && request.resource.data.ultima_actualizacion is timestamp;
+    }
+
+
+    // ==============================================================
+    // PASO 7B V2.3 — VALIDACIÓN CENTRALIZADA DEL BUNDLE DE MÉTRICAS
+    // Se ejecuta desde stats_actuales. Los helpers globales y la auditoría
+    // usan una sola lectura por ruta para respetar el presupuesto de accesos.
+    // ==============================================================
+    function deltasFacturaCreadaMovimientoValidos(movimiento) {
+      let factura = getAfter(
+        /databases/$(database)/documents/facturas/$(movimiento.entidad_id)
+      ).data;
+      let deltas = movimiento.deltas_fuente;
+      let vencida = facturaGuardadaVencida(factura);
+
+      return movimiento.factura_id == movimiento.entidad_id
+        && casiIguales(deltas.cartera_total, factura.monto_total)
+        && casiIguales(
+          deltas.cartera_vencida,
+          vencida ? factura.monto_total : 0
+        )
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == 0
+        && deltas.facturas_vencidas == (vencida ? 1 : 0)
+        && deltas.facturas_pendientes == 1
+        && deltas.facturas_pagadas == 0
+        && deltas.facturas_total == 1
+        && casiIguales(deltas.total_facturado, factura.monto_total)
+        && deltas.total_liquidado == 0
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && deltas.total_notas_credito == 0;
+    }
+
+    function deltasActualizacionFacturaMovimientoValidos(movimiento) {
+      let path = /databases/$(database)/documents/facturas/$(movimiento.entidad_id);
+      let antes = get(path).data;
+      let despues = getAfter(path).data;
+      let deltas = movimiento.deltas_fuente;
+      let tipo = movimiento.tipo;
+      let montoAbono = antes.saldo_pendiente - despues.saldo_pendiente;
+      let montoAnulado = despues.saldo_pendiente - antes.saldo_pendiente;
+
+      return movimiento.factura_id == movimiento.entidad_id
+        && deltasComunesActualizacionFacturaValidos(
+          antes,
+          despues,
+          deltas
+        )
+        && (
+          (
+            tipo == 'ABONO_REGISTRADO'
+            && montoAbono > 0
+            && casiIguales(deltas.ingresos_mes, montoAbono)
+            && casiIguales(deltas.ingresos_semana, montoAbono)
+            && casiIguales(deltas.cobrado_historico, montoAbono)
+            && casiIguales(deltas.abonos_registrados, montoAbono)
+            && deltas.abonos_cantidad == 1
+            && casiIguales(deltas.monto_recuperado, montoAbono)
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'ABONO_ANULADO'
+            && montoAnulado > 0
+            && (
+              deltas.ingresos_mes == 0
+              || casiIguales(deltas.ingresos_mes, -montoAnulado)
+            )
+            && (
+              deltas.ingresos_semana == 0
+              || casiIguales(deltas.ingresos_semana, -montoAnulado)
+            )
+            && casiIguales(deltas.cobrado_historico, -montoAnulado)
+            && casiIguales(deltas.abonos_registrados, -montoAnulado)
+            && deltas.abonos_cantidad == -1
+            && casiIguales(deltas.monto_recuperado, -montoAnulado)
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'FACTURA_EDITADA'
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+            && deltas.total_notas_credito == 0
+          )
+          ||
+          (
+            tipo == 'NOTA_CREDITO_APLICADA'
+            && deltas.total_notas_credito > 0
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+          )
+          ||
+          (
+            tipo == 'NOTA_CREDITO_ANULADA'
+            && deltas.total_notas_credito < 0
+            && deltas.ingresos_mes == 0
+            && deltas.ingresos_semana == 0
+            && deltas.cobrado_historico == 0
+            && deltas.abonos_registrados == 0
+            && deltas.abonos_cantidad == 0
+            && deltas.monto_recuperado == 0
+          )
+        );
+    }
+
+    function deltasFacturaEliminadaMovimientoValidos(movimiento) {
+      let factura = get(
+        /databases/$(database)/documents/facturas/$(movimiento.entidad_id)
+      ).data;
+      let deltas = movimiento.deltas_fuente;
+      let vencida = facturaGuardadaVencida(factura);
+      let pagada = facturaGuardadaPagada(factura);
+
+      return movimiento.factura_id == movimiento.entidad_id
+        && casiIguales(
+          deltas.cartera_total,
+          -factura.get('saldo_pendiente', 0)
+        )
+        && casiIguales(
+          deltas.cartera_vencida,
+          vencida ? -factura.get('saldo_pendiente', 0) : 0
+        )
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == 0
+        && deltas.facturas_vencidas == (vencida ? -1 : 0)
+        && deltas.facturas_pendientes
+          == (factura.get('saldo_pendiente', 0) > 0 ? -1 : 0)
+        && deltas.facturas_pagadas == (pagada ? -1 : 0)
+        && deltas.facturas_total == -1
+        && casiIguales(deltas.total_facturado, -factura.monto_total)
+        && casiIguales(
+          deltas.total_liquidado,
+          pagada ? -factura.monto_total : 0
+        )
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && casiIguales(
+          deltas.total_notas_credito,
+          -factura.get('total_notas_credito', 0)
+        );
+    }
+
+    function deltasClienteMovimientoValidos(movimiento) {
+      let deltas = movimiento.deltas_fuente;
+      let tipo = movimiento.tipo;
+      let deltaEsperado = tipo == 'CLIENTE_INACTIVADO' ? -1 : 1;
+
+      return movimiento.cliente_id == movimiento.entidad_id
+        && deltas.cartera_total == 0
+        && deltas.cartera_vencida == 0
+        && deltas.ingresos_mes == 0
+        && deltas.ingresos_semana == 0
+        && deltas.clientes_activos == deltaEsperado
+        && deltas.facturas_vencidas == 0
+        && deltas.facturas_pendientes == 0
+        && deltas.facturas_pagadas == 0
+        && deltas.facturas_total == 0
+        && deltas.total_facturado == 0
+        && deltas.total_liquidado == 0
+        && deltas.cobrado_historico == 0
+        && deltas.abonos_registrados == 0
+        && deltas.abonos_cantidad == 0
+        && deltas.monto_recuperado == 0
+        && deltas.total_notas_credito == 0;
+    }
+
+    function deltasFuenteMovimientoValidos(movimiento) {
+      let tipo = movimiento.tipo;
+
+      return (
+          tipo == 'FACTURA_CREADA'
+          && deltasFacturaCreadaMovimientoValidos(movimiento)
+        )
+        || (
+          tipo in [
+            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
+            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
+          ]
+          && deltasActualizacionFacturaMovimientoValidos(movimiento)
+        )
+        || (
+          tipo == 'FACTURA_ELIMINADA'
+          && deltasFacturaEliminadaMovimientoValidos(movimiento)
+        )
+        || (
+          tipo in [
+            'CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'
+          ]
+          && deltasClienteMovimientoValidos(movimiento)
+        )
+        || (
+          tipo == 'RECONSTRUCCION_METRICAS'
+          && isSU()
+        );
+    }
+
+    function movimientoLigadoAEntidadStats(movimientoId, movimiento) {
+      let tipo = movimiento.tipo;
+      let entidadId = movimiento.entidad_id;
+      let facturaPath = /databases/$(database)/documents/facturas/$(entidadId);
+      let clientePath = /databases/$(database)/documents/clientes/$(entidadId);
+
+      return (
+          tipo == 'FACTURA_CREADA'
+          && !exists(facturaPath)
+          && getAfter(facturaPath).data.metricas_movimiento_id == movimientoId
+        )
+        || (
+          tipo in [
+            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
+            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
+          ]
+          && exists(facturaPath)
+          && getAfter(facturaPath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(facturaPath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo == 'FACTURA_ELIMINADA'
+          && exists(facturaPath)
+          && !existsAfter(facturaPath)
+        )
+        || (
+          tipo == 'CLIENTE_CREADO'
+          && !exists(clientePath)
+          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo in ['CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO']
+          && exists(clientePath)
+          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
+            == movimientoId
+          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
+        )
+        || (
+          tipo == 'RECONSTRUCCION_METRICAS'
+          && isSU()
+          && movimiento.entidad_tipo == 'METRICAS'
+          && movimiento.entidad_id == 'stats_actuales'
+        );
+    }
+
+    function actividadMovimientoStatsValida(movimiento) {
+      let actividadId = movimiento.actividad_id;
+      let actividadPath = /databases/$(database)/documents/actividad/$(actividadId);
+      let actividad = getAfter(actividadPath).data;
+
+      return actividadId is string
+        && actividadId != ''
+        && actividad.actor_uid == request.auth.uid
+        && actividad.metricas_movimiento_id == movimiento.id
+        && actividad.serverTime is timestamp;
+    }
+
+    function deltasAplicadosMovimientoValidos(movimiento) {
+      let stats = resource.data;
+      let fuente = movimiento.deltas_fuente;
+      let aplicado = movimiento.deltas_aplicados;
+      let reiniciaMes = movimiento.reinicio_mes;
+      let reiniciaSemana = movimiento.reinicio_semana;
+      let mesAnterior = stats.get('periodo_mes', '');
+      let semanaAnterior = stats.get('periodo_semana', '');
+
+      return movimiento.periodo_mes_anterior == mesAnterior
+        && movimiento.periodo_semana_anterior == semanaAnterior
+        && movimiento.periodo_mes_nuevo is string
+        && movimiento.periodo_mes_nuevo != ''
+        && movimiento.periodo_semana_nuevo is string
+        && movimiento.periodo_semana_nuevo != ''
+        && reiniciaMes is bool
+        && reiniciaSemana is bool
+        && (
+          (
+            reiniciaMes == true
+            && mesAnterior != ''
+            && mesAnterior != movimiento.periodo_mes_nuevo
+            && casiIguales(
+              aplicado.ingresos_mes,
+              fuente.ingresos_mes - stats.get('ingresos_mes', 0)
+            )
+          )
+          ||
+          (
+            reiniciaMes == false
+            && (
+              mesAnterior == ''
+              || mesAnterior == movimiento.periodo_mes_nuevo
+            )
+            && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes)
+          )
+        )
+        && (
+          (
+            reiniciaSemana == true
+            && semanaAnterior != ''
+            && semanaAnterior != movimiento.periodo_semana_nuevo
+            && casiIguales(
+              aplicado.ingresos_semana,
+              fuente.ingresos_semana - stats.get('ingresos_semana', 0)
+            )
+          )
+          ||
+          (
+            reiniciaSemana == false
+            && (
+              semanaAnterior == ''
+              || semanaAnterior == movimiento.periodo_semana_nuevo
+            )
+            && casiIguales(
+              aplicado.ingresos_semana,
+              fuente.ingresos_semana
+            )
+          )
+        )
+        && casiIguales(aplicado.cartera_total, fuente.cartera_total)
+        && casiIguales(aplicado.cartera_vencida, fuente.cartera_vencida)
+        && casiIguales(aplicado.clientes_activos, fuente.clientes_activos)
+        && casiIguales(aplicado.facturas_vencidas, fuente.facturas_vencidas)
+        && casiIguales(aplicado.facturas_pendientes, fuente.facturas_pendientes)
+        && casiIguales(aplicado.facturas_pagadas, fuente.facturas_pagadas)
+        && casiIguales(aplicado.facturas_total, fuente.facturas_total)
+        && casiIguales(aplicado.total_facturado, fuente.total_facturado)
+        && casiIguales(aplicado.total_liquidado, fuente.total_liquidado)
+        && casiIguales(aplicado.cobrado_historico, fuente.cobrado_historico)
+        && casiIguales(aplicado.abonos_registrados, fuente.abonos_registrados)
+        && casiIguales(aplicado.abonos_cantidad, fuente.abonos_cantidad)
+        && casiIguales(aplicado.monto_recuperado, fuente.monto_recuperado)
+        && casiIguales(
+          aplicado.total_notas_credito,
+          fuente.total_notas_credito
+        );
+    }
+
+    function movimientoMetricasValidoParaStats(movimientoId) {
+      let movimientoPath = metricasMovimientoPath(movimientoId);
+      let movimiento = getAfter(movimientoPath).data;
+
+      return !exists(movimientoPath)
+        && movimiento.id == movimientoId
+        && movimiento.actor_uid == request.auth.uid
+        && deltasMetricasValidos(movimiento.deltas_fuente)
+        && deltasMetricasValidos(movimiento.deltas_aplicados)
+        && movimientoLigadoAEntidadStats(movimientoId, movimiento)
+        && deltasFuenteMovimientoValidos(movimiento)
+        && actividadMovimientoStatsValida(movimiento)
+        && (
+          (
+            movimiento.tipo == 'RECONSTRUCCION_METRICAS'
+            && isSU()
+            && movimiento.reconstruccion_id is string
+            && movimiento.reconstruccion_id != ''
+            && request.resource.data.ultima_reconciliacion is timestamp
+          )
+          ||
+          (
+            movimiento.tipo != 'RECONSTRUCCION_METRICAS'
+            && deltasAplicadosMovimientoValidos(movimiento)
+            && request.resource.data.get('ultima_reconciliacion', null)
+              == resource.data.get('ultima_reconciliacion', null)
+          )
+        )
+        && metricasDespuesCoincidenMovimiento(movimiento);
     }
 
 
@@ -895,7 +1786,8 @@ service cloud.firestore {
       allow update: if isStaff()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'activo', 'estatus', 'inactivo_motivo', 'inactivo_por', 
-            'inactivo_por_uid', 'inactivo_at', 'updatedAt'
+            'inactivo_por_uid', 'inactivo_at',
+            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
           ])
         && resource.data.activo == true
         && request.resource.data.activo == false
@@ -909,7 +1801,8 @@ service cloud.firestore {
       allow update: if isStaff()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'activo', 'estatus', 'reactivado_motivo', 'reactivado_por', 
-            'reactivado_por_uid', 'reactivado_at', 'updatedAt'
+            'reactivado_por_uid', 'reactivado_at',
+            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
           ])
         && resource.data.activo == false
         && request.resource.data.activo == true
@@ -932,7 +1825,8 @@ service cloud.firestore {
           'monto_pagado', 'saldo_pendiente', 'moneda', 'emision',
           'vencimiento', 'observaciones', 'estatus', 'abonos',
           'notas_credito', 'total_notas_credito', 'creacion_audit_id',
-          'creacion_actor_uid', 'creacion_at', 'createdAt'
+          'creacion_actor_uid', 'creacion_at', 'metricas_movimiento_id',
+          'createdAt'
         ])
         && request.resource.data.id == facturaId
         && request.resource.data.cliente_id is string
@@ -965,8 +1859,9 @@ service cloud.firestore {
         && request.resource.data.observaciones is string
         && request.resource.data.createdAt is timestamp
         && clienteCreacionFacturaValido()
-        && auditoriaCreacionFacturaValida(facturaId)
-        && metricasCreacionFacturaValidas();
+        && request.resource.data.metricas_movimiento_id is string
+        && request.resource.data.metricas_movimiento_id != ''
+        && auditoriaCreacionFacturaValida(facturaId);
 
       // Registrar abono: SU y ADMIN
       allow update: if isStaff()
@@ -980,6 +1875,8 @@ service cloud.firestore {
             'ultima_edicion_audit_id',
             'ultima_edicion_actor_uid',
             'ultima_edicion_at',
+            'ultimo_metricas_movimiento_id',
+            'ultimo_metricas_tipo',
             'abonos_cancelados'
           ])
         && campoNoCambia('id')
@@ -1015,6 +1912,8 @@ service cloud.firestore {
             'ultima_edicion_audit_id',
             'ultima_edicion_actor_uid',
             'ultima_edicion_at',
+            'ultimo_metricas_movimiento_id',
+            'ultimo_metricas_tipo',
             'abonos_cancelados'
           ])
         && campoNoCambia('id')
@@ -1044,7 +1943,8 @@ service cloud.firestore {
             'cliente_id', 'cliente', 'grupo', 'folio', 'monto_total', 'moneda', 
             'emision', 'vencimiento', 'observaciones', 'monto_pagado', 
             'saldo_pendiente', 'estatus', 'ultima_edicion_audit_id', 
-            'ultima_edicion_actor_uid', 'ultima_edicion_at', 'updatedAt'
+            'ultima_edicion_actor_uid', 'ultima_edicion_at',
+            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
           ])
         && campoNoCambia('id')
         && campoNoCambia('createdAt')
@@ -1084,7 +1984,8 @@ service cloud.firestore {
       allow update: if isSU()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'saldo_pendiente', 'estatus', 'notas_credito', 'total_notas_credito', 
-            'ultima_accion', 'updatedAt'
+            'ultima_accion', 'ultimo_metricas_movimiento_id',
+            'ultimo_metricas_tipo', 'updatedAt'
           ])
         && campoNoCambia('id')
         && campoNoCambia('createdAt')
@@ -1513,28 +2414,113 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // ============================================================
+    // PASO 7B SPARK SIMPLE
+    // Las métricas son un resumen reconstruible del Dashboard.
+    // SU y ADMIN activos pueden registrar operaciones normales.
+    // Solo SU puede crear el resumen inicial y reconciliarlo.
+    // ============================================================
+    match /metricas_movimientos/{movimientoId} {
+      allow read: if isSU();
+
+      allow create: if isStaff()
+        && actorValido()
+        && request.resource.data.keys().hasOnly([
+          'id', 'actor_uid', 'actor_nombre', 'tipo', 'entidad_tipo',
+          'entidad_id', 'factura_id', 'cliente_id', 'abono_id',
+          'nota_id', 'actividad_id', 'deltas_fuente',
+          'deltas_aplicados', 'periodo_mes_anterior',
+          'periodo_mes_nuevo', 'periodo_semana_anterior',
+          'periodo_semana_nuevo', 'reinicio_mes', 'reinicio_semana',
+          'origen', 'reconstruccion_id', 'createdAt'
+        ])
+        && request.resource.data.id == movimientoId
+        && request.resource.data.actor_nombre is string
+        && request.resource.data.actor_nombre != ''
+        && request.resource.data.tipo in [
+          'FACTURA_CREADA', 'ABONO_REGISTRADO', 'ABONO_ANULADO',
+          'FACTURA_EDITADA', 'NOTA_CREDITO_APLICADA',
+          'NOTA_CREDITO_ANULADA', 'FACTURA_ELIMINADA',
+          'CLIENTE_CREADO', 'CLIENTE_INACTIVADO',
+          'CLIENTE_REACTIVADO', 'RECONSTRUCCION_METRICAS'
+        ]
+        && request.resource.data.entidad_tipo in [
+          'FACTURA', 'CLIENTE', 'METRICAS'
+        ]
+        && request.resource.data.entidad_id is string
+        && request.resource.data.entidad_id != ''
+        && request.resource.data.factura_id is string
+        && request.resource.data.cliente_id is string
+        && request.resource.data.abono_id is string
+        && request.resource.data.nota_id is string
+        && request.resource.data.actividad_id is string
+        && request.resource.data.origen is string
+        && request.resource.data.origen != ''
+        && request.resource.data.deltas_fuente is map
+        && request.resource.data.deltas_aplicados is map
+        && request.resource.data.periodo_mes_anterior is string
+        && request.resource.data.periodo_mes_nuevo is string
+        && request.resource.data.periodo_semana_anterior is string
+        && request.resource.data.periodo_semana_nuevo is string
+        && request.resource.data.reinicio_mes is bool
+        && request.resource.data.reinicio_semana is bool
+        && request.resource.data.createdAt is timestamp
+        && (
+          request.resource.data.tipo != 'RECONSTRUCCION_METRICAS'
+          || (
+            isSU()
+            && request.resource.data.reconstruccion_id is string
+            && request.resource.data.reconstruccion_id != ''
+          )
+        );
+
+      allow update, delete: if false;
+    }
+
     match /metricas_globales/{documentoId} {
       allow read: if isStaff();
 
-      allow create: if isStaff()
+      allow create: if isSU()
         && documentoId == 'stats_actuales'
         && request.resource.data.keys().hasOnly([
-          'cartera_total', 'cartera_vencida', 'ingresos_mes', 'ingresos_semana', 
-          'clientes_activos', 'facturas_vencidas', 'facturas_pendientes', 
-          'facturas_pagadas', 'facturas_total', 'total_facturado', 'total_liquidado', 
-          'cobrado_historico', 'abonos_registrados', 'monto_recuperado', 'total_notas_credito', 
-          'updatedAt', 'ultima_actualizacion'
-        ]);
+          'cartera_total', 'cartera_vencida', 'ingresos_mes',
+          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
+          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
+          'total_facturado', 'total_liquidado', 'cobrado_historico',
+          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
+          'total_notas_credito', 'periodo_mes', 'periodo_semana',
+          'ultimo_movimiento_id', 'ultima_reconciliacion',
+          'ultima_actualizacion'
+        ])
+        && metricasNoNegativas(request.resource.data)
+        && request.resource.data.periodo_mes is string
+        && request.resource.data.periodo_semana is string
+        && request.resource.data.ultimo_movimiento_id is string
+        && request.resource.data.ultima_actualizacion is timestamp;
 
       allow update: if isStaff()
         && documentoId == 'stats_actuales'
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'cartera_total', 'cartera_vencida', 'ingresos_mes', 'ingresos_semana', 
-            'clientes_activos', 'facturas_vencidas', 'facturas_pendientes', 
-            'facturas_pagadas', 'facturas_total', 'total_facturado', 'total_liquidado', 
-            'cobrado_historico', 'abonos_registrados', 'monto_recuperado', 'total_notas_credito', 
-            'updatedAt', 'ultima_actualizacion'
-          ]);
+          'cartera_total', 'cartera_vencida', 'ingresos_mes',
+          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
+          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
+          'total_facturado', 'total_liquidado', 'cobrado_historico',
+          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
+          'total_notas_credito', 'periodo_mes', 'periodo_semana',
+          'ultimo_movimiento_id', 'ultima_reconciliacion',
+          'ultima_actualizacion'
+        ])
+        && metricasNoNegativas(request.resource.data)
+        && request.resource.data.periodo_mes is string
+        && request.resource.data.periodo_semana is string
+        && request.resource.data.ultimo_movimiento_id is string
+        && request.resource.data.ultimo_movimiento_id != ''
+        && request.resource.data.ultima_actualizacion is timestamp
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['ultima_reconciliacion'])
+          || isSU()
+        );
 
       allow delete: if false;
     }

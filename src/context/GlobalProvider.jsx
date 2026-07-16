@@ -10,8 +10,10 @@ import {
 import { useLocation } from "react-router-dom";
 
 import { db } from "../config/firebase";
+import { abonosIndexService } from "../services/abonosIndexService";
 import { clientesService } from "../services/clientesService";
 import { facturasService } from "../services/facturasService";
+import { obtenerPeriodosMetricas } from "../services/metricasService";
 import { solicitudesService } from "../services/solicitudesService";
 import { formatearFechaSegura } from "../utils/normalizadores";
 import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
@@ -45,6 +47,12 @@ const ordenarFacturas = (lista) =>
 
 const rutaNecesitaFacturasGlobales = () => false;
 
+const numeroMetricaSeguro = (valor, respaldo = 0) => {
+  const numero = Number(valor);
+
+  return Number.isFinite(numero) ? numero : respaldo;
+};
+
 export const GlobalProvider = ({ children }) => {
   const authContextValue = useContext(AuthContext);
   const authData = authContextValue ?? AUTH_DATA_VACIO;
@@ -67,9 +75,17 @@ export const GlobalProvider = ({ children }) => {
         total_liquidado: 0,
         cobrado_historico: 0,
         abonos_registrados: 0,
+        abonos_cantidad: 0,
         monto_recuperado: 0,
         total_notas_credito: 0,
+        periodo_mes: "",
+        periodo_semana: "",
+        ultimo_movimiento_id: "",
+        ultima_reconciliacion: null,
+        ultima_actualizacion: null,
       },
+      metricasCargadas: false,
+      errorMetricas: null,
       clientes: [],
       facturas: [],
       actividad: [],
@@ -122,9 +138,28 @@ function GlobalDataProvider({ authData, children }) {
     total_liquidado: 0,
     cobrado_historico: 0,
     abonos_registrados: 0,
+    abonos_cantidad: 0,
     monto_recuperado: 0,
     total_notas_credito: 0,
+    periodo_mes: "",
+    periodo_semana: "",
+    ultimo_movimiento_id: "",
+    ultima_reconciliacion: null,
+    ultima_actualizacion: null,
   });
+  const [estadoCargaMetricas, setEstadoCargaMetricas] = useState({
+    actorUid: "",
+    cargadas: false,
+    error: null,
+  });
+  const metricasCargadas =
+    Boolean(actorUid) &&
+    estadoCargaMetricas.actorUid === actorUid &&
+    estadoCargaMetricas.cargadas;
+  const errorMetricas =
+    estadoCargaMetricas.actorUid === actorUid
+      ? estadoCargaMetricas.error
+      : null;
 
   useEffect(() => {
     if (!actorUid) {
@@ -217,9 +252,21 @@ function GlobalDataProvider({ authData, children }) {
         if (docSnap.exists()) {
           setStatsDB(docSnap.data());
         }
+
+        setEstadoCargaMetricas({
+          actorUid,
+          cargadas: true,
+          error: null,
+        });
       },
       (error) => {
         console.error("Error escuchando métricas:", error);
+        setEstadoCargaMetricas({
+          actorUid,
+          cargadas: true,
+          error:
+            error?.message || "No se pudieron consultar las métricas.",
+        });
       },
     );
 
@@ -321,29 +368,70 @@ function GlobalDataProvider({ authData, children }) {
   );
 
   const stats = useMemo(() => {
+    const periodosActuales = obtenerPeriodosMetricas();
     const clientesReales = clientes.filter(
       (cliente) => cliente.activo !== false && cliente.estatus !== "Inactivo",
     );
 
     return {
       ...statsDB,
-      cartera_total: Number(statsDB.cartera_total) || 0,
-      cartera_vencida: Number(statsDB.cartera_vencida) || 0,
-      ingresos_mes: Number(statsDB.ingresos_mes) || 0,
-      ingresos_semana: Number(statsDB.ingresos_semana) || 0,
-      clientes_activos:
-        Number(statsDB.clientes_activos) || clientesReales.length,
-      facturas_pendientes: Number(statsDB.facturas_pendientes) || 0,
-      facturas_pagadas: Number(statsDB.facturas_pagadas) || 0,
-      facturas_vencidas: Number(statsDB.facturas_vencidas) || 0,
-      facturas_total: Number(statsDB.facturas_total) || 0,
-      total_facturado: Number(statsDB.total_facturado) || 0,
-      total_liquidado: Number(statsDB.total_liquidado) || 0,
-      cobrado_historico: Number(statsDB.cobrado_historico) || 0,
-      abonos_registrados: Number(statsDB.abonos_registrados) || 0,
-      monto_recuperado:
-        Number(statsDB.monto_recuperado) || Number(statsDB.cobrado_historico) || 0,
-      total_notas_credito: Number(statsDB.total_notas_credito) || 0,
+      cartera_total: numeroMetricaSeguro(statsDB.cartera_total),
+      cartera_vencida: numeroMetricaSeguro(
+        statsDB.cartera_vencida,
+      ),
+      ingresos_mes:
+        statsDB.periodo_mes &&
+        statsDB.periodo_mes !== periodosActuales.periodoMes
+          ? 0
+          : numeroMetricaSeguro(statsDB.ingresos_mes),
+      ingresos_semana:
+        statsDB.periodo_semana &&
+        statsDB.periodo_semana !== periodosActuales.periodoSemana
+          ? 0
+          : numeroMetricaSeguro(statsDB.ingresos_semana),
+      clientes_activos: numeroMetricaSeguro(
+        statsDB.clientes_activos,
+        clientesReales.length,
+      ),
+      facturas_pendientes: numeroMetricaSeguro(
+        statsDB.facturas_pendientes,
+      ),
+      facturas_pagadas: numeroMetricaSeguro(
+        statsDB.facturas_pagadas,
+      ),
+      facturas_vencidas: numeroMetricaSeguro(
+        statsDB.facturas_vencidas,
+      ),
+      facturas_total: numeroMetricaSeguro(statsDB.facturas_total),
+      total_facturado: numeroMetricaSeguro(
+        statsDB.total_facturado,
+      ),
+      total_liquidado: numeroMetricaSeguro(
+        statsDB.total_liquidado,
+      ),
+      cobrado_historico: numeroMetricaSeguro(
+        statsDB.cobrado_historico,
+      ),
+      abonos_registrados: numeroMetricaSeguro(
+        statsDB.abonos_registrados,
+      ),
+      abonos_cantidad: numeroMetricaSeguro(
+        statsDB.abonos_cantidad,
+      ),
+      monto_recuperado: numeroMetricaSeguro(
+        statsDB.monto_recuperado,
+        numeroMetricaSeguro(statsDB.cobrado_historico),
+      ),
+      total_notas_credito: numeroMetricaSeguro(
+        statsDB.total_notas_credito,
+      ),
+      periodo_mes: String(statsDB.periodo_mes || ""),
+      periodo_semana: String(statsDB.periodo_semana || ""),
+      ultimo_movimiento_id: String(
+        statsDB.ultimo_movimiento_id || "",
+      ),
+      ultima_reconciliacion: statsDB.ultima_reconciliacion || null,
+      ultima_actualizacion: statsDB.ultima_actualizacion || null,
     };
   }, [clientes, statsDB]);
 
@@ -575,6 +663,31 @@ function GlobalDataProvider({ authData, children }) {
     [actorUid, userName],
   );
 
+  const reconstruirMetricasEnNube = useCallback(
+    async ({ reconstruirIndice = true } = {}) => {
+      if (userRole !== "SU") {
+        return {
+          success: false,
+          error: "Solo el SU puede reconciliar las métricas.",
+        };
+      }
+
+      if (!actorUid) {
+        return {
+          success: false,
+          error: "No se identificó al usuario responsable.",
+        };
+      }
+
+      return abonosIndexService.reconstruirDesdeFacturas({
+        actor_uid: actorUid,
+        userName: userName || "SU",
+        reconstruirIndice,
+      });
+    },
+    [actorUid, userName, userRole],
+  );
+
   const actividadVisible = useMemo(
     () => (userRole === "SU" ? actividad : []),
     [actividad, userRole],
@@ -585,6 +698,8 @@ function GlobalDataProvider({ authData, children }) {
       ...authData,
       authLoading: authData.loading,
       stats,
+      metricasCargadas,
+      errorMetricas,
       clientes,
       setClientes,
       eliminarClienteEnNube,
@@ -599,6 +714,7 @@ function GlobalDataProvider({ authData, children }) {
       aplicarNotaCreditoEnNube,
       solicitarNotaCreditoEnNube,
       cancelarNotaCreditoEnNube,
+      reconstruirMetricasEnNube,
       actividad: actividadVisible,
       setActividad,
       solicitudes,
@@ -611,6 +727,8 @@ function GlobalDataProvider({ authData, children }) {
     [
       authData,
       stats,
+      metricasCargadas,
+      errorMetricas,
       clientes,
       eliminarClienteEnNube,
       reactivarClienteEnNube,
@@ -623,6 +741,7 @@ function GlobalDataProvider({ authData, children }) {
       aplicarNotaCreditoEnNube,
       solicitarNotaCreditoEnNube,
       cancelarNotaCreditoEnNube,
+      reconstruirMetricasEnNube,
       actividadVisible,
       solicitudes,
       solicitudesNotasCredito,

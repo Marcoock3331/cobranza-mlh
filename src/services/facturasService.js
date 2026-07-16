@@ -17,6 +17,13 @@ import {
   construirAbonoIndexId,
   construirAbonoIndexPayload,
 } from "./abonosIndexService";
+import {
+  METRICAS_MOVIMIENTOS_COLLECTION,
+  obtenerPeriodosMetricas,
+  perteneceAlPeriodoMes,
+  perteneceAlPeriodoSemana,
+  prepararMovimientoMetricas,
+} from "./metricasService";
 
 const FACTURAS_COLLECTION = "facturas";
 const CLIENTES_COLLECTION = "clientes";
@@ -27,6 +34,57 @@ const ABONOS_INDEX_COLLECTION = "abonos_index";
 const SOLICITUDES_NOTAS_CREDITO_COLLECTION = "solicitudes_notas_credito";
 const RESUMEN_NOTAS_CREDITO_COLLECTION = "notas_credito_resumen_clientes";
 const NOTIFICACIONES_OPERATIVAS_COLLECTION = "notificaciones_operativas";
+
+const aplicarMetricasTransaccionales = ({
+  transaction,
+  statsSnapshot,
+  statsRef,
+  movimientoRef,
+  actorUid,
+  actorNombre,
+  tipo,
+  entidadTipo,
+  entidadId,
+  facturaId = "",
+  clienteId = "",
+  abonoId = "",
+  notaId = "",
+  actividadId = "",
+  deltas = {},
+  fechaOperacion = new Date(),
+}) => {
+  if (!statsSnapshot?.exists?.()) {
+    throw new Error(
+      "Las métricas globales no están inicializadas. Reconstrúyelas antes de continuar.",
+    );
+  }
+
+  const { movimientoPayload, statsPayload } =
+    prepararMovimientoMetricas({
+      statsActuales: statsSnapshot.data(),
+      movimientoRef,
+      actorUid,
+      actorNombre,
+      tipo,
+      entidadTipo,
+      entidadId,
+      facturaId,
+      clienteId,
+      abonoId,
+      notaId,
+      actividadId,
+      deltas,
+      fechaOperacion,
+    });
+
+  transaction.set(movimientoRef, movimientoPayload);
+  transaction.update(statsRef, statsPayload);
+
+  return {
+    movimientoPayload,
+    statsPayload,
+  };
+};
 
 const redondearMoneda = (valor) =>
   Math.round((Number(valor) || 0) * 100) / 100;
@@ -290,6 +348,61 @@ const esMismaSemana = (fechaTarget) => {
   );
 };
 
+const construirDeltasFinancierosFactura = ({
+  facturaAnterior = {},
+  facturaNueva = {},
+} = {}) => {
+  const saldoAnterior = redondearMoneda(
+    facturaAnterior.saldo_pendiente,
+  );
+  const saldoNuevo = redondearMoneda(
+    facturaNueva.saldo_pendiente,
+  );
+  const montoAnterior = redondearMoneda(
+    facturaAnterior.monto_total,
+  );
+  const montoNuevo = redondearMoneda(
+    facturaNueva.monto_total,
+  );
+  const notasAnteriores = redondearMoneda(
+    facturaAnterior.total_notas_credito,
+  );
+  const notasNuevas = redondearMoneda(
+    facturaNueva.total_notas_credito,
+  );
+  const vencidaAntes =
+    saldoAnterior > 0 && facturaAnterior.estatus === "Vencida";
+  const vencidaDespues =
+    saldoNuevo > 0 && facturaNueva.estatus === "Vencida";
+  const pagadaAntes = saldoAnterior === 0;
+  const pagadaDespues = saldoNuevo === 0;
+
+  return {
+    cartera_total: redondearMoneda(saldoNuevo - saldoAnterior),
+    cartera_vencida: redondearMoneda(
+      (vencidaDespues ? saldoNuevo : 0) -
+        (vencidaAntes ? saldoAnterior : 0),
+    ),
+    facturas_vencidas:
+      Number(vencidaDespues) - Number(vencidaAntes),
+    facturas_pendientes:
+      Number(saldoNuevo > 0) - Number(saldoAnterior > 0),
+    facturas_pagadas:
+      Number(pagadaDespues) - Number(pagadaAntes),
+    facturas_total: 0,
+    total_facturado: redondearMoneda(
+      montoNuevo - montoAnterior,
+    ),
+    total_liquidado: redondearMoneda(
+      (pagadaDespues ? montoNuevo : 0) -
+        (pagadaAntes ? montoAnterior : 0),
+    ),
+    total_notas_credito: redondearMoneda(
+      notasNuevas - notasAnteriores,
+    ),
+  };
+};
+
 export const facturasService = {
   crearFactura: async ({
     formData,
@@ -358,6 +471,9 @@ export const facturasService = {
       );
       const auditRef = doc(
         collection(db, ACTIVIDAD_COLLECTION),
+      );
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
       );
 
       const payload = await runTransaction(db, async (transaction) => {
@@ -494,42 +610,11 @@ export const facturasService = {
           creacion_audit_id: auditRef.id,
           creacion_actor_uid: actorUid,
           creacion_at: serverTimestamp(),
+          metricas_movimiento_id: metricasMovimientoRef.id,
           createdAt: serverTimestamp(),
         };
 
-        const statsActual = statsSnapshot.data();
-        const leerMetrica = (campo) => {
-          const valor = Number(statsActual?.[campo] ?? 0);
-
-          if (!Number.isFinite(valor) || valor < 0) {
-            throw new Error(
-              `La métrica ${campo} contiene un valor inválido.`,
-            );
-          }
-
-          return valor;
-        };
-
         const naceVencida = estatusInicial === "Vencida";
-        const statsPayload = {
-          facturas_total: leerMetrica("facturas_total") + 1,
-          facturas_pendientes:
-            leerMetrica("facturas_pendientes") + 1,
-          facturas_vencidas:
-            leerMetrica("facturas_vencidas") +
-            (naceVencida ? 1 : 0),
-          cartera_total: redondearMoneda(
-            leerMetrica("cartera_total") + montoTotal,
-          ),
-          cartera_vencida: redondearMoneda(
-            leerMetrica("cartera_vencida") +
-              (naceVencida ? montoTotal : 0),
-          ),
-          total_facturado: redondearMoneda(
-            leerMetrica("total_facturado") + montoTotal,
-          ),
-          ultima_actualizacion: serverTimestamp(),
-        };
 
         transaction.set(facturaRef, facturaPayload);
 
@@ -539,10 +624,32 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        transaction.update(statsRef, statsPayload);
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "Usuario",
+          tipo: "FACTURA_CREADA",
+          entidadTipo: "FACTURA",
+          entidadId: facturaRef.id,
+          facturaId: facturaRef.id,
+          clienteId: clienteSnapshot.id,
+          actividadId: auditRef.id,
+          deltas: {
+            facturas_total: 1,
+            facturas_pendientes: 1,
+            facturas_vencidas: naceVencida ? 1 : 0,
+            cartera_total: montoTotal,
+            cartera_vencida: naceVencida ? montoTotal : 0,
+            total_facturado: montoTotal,
+          },
+        });
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "Usuario",
           modulo: "Facturación",
           tipo: "Creación",
@@ -624,9 +731,14 @@ export const facturasService = {
       const fechaAbono = Timestamp.now();
       const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
 
       const nuevoAbono = await runTransaction(db, async (transaction) => {
         const facturaSnapshot = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnapshot.exists()) {
           throw new Error("La factura no fue encontrada.");
@@ -765,6 +877,7 @@ export const facturasService = {
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "Usuario",
           modulo: "Facturación",
           tipo: "Registro de Abono",
@@ -804,6 +917,8 @@ export const facturasService = {
           ultima_edicion_audit_id: auditRef.id,
           ultima_edicion_actor_uid: actorUid,
           ultima_edicion_at: serverTimestamp(),
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "ABONO_REGISTRADO",
           updatedAt: serverTimestamp(),
         });
 
@@ -844,34 +959,41 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        const statsPayload = {
-          cartera_total: increment(-monto),
-          ingresos_mes: increment(monto),
-          ingresos_semana: increment(monto),
-          cobrado_historico: increment(monto),
-          abonos_registrados: increment(monto),
-          monto_recuperado: increment(monto),
-          ultima_actualizacion: serverTimestamp(),
-        };
+        const deltasFactura = construirDeltasFinancierosFactura({
+          facturaAnterior: facturaActual,
+          facturaNueva: {
+            ...facturaActual,
+            saldo_pendiente: nuevoSaldo,
+            monto_pagado: nuevoMontoPagado,
+            estatus: nuevoEstatus,
+          },
+        });
 
-        const estabaVencida = esFacturaVencida(facturaActual);
-
-        if (estabaVencida) {
-          statsPayload.cartera_vencida = increment(-monto);
-        }
-
-        if (nuevoSaldo === 0) {
-          statsPayload.facturas_pagadas = increment(1);
-          statsPayload.facturas_pendientes = increment(-1);
-          statsPayload.total_liquidado = increment(montoTotal);
-
-          if (estabaVencida) {
-            statsPayload.facturas_vencidas = increment(-1);
-          }
-        }
-
-        const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
-        transaction.set(statsRef, statsPayload, { merge: true });
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "Usuario",
+          tipo: "ABONO_REGISTRADO",
+          entidadTipo: "FACTURA",
+          entidadId: idFactura,
+          facturaId: idFactura,
+          clienteId,
+          abonoId: idAbono,
+          actividadId: auditRef.id,
+          deltas: {
+            ...deltasFactura,
+            ingresos_mes: monto,
+            ingresos_semana: monto,
+            cobrado_historico: monto,
+            abonos_registrados: monto,
+            abonos_cantidad: 1,
+            monto_recuperado: monto,
+          },
+          fechaOperacion: fechaAbono,
+        });
 
         return abono;
       });
@@ -923,9 +1045,14 @@ export const facturasService = {
       const notificacionRef = doc(
         collection(db, NOTIFICACIONES_OPERATIVAS_COLLECTION),
       );
+      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
 
       await runTransaction(db, async (transaction) => {
         const facturaSnapshot = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnapshot.exists()) {
           throw new Error("La factura no fue encontrada.");
@@ -1098,6 +1225,7 @@ export const facturasService = {
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Anulación de Abono",
@@ -1168,6 +1296,8 @@ export const facturasService = {
           ultima_edicion_audit_id: auditRef.id,
           ultima_edicion_actor_uid: actorUid,
           ultima_edicion_at: serverTimestamp(),
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "ABONO_ANULADO",
           updatedAt: serverTimestamp(),
         });
 
@@ -1216,53 +1346,50 @@ export const facturasService = {
 
         transaction.update(clienteRef, clienteUpdatePayload);
 
-        const statsPayload = {
-          cartera_total: increment(montoAbono),
-          cobrado_historico: increment(-montoAbono),
-          abonos_registrados: increment(-montoAbono),
-          monto_recuperado: increment(-montoAbono),
-          ultima_actualizacion: serverTimestamp(),
-        };
+        const periodosActuales = obtenerPeriodosMetricas();
+        const deltasFactura = construirDeltasFinancierosFactura({
+          facturaAnterior: facturaActual,
+          facturaNueva: {
+            ...facturaActual,
+            saldo_pendiente: nuevoSaldo,
+            monto_pagado: nuevoMontoPagado,
+            estatus: nuevoEstatus,
+          },
+        });
 
-        if (esMismoMes(abonoTarget.fecha)) {
-          statsPayload.ingresos_mes = increment(-montoAbono);
-        }
-
-        if (esMismaSemana(abonoTarget.fecha)) {
-          statsPayload.ingresos_semana =
-            increment(-montoAbono);
-        }
-
-        const quedaVencida =
-          nuevoSaldo > 0 && esFacturaVencida(facturaActual);
-
-        if (quedaVencida) {
-          statsPayload.cartera_vencida =
-            increment(montoAbono);
-        }
-
-        if (
-          facturaActual.estatus === "Pagada" &&
-          nuevoSaldo > 0
-        ) {
-          statsPayload.facturas_pagadas = increment(-1);
-          statsPayload.facturas_pendientes = increment(1);
-          statsPayload.total_liquidado =
-            increment(-montoTotal);
-
-          if (quedaVencida) {
-            statsPayload.facturas_vencidas = increment(1);
-          }
-        }
-
-        const statsRef = doc(
-          db,
-          STATS_COLLECTION,
-          STATS_DOC,
-        );
-
-        transaction.set(statsRef, statsPayload, {
-          merge: true,
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "SU",
+          tipo: "ABONO_ANULADO",
+          entidadTipo: "FACTURA",
+          entidadId: facturaIdSeguro,
+          facturaId: facturaIdSeguro,
+          clienteId,
+          abonoId: abonoIdSeguro,
+          actividadId: auditRef.id,
+          deltas: {
+            ...deltasFactura,
+            ingresos_mes: perteneceAlPeriodoMes(
+              abonoTarget.fecha,
+              periodosActuales.periodoMes,
+            )
+              ? -montoAbono
+              : 0,
+            ingresos_semana: perteneceAlPeriodoSemana(
+              abonoTarget.fecha,
+              periodosActuales.periodoSemana,
+            )
+              ? -montoAbono
+              : 0,
+            cobrado_historico: -montoAbono,
+            abonos_registrados: -montoAbono,
+            abonos_cantidad: -1,
+            monto_recuperado: -montoAbono,
+          },
         });
       });
 
@@ -1301,9 +1428,13 @@ export const facturasService = {
       const facturaRef = doc(db, FACTURAS_COLLECTION, idFactura);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
 
       const resultado = await runTransaction(db, async (transaction) => {
         const facturaSnap = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnap.exists()) {
           throw new Error("La factura ya no existe en Firestore.");
@@ -1659,6 +1790,8 @@ export const facturasService = {
           ultima_edicion_audit_id: auditRef.id,
           ultima_edicion_actor_uid: actorUid,
           ultima_edicion_at: serverTimestamp(),
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "FACTURA_EDITADA",
           updatedAt: serverTimestamp(),
         };
 
@@ -1692,43 +1825,29 @@ export const facturasService = {
             (estabaPagada ? montoAnterior : 0),
         );
 
-        const statsUpdate = {
-          ultima_actualizacion: serverTimestamp(),
-        };
-
-        if (diferenciaCartera !== 0) {
-          statsUpdate.cartera_total = increment(diferenciaCartera);
-        }
-        if (diferenciaTotalFacturado !== 0) {
-          statsUpdate.total_facturado = increment(
-            diferenciaTotalFacturado,
-          );
-        }
-        if (diferenciaCarteraVencida !== 0) {
-          statsUpdate.cartera_vencida = increment(
-            diferenciaCarteraVencida,
-          );
-        }
-        if (diferenciaPendientes !== 0) {
-          statsUpdate.facturas_pendientes = increment(
-            diferenciaPendientes,
-          );
-        }
-        if (diferenciaPagadas !== 0) {
-          statsUpdate.facturas_pagadas = increment(diferenciaPagadas);
-        }
-        if (diferenciaVencidas !== 0) {
-          statsUpdate.facturas_vencidas = increment(
-            diferenciaVencidas,
-          );
-        }
-        if (diferenciaLiquidado !== 0) {
-          statsUpdate.total_liquidado = increment(
-            diferenciaLiquidado,
-          );
-        }
-
-        transaction.set(statsRef, statsUpdate, { merge: true });
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "Usuario",
+          tipo: "FACTURA_EDITADA",
+          entidadTipo: "FACTURA",
+          entidadId: idFactura,
+          facturaId: idFactura,
+          clienteId: clienteNuevoId,
+          actividadId: auditRef.id,
+          deltas: {
+            cartera_total: diferenciaCartera,
+            cartera_vencida: diferenciaCarteraVencida,
+            facturas_vencidas: diferenciaVencidas,
+            facturas_pendientes: diferenciaPendientes,
+            facturas_pagadas: diferenciaPagadas,
+            total_facturado: diferenciaTotalFacturado,
+            total_liquidado: diferenciaLiquidado,
+          },
+        });
 
         const anterioresAudit = {};
         const nuevosAudit = {};
@@ -1747,6 +1866,7 @@ export const facturasService = {
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "Usuario",
           modulo: "Facturación",
           tipo: "Edición de Factura",
@@ -1833,6 +1953,9 @@ export const facturasService = {
       const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
       const solicitudNotaRef = solicitudNotaId
         ? doc(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION, solicitudNotaId)
         : null;
@@ -1860,6 +1983,7 @@ export const facturasService = {
         }
 
         const facturaSnap = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnap.exists()) {
           throw new Error("La factura ya no existe en Firestore.");
@@ -2027,6 +2151,8 @@ export const facturasService = {
             fecha: fechaNota,
             usuario: userName || "SU",
           },
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "NOTA_CREDITO_APLICADA",
           updatedAt: serverTimestamp(),
         });
 
@@ -2061,31 +2187,35 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        const estabaVencida =
-          saldoAnterior > 0 && esFacturaVencida(facturaActual);
-        const quedaPagada = saldoRestante === 0;
+        const deltasFactura = construirDeltasFinancierosFactura({
+          facturaAnterior: facturaActual,
+          facturaNueva: {
+            ...facturaActual,
+            saldo_pendiente: saldoRestante,
+            estatus: nuevoEstatus,
+            total_notas_credito: totalNotasNuevo,
+          },
+        });
 
-        const statsUpdate = {
-          cartera_total: increment(-monto),
-          total_notas_credito: increment(monto),
-          ultima_actualizacion: serverTimestamp(),
-        };
-
-        if (estabaVencida) {
-          statsUpdate.cartera_vencida = increment(-monto);
-        }
-
-        if (quedaPagada) {
-          statsUpdate.facturas_pagadas = increment(1);
-          statsUpdate.facturas_pendientes = increment(-1);
-          statsUpdate.total_liquidado = increment(montoTotal);
-
-          if (estabaVencida) {
-            statsUpdate.facturas_vencidas = increment(-1);
-          }
-        }
-
-        transaction.set(statsRef, statsUpdate, { merge: true });
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "SU",
+          tipo: "NOTA_CREDITO_APLICADA",
+          entidadTipo: "FACTURA",
+          entidadId: factura.id,
+          facturaId: factura.id,
+          clienteId: facturaActual.cliente_id,
+          notaId,
+          actividadId: auditRef.id,
+          deltas: {
+            ...deltasFactura,
+          },
+          fechaOperacion: fechaNota,
+        });
 
         if (
           solicitudNotaRef &&
@@ -2127,6 +2257,7 @@ export const facturasService = {
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Nota de Crédito",
@@ -2190,9 +2321,13 @@ export const facturasService = {
       const facturaRef = doc(db, FACTURAS_COLLECTION, factura.id);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
 
       const resultado = await runTransaction(db, async (transaction) => {
         const facturaSnap = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnap.exists()) {
           throw new Error("La factura ya no existe en Firestore.");
@@ -2428,6 +2563,8 @@ export const facturasService = {
             fecha: fechaAnulacion,
             usuario: userName || "SU",
           },
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "NOTA_CREDITO_ANULADA",
           updatedAt: serverTimestamp(),
         });
 
@@ -2469,31 +2606,35 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        const quedaVencida =
-          saldoNuevo > 0 && esFacturaVencida(facturaActual);
-        const reabreFactura = saldoActual === 0 && saldoNuevo > 0;
+        const deltasFactura = construirDeltasFinancierosFactura({
+          facturaAnterior: facturaActual,
+          facturaNueva: {
+            ...facturaActual,
+            saldo_pendiente: saldoNuevo,
+            estatus: nuevoEstatus,
+            total_notas_credito: totalNotasNuevo,
+          },
+        });
 
-        const statsUpdate = {
-          cartera_total: increment(montoNota),
-          total_notas_credito: increment(-montoNota),
-          ultima_actualizacion: serverTimestamp(),
-        };
-
-        if (quedaVencida) {
-          statsUpdate.cartera_vencida = increment(montoNota);
-        }
-
-        if (reabreFactura) {
-          statsUpdate.facturas_pagadas = increment(-1);
-          statsUpdate.facturas_pendientes = increment(1);
-          statsUpdate.total_liquidado = increment(-montoTotal);
-
-          if (quedaVencida) {
-            statsUpdate.facturas_vencidas = increment(1);
-          }
-        }
-
-        transaction.set(statsRef, statsUpdate, { merge: true });
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "SU",
+          tipo: "NOTA_CREDITO_ANULADA",
+          entidadTipo: "FACTURA",
+          entidadId: factura.id,
+          facturaId: factura.id,
+          clienteId: facturaActual.cliente_id,
+          notaId: idNota,
+          actividadId: auditRef.id,
+          deltas: {
+            ...deltasFactura,
+          },
+          fechaOperacion: fechaAnulacion,
+        });
 
         if (
           solicitudNotaRef &&
@@ -2535,6 +2676,7 @@ export const facturasService = {
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Anulación de Nota de Crédito",
@@ -2619,9 +2761,13 @@ export const facturasService = {
       );
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
+      const metricasMovimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
 
       const resultado = await runTransaction(db, async (transaction) => {
         const facturaSnap = await transaction.get(facturaRef);
+        const statsSnapshot = await transaction.get(statsRef);
 
         if (!facturaSnap.exists()) {
           throw new Error("La factura ya no existe en Firestore.");
@@ -2725,7 +2871,7 @@ export const facturasService = {
         );
 
         const estabaVencida =
-          saldoPendiente > 0 && esFacturaVencida(factura);
+          saldoPendiente > 0 && factura.estatus === "Vencida";
         const estabaPagada = saldoPendiente === 0;
         const estabaPendiente = saldoPendiente > 0;
 
@@ -2759,57 +2905,56 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        const statsUpdate = {
-          facturas_total: increment(-1),
-          total_facturado: increment(-montoTotal),
-          ultima_actualizacion: serverTimestamp(),
-        };
-
-        if (saldoPendiente > 0) {
-          statsUpdate.cartera_total = increment(-saldoPendiente);
-        }
-
-        if (estabaPendiente) {
-          statsUpdate.facturas_pendientes = increment(-1);
-        }
-
-        if (estabaPagada) {
-          statsUpdate.facturas_pagadas = increment(-1);
-          statsUpdate.total_liquidado = increment(-montoTotal);
-        }
-
-        if (estabaVencida) {
-          statsUpdate.facturas_vencidas = increment(-1);
-          statsUpdate.cartera_vencida = increment(-saldoPendiente);
-        }
-
-        if (montoPagado > 0) {
-          statsUpdate.cobrado_historico = increment(-montoPagado);
-        }
-
         const totalAbonosARevertir =
           totalAbonosRegistrados > 0
             ? totalAbonosRegistrados
             : montoPagado;
 
-        if (totalAbonosARevertir > 0) {
-          statsUpdate.abonos_registrados = increment(
-            -totalAbonosARevertir,
-          );
-        }
-
-        if (abonosMes > 0) {
-          statsUpdate.ingresos_mes = increment(-abonosMes);
-        }
-
-        if (abonosSemana > 0) {
-          statsUpdate.ingresos_semana = increment(-abonosSemana);
-        }
-
-        transaction.set(statsRef, statsUpdate, { merge: true });
+        aplicarMetricasTransaccionales({
+          transaction,
+          statsSnapshot,
+          statsRef,
+          movimientoRef: metricasMovimientoRef,
+          actorUid,
+          actorNombre: userName || "SU",
+          tipo: "FACTURA_ELIMINADA",
+          entidadTipo: "FACTURA",
+          entidadId: facturaIdSeguro,
+          facturaId: facturaIdSeguro,
+          clienteId: factura.cliente_id,
+          actividadId: auditRef.id,
+          deltas: {
+            cartera_total:
+              saldoPendiente > 0 ? -saldoPendiente : 0,
+            cartera_vencida:
+              estabaVencida ? -saldoPendiente : 0,
+            ingresos_mes: abonosMes > 0 ? -abonosMes : 0,
+            ingresos_semana:
+              abonosSemana > 0 ? -abonosSemana : 0,
+            facturas_vencidas: estabaVencida ? -1 : 0,
+            facturas_pendientes: estabaPendiente ? -1 : 0,
+            facturas_pagadas: estabaPagada ? -1 : 0,
+            facturas_total: -1,
+            total_facturado: -montoTotal,
+            total_liquidado:
+              estabaPagada ? -montoTotal : 0,
+            cobrado_historico:
+              montoPagado > 0 ? -montoPagado : 0,
+            abonos_registrados:
+              totalAbonosARevertir > 0
+                ? -totalAbonosARevertir
+                : 0,
+            abonos_cantidad: abonos.length > 0 ? -abonos.length : 0,
+            monto_recuperado:
+              montoPagado > 0 ? -montoPagado : 0,
+            total_notas_credito:
+              totalNotasCredito > 0 ? -totalNotasCredito : 0,
+          },
+        });
 
         transaction.set(auditRef, {
           actor_uid: actorUid,
+          metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "SU",
           modulo: "Facturación",
           tipo: "Eliminación de Factura",

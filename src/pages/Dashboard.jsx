@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { doc, getDoc } from "firebase/firestore";
 import { useNavigate } from "react-router-dom";
 import {
@@ -18,6 +18,7 @@ import {
 
 import { db } from "../config/firebase";
 import { GlobalContext } from "../context/GlobalContext";
+import { obtenerPeriodosMetricas } from "../services/metricasService";
 import { useAgendaRango } from "../hooks/useAgendaRango";
 import {
   agruparEventosPorDia,
@@ -53,6 +54,50 @@ const STORAGE_NOTIFICACIONES_DESCARTADAS =
 
 const DIAS_EXPIRACION_NOTIFICACIONES_OCULTAS = 7;
 const MS_POR_DIA = 24 * 60 * 60 * 1000;
+
+const HORAS_ENTRE_RECONCILIACIONES = 24;
+const MS_ENTRE_RECONCILIACIONES =
+  HORAS_ENTRE_RECONCILIACIONES * 60 * 60 * 1000;
+
+const obtenerMilisegundosTimestamp = (valor) => {
+  if (!valor) return null;
+
+  if (valor?.toDate && typeof valor.toDate === "function") {
+    return valor.toDate().getTime();
+  }
+
+  if (typeof valor?.seconds === "number") {
+    return valor.seconds * 1000;
+  }
+
+  if (valor instanceof Date) {
+    return valor.getTime();
+  }
+
+  const fecha = new Date(valor);
+  return Number.isNaN(fecha.getTime()) ? null : fecha.getTime();
+};
+
+const necesitaReconciliacionAutomatica = (stats = {}) => {
+  const periodosActuales = obtenerPeriodosMetricas();
+  const ultimaReconciliacion = obtenerMilisegundosTimestamp(
+    stats.ultima_reconciliacion,
+  );
+  const metadataIncompleta =
+    !stats.ultimo_movimiento_id ||
+    !stats.periodo_mes ||
+    !stats.periodo_semana ||
+    stats.abonos_cantidad === undefined ||
+    stats.abonos_cantidad === null;
+  const periodoDesactualizado =
+    stats.periodo_mes !== periodosActuales.periodoMes ||
+    stats.periodo_semana !== periodosActuales.periodoSemana;
+  const reconciliacionVencida =
+    !ultimaReconciliacion ||
+    Date.now() - ultimaReconciliacion >= MS_ENTRE_RECONCILIACIONES;
+
+  return metadataIncompleta || periodoDesactualizado || reconciliacionVencida;
+};
 
 const obtenerClaveNotificacionesOcultas = (uid = "") =>
   `${STORAGE_NOTIFICACIONES_DESCARTADAS}:${String(uid || "sin-usuario").trim()}`;
@@ -165,6 +210,17 @@ const obtenerTiempoFirestore = (valor) => {
 
 const esTiempoReciente = (tiempo, dias = 7) =>
   Boolean(tiempo) && Date.now() - tiempo <= dias * 24 * 60 * 60 * 1000;
+
+const formatearUltimaSincronizacion = (valor) => {
+  const tiempo = obtenerTiempoFirestore(valor);
+
+  if (!tiempo) return "Sin sincronización registrada";
+
+  return new Date(tiempo).toLocaleString("es-MX", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+};
 
 const esTiempoDeHoy = (tiempo) => {
   if (!tiempo) return false;
@@ -366,11 +422,33 @@ export default function Dashboard() {
     userRole,
     clientes,
     currentUser,
+    metricasCargadas,
+    errorMetricas,
+    reconstruirMetricasEnNube,
   } = useContext(GlobalContext);
 
   const [panelExpandido, setPanelExpandido] = useState(false);
   const [filtroActividad, setFiltroActividad] = useState("TODOS");
   const [existenciaFacturasNotas, setExistenciaFacturasNotas] = useState({});
+  const [estadoRevisionMetricas, setEstadoRevisionMetricas] =
+    useState("pendiente");
+  const [mensajeMetricas, setMensajeMetricas] = useState("");
+  const reconciliacionAutomaticaIntentadaRef = useRef(false);
+  const requiereRevisionAutomatica =
+    userRole === "SU" &&
+    metricasCargadas &&
+    !errorMetricas &&
+    necesitaReconciliacionAutomatica(stats);
+  const estadoRevisionMetricasVisible = errorMetricas
+    ? "error"
+    : metricasCargadas &&
+        !requiereRevisionAutomatica &&
+        estadoRevisionMetricas === "pendiente"
+      ? "correctas"
+      : estadoRevisionMetricas;
+  const mensajeMetricasVisible = errorMetricas
+    ? "No fue posible verificar automáticamente las métricas. Revisa la conexión o los permisos publicados."
+    : mensajeMetricas;
   const claveNotificacionesOcultas = obtenerClaveNotificacionesOcultas(
     currentUser?.uid,
   );
@@ -504,6 +582,10 @@ export default function Dashboard() {
     month: "long",
     year: "numeric",
   });
+  const ultimaSincronizacionTexto =
+    formatearUltimaSincronizacion(stats?.ultima_actualizacion);
+  const ultimaReconciliacionTexto =
+    formatearUltimaSincronizacion(stats?.ultima_reconciliacion);
 
   const solicitudesPendientes = useMemo(
     () =>
@@ -1040,6 +1122,62 @@ export default function Dashboard() {
     ? notificacionesFiltradas
     : notificacionesFiltradas.slice(0, 4);
 
+  useEffect(() => {
+    if (
+      userRole !== "SU" ||
+      !metricasCargadas ||
+      errorMetricas ||
+      !requiereRevisionAutomatica ||
+      reconciliacionAutomaticaIntentadaRef.current ||
+      typeof reconstruirMetricasEnNube !== "function"
+    ) {
+      return undefined;
+    }
+
+    reconciliacionAutomaticaIntentadaRef.current = true;
+
+    const ejecutarReconciliacion = async () => {
+      setEstadoRevisionMetricas("verificando");
+      setMensajeMetricas("");
+
+      try {
+        const respuesta = await reconstruirMetricasEnNube({
+          reconstruirIndice: false,
+        });
+
+        if (!respuesta?.success) {
+          setEstadoRevisionMetricas("error");
+          setMensajeMetricas(
+            respuesta?.error ||
+              "La revisión automática de métricas no pudo completarse.",
+          );
+          return;
+        }
+
+        setEstadoRevisionMetricas("correctas");
+        setMensajeMetricas("");
+      } catch (error) {
+        console.error("Error reconciliando métricas automáticamente:", error);
+
+        setEstadoRevisionMetricas("error");
+        setMensajeMetricas(
+          "La revisión automática de métricas quedó pendiente. Las operaciones financieras continúan protegidas.",
+        );
+      }
+    };
+
+    ejecutarReconciliacion();
+
+    return undefined;
+  }, [
+    errorMetricas,
+    metricasCargadas,
+    reconstruirMetricasEnNube,
+    requiereRevisionAutomatica,
+    userRole,
+  ]);
+
+
   return (
     <div className="flex flex-col space-y-4 md:space-y-6 relative pb-6 text-sm animate-fade-in">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end mt-2 md:mt-4 gap-2 md:gap-4">
@@ -1053,15 +1191,47 @@ export default function Dashboard() {
           </p>
         </div>
 
-        <div className="hidden sm:block text-left md:text-right">
-          <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
-            Fecha actual
-          </p>
-          <p className="text-xs md:text-sm font-black text-[#0a192f] capitalize">
-            {fechaActualTexto}
-          </p>
+        <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:items-end">
+          <div className="hidden text-left sm:block md:text-right">
+            <p className="text-[10px] font-black uppercase tracking-wider text-gray-400">
+              Fecha actual
+            </p>
+            <p className="text-xs md:text-sm font-black text-[#0a192f] capitalize">
+              {fechaActualTexto}
+            </p>
+            <p className="mt-1 text-[10px] font-semibold text-gray-400">
+              Métricas: {ultimaSincronizacionTexto}
+            </p>
+          </div>
+
+          {userRole === "SU" && (
+            <p
+              className={`text-[10px] font-semibold ${
+                estadoRevisionMetricasVisible === "error"
+                  ? "text-amber-600"
+                  : estadoRevisionMetricasVisible === "verificando"
+                    ? "text-blue-600"
+                    : "text-green-600"
+              }`}
+            >
+              {estadoRevisionMetricasVisible === "verificando"
+                ? "Verificando métricas automáticamente..."
+                : estadoRevisionMetricasVisible === "error"
+                  ? "Revisión automática pendiente"
+                  : estadoRevisionMetricasVisible === "pendiente"
+                    ? "Preparando revisión automática..."
+                    : `Métricas verificadas: ${ultimaReconciliacionTexto}`}
+            </p>
+          )}
         </div>
       </div>
+
+      {mensajeMetricasVisible &&
+        estadoRevisionMetricasVisible === "error" && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-700">
+          {mensajeMetricasVisible}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <TarjetaKPI
@@ -1096,7 +1266,7 @@ export default function Dashboard() {
         <TarjetaKPI
           etiqueta="Ingresos del mes"
           valor={`$${formatearMoneda(stats?.ingresos_mes)}`}
-          descripcion="Flujo de caja recuperado durante el mes."
+          descripcion={`Flujo recuperado en ${stats?.periodo_mes || "el periodo actual"}.`}
           icono={TrendingUp}
           variante="verde"
         />

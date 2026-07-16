@@ -1,10 +1,12 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   limit,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   startAfter,
   Timestamp,
@@ -12,12 +14,19 @@ import {
   writeBatch,
 } from "firebase/firestore";
 
-import { db } from "../config/firebase";
+import { auth, db } from "../config/firebase";
+import {
+  METRICAS_COLLECTION,
+  METRICAS_DOC,
+  METRICAS_MOVIMIENTOS_COLLECTION,
+  prepararReconciliacionMetricas,
+} from "./metricasService";
 
 const FACTURAS_COLLECTION = "facturas";
 const ABONOS_INDEX_COLLECTION = "abonos_index";
-const STATS_COLLECTION = "metricas_globales";
-const STATS_DOC = "stats_actuales";
+const CLIENTES_COLLECTION = "clientes";
+const ACTIVIDAD_COLLECTION = "actividad";
+const USUARIOS_COLLECTION = "usuarios";
 const TAMANO_BATCH = 400;
 const ABONOS_POR_PAGINA = 10;
 
@@ -292,16 +301,54 @@ export const abonosIndexService = {
     }
   },
 
-  reconstruirDesdeFacturas: async ({ actor_uid, userName = "SU" } = {}) => {
-    if (!actor_uid) {
+  reconstruirDesdeFacturas: async ({
+    actor_uid,
+    userName = "SU",
+    reconstruirIndice = true,
+  } = {}) => {
+    const actorUidSesion = String(auth.currentUser?.uid || "").trim();
+    const actorUidRecibido = String(actor_uid || "").trim();
+    const actorUid = actorUidSesion || actorUidRecibido;
+
+    if (!actorUid || actorUid !== actorUidSesion) {
       return {
         success: false,
-        error: "No se identificó al usuario responsable.",
+        error: "No se identificó una sesión válida para reconstruir métricas.",
       };
     }
 
     try {
-      const facturasSnap = await getDocs(collection(db, FACTURAS_COLLECTION));
+      const usuarioSnapshot = await getDoc(
+        doc(db, USUARIOS_COLLECTION, actorUid),
+      );
+
+      if (
+        !usuarioSnapshot.exists() ||
+        usuarioSnapshot.data().activo !== true ||
+        usuarioSnapshot.data().rol !== "SU"
+      ) {
+        throw new Error(
+          "Solo el Súper Usuario activo puede reconciliar las métricas.",
+        );
+      }
+
+      const statsRef = doc(db, METRICAS_COLLECTION, METRICAS_DOC);
+      const statsInicialSnapshot = await getDoc(statsRef);
+
+      if (!statsInicialSnapshot.exists()) {
+        throw new Error(
+          "Las métricas globales no están inicializadas.",
+        );
+      }
+
+      const ultimoMovimientoInicial = String(
+        statsInicialSnapshot.data().ultimo_movimiento_id || "",
+      );
+      const [facturasSnap, clientesSnap] = await Promise.all([
+        getDocs(collection(db, FACTURAS_COLLECTION)),
+        getDocs(collection(db, CLIENTES_COLLECTION)),
+      ]);
+
       let estadoBatch = {
         batch: writeBatch(db),
         operaciones: 0,
@@ -314,6 +361,14 @@ export const abonosIndexService = {
         cartera_vencida: 0,
         ingresos_mes: 0,
         ingresos_semana: 0,
+        clientes_activos: clientesSnap.docs.filter((documento) => {
+          const cliente = documento.data();
+
+          return (
+            cliente.activo !== false &&
+            cliente.estatus !== "Inactivo"
+          );
+        }).length,
         facturas_vencidas: 0,
         facturas_pendientes: 0,
         facturas_pagadas: 0,
@@ -322,6 +377,7 @@ export const abonosIndexService = {
         total_liquidado: 0,
         cobrado_historico: 0,
         abonos_registrados: 0,
+        abonos_cantidad: 0,
         total_notas_credito: 0,
         monto_recuperado: 0,
       };
@@ -336,9 +392,15 @@ export const abonosIndexService = {
         };
 
         const montoTotal = redondearMoneda(factura.monto_total);
-        const saldoPendiente = redondearMoneda(factura.saldo_pendiente);
-        const totalNotasCredito = redondearMoneda(factura.total_notas_credito);
-        const abonos = Array.isArray(factura.abonos) ? factura.abonos : [];
+        const saldoPendiente = redondearMoneda(
+          factura.saldo_pendiente,
+        );
+        const totalNotasCredito = redondearMoneda(
+          factura.total_notas_credito,
+        );
+        const abonos = Array.isArray(factura.abonos)
+          ? factura.abonos
+          : [];
         const pagada = saldoPendiente === 0;
         const vencida = esFacturaVencida(factura);
 
@@ -359,10 +421,14 @@ export const abonosIndexService = {
           metricas.cartera_vencida += saldoPendiente;
         }
 
-        if (abonos.length > 0) facturasConAbonos += 1;
+        if (abonos.length > 0) {
+          facturasConAbonos += 1;
+        }
 
         for (const abono of abonos) {
-          const idAbono = abono.id_abono || `abn-${documento.id}-${abonosIndexados}`;
+          const idAbono =
+            abono.id_abono ||
+            `abn-${documento.id}-${abonosIndexados}`;
           const monto = redondearMoneda(abono.monto);
           const payload = construirAbonoIndexPayload({
             factura,
@@ -370,68 +436,128 @@ export const abonosIndexService = {
               ...abono,
               id_abono: idAbono,
             },
-            actorUid: actor_uid,
+            actorUid,
             userName,
             estado: "ACTIVO",
             activo: true,
           });
 
-          const ref = doc(
-            db,
-            ABONOS_INDEX_COLLECTION,
-            construirAbonoIndexId(documento.id, idAbono),
-          );
+          if (reconstruirIndice) {
+            const ref = doc(
+              db,
+              ABONOS_INDEX_COLLECTION,
+              construirAbonoIndexId(documento.id, idAbono),
+            );
 
-          estadoBatch.batch.set(ref, payload, { merge: true });
-          estadoBatch.operaciones += 1;
-          abonosIndexados += 1;
+            estadoBatch.batch.set(ref, payload, { merge: true });
+            estadoBatch.operaciones += 1;
+            abonosIndexados += 1;
+          }
 
           metricas.monto_recuperado += monto;
           metricas.cobrado_historico += monto;
           metricas.abonos_registrados += monto;
+          metricas.abonos_cantidad += 1;
 
-          if (esMismoMes(payload.fecha, hoy)) metricas.ingresos_mes += monto;
-          if (esMismaSemana(payload.fecha, hoy)) metricas.ingresos_semana += monto;
+          if (esMismoMes(payload.fecha, hoy)) {
+            metricas.ingresos_mes += monto;
+          }
 
-          estadoBatch = await asegurarBatchDisponible(estadoBatch);
+          if (esMismaSemana(payload.fecha, hoy)) {
+            metricas.ingresos_semana += monto;
+          }
+
+          if (reconstruirIndice) {
+            estadoBatch = await asegurarBatchDisponible(estadoBatch);
+          }
         }
       }
 
-      const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
-      const statsPayload = Object.fromEntries(
-        Object.entries(metricas).map(([campo, valor]) => [campo, redondearMoneda(valor)]),
-      );
-
-      estadoBatch.batch.set(
-        statsRef,
-        {
-          ...statsPayload,
-          ultima_actualizacion: serverTimestamp(),
-        },
-        { merge: true },
-      );
-      estadoBatch.operaciones += 1;
-
-      if (estadoBatch.operaciones > 0) {
+      if (reconstruirIndice && estadoBatch.operaciones > 0) {
         await estadoBatch.batch.commit();
         estadoBatch.commits += 1;
       }
+
+      const movimientoRef = doc(
+        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
+      );
+      const actividadRef = doc(
+        collection(db, ACTIVIDAD_COLLECTION),
+      );
+      const reconstruccionId = `rebuild-${Date.now()}-${movimientoRef.id}`;
+
+      await runTransaction(db, async (transaction) => {
+        const statsActualSnapshot = await transaction.get(statsRef);
+
+        if (!statsActualSnapshot.exists()) {
+          throw new Error(
+            "Las métricas globales dejaron de existir durante la reconstrucción.",
+          );
+        }
+
+        const ultimoMovimientoActual = String(
+          statsActualSnapshot.data().ultimo_movimiento_id || "",
+        );
+
+        if (ultimoMovimientoActual !== ultimoMovimientoInicial) {
+          throw new Error(
+            "Las métricas cambiaron mientras se verificaban. No se sobrescribieron; la revisión se intentará nuevamente después.",
+          );
+        }
+
+        const { movimientoPayload, statsPayload } =
+          prepararReconciliacionMetricas({
+            statsActuales: statsActualSnapshot.data(),
+            metricasObjetivo: metricas,
+            movimientoRef,
+            actorUid,
+            actorNombre: userName || "SU",
+            actividadId: actividadRef.id,
+            reconstruccionId,
+          });
+
+        transaction.set(movimientoRef, movimientoPayload);
+        transaction.update(statsRef, statsPayload);
+        transaction.set(actividadRef, {
+          actor_uid: actorUid,
+          metricas_movimiento_id: movimientoRef.id,
+          usuario: userName || "SU",
+          modulo: "Métricas",
+          tipo: "Reconstrucción",
+          reconstruccion_id: reconstruccionId,
+          facturas_revisadas: facturasSnap.size,
+          clientes_revisados: clientesSnap.size,
+          abonos_indexados: abonosIndexados,
+          detalle: reconstruirIndice
+            ? "Se reconstruyeron el índice de abonos y las métricas globales desde los documentos operativos."
+            : "Se verificaron y reconciliaron automáticamente las métricas globales desde los documentos operativos.",
+          serverTime: serverTimestamp(),
+        });
+      });
 
       return {
         success: true,
         data: {
           facturasRevisadas: facturasSnap.size,
+          clientesRevisados: clientesSnap.size,
           facturasConAbonos,
           abonosIndexados,
-          montoRecuperado: redondearMoneda(metricas.monto_recuperado),
-          commits: estadoBatch.commits,
+          indiceReconstruido: reconstruirIndice,
+          montoRecuperado: redondearMoneda(
+            metricas.monto_recuperado,
+          ),
+          movimientoMetricasId: movimientoRef.id,
+          commits: estadoBatch.commits + 1,
         },
       };
     } catch (error) {
-      console.error("Error reconstruyendo abonos_index:", error);
+      console.error("Error reconciliando métricas:", error);
+
       return {
         success: false,
-        error: error?.message || "No se pudo reconstruir el índice de abonos.",
+        error:
+          error?.message ||
+          "No se pudieron reconciliar las métricas.",
       };
     }
   },
