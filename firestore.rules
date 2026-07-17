@@ -1,4 +1,4 @@
-// MLH_PASO7B_SPARK_SIMPLE_V2_6_ROLES_2026_07_16
+// MLH_PASO7C_SEGURIDAD_OPERATIVA_ROLES_2026_07_16
 rules_version = '2';
 
 service cloud.firestore {
@@ -1734,7 +1734,6 @@ service cloud.firestore {
             'deuda_actual', 'credito_disponible', 'monto_ultimo_pago', 'fecha_ultimo_pago', 
             'metodo_ultimo_pago', 'ultimo_deposito_monto', 'ultimo_deposito_fecha', 
             'ultimo_deposito_metodo', 'ultimo_abono_id', 'ultimo_abono_factura_id', 'updatedAt', 
-            // ✅ FIX: Permitimos que un abono o anulación cambie el estado de la línea si excede el límite
             'linea_credito_estado', 'ultima_accion' 
           ])
         && campoNoCambia('limite_credito')
@@ -2110,69 +2109,40 @@ service cloud.firestore {
       allow read: if isStaff();
 
       allow create: if isADMIN()
-        && request.resource.data.keys().hasOnly([
-          'id', 'tipo_solicitud', 'factura_id', 'folio', 'cliente_id', 'cliente', 
-          'monto_nota', 'saldo_actual', 'motivo', 'observaciones', 'estatus', 
-          'solicitado_por_uid', 'solicitado_por_nombre', 'createdAt'
-        ])
         && request.resource.data.id == solicitudId
         && request.resource.data.tipo_solicitud == 'NOTA_CREDITO'
         && request.resource.data.factura_id is string
         && request.resource.data.factura_id != ''
-        && request.resource.data.folio is string
         && request.resource.data.cliente_id is string
         && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente is string
         && request.resource.data.monto_nota is number
         && request.resource.data.monto_nota > 0
         && request.resource.data.saldo_actual is number
-        && request.resource.data.saldo_actual > 0
         && request.resource.data.monto_nota <= request.resource.data.saldo_actual
-        && request.resource.data.motivo is string
-        && request.resource.data.motivo != ''
-        && request.resource.data.observaciones is string
+        && request.resource.data.get('motivo', '') is string
         && request.resource.data.estatus == 'Pendiente'
-        && request.resource.data.solicitado_por_uid == request.auth.uid
-        && request.resource.data.solicitado_por_nombre is string
-        && request.resource.data.createdAt is timestamp;
+        && request.resource.data.solicitado_por_uid == request.auth.uid;
 
       allow update: if isSU()
         && (
           (
             resource.data.estatus == 'Pendiente'
             && request.resource.data.estatus in ['Autorizado', 'Rechazado']
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid', 
-                'motivo_resolucion', 'nota_credito_id', 'saldo_restante'
-              ])
             && request.resource.data.resolvedAt is timestamp
-            && request.resource.data.resolvedBy is string
             && request.resource.data.resolvedByUid == request.auth.uid
             && (
-              (
-                request.resource.data.estatus == 'Autorizado'
-                && resumenNotaAutorizadaValido()
-              )
+              (request.resource.data.estatus == 'Autorizado' && resumenNotaAutorizadaValido())
               ||
-              (
-                request.resource.data.estatus == 'Rechazado'
-                && resumenNotaRechazadaValido()
-              )
+              (request.resource.data.estatus == 'Rechazado' && resumenNotaRechazadaValido())
             )
           )
           ||
           (
             resource.data.estatus in ['Autorizado', 'Aprobado']
             && request.resource.data.estatus == 'Anulada'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'estatus', 'nota_anulada', 'anuladaAt', 'anuladaBy', 
-                'anuladaByUid', 'motivo_anulacion'
-              ])
             && request.resource.data.nota_anulada == true
             && request.resource.data.anuladaAt is timestamp
-            && request.resource.data.anuladaBy is string
             && request.resource.data.anuladaByUid == request.auth.uid
-            && request.resource.data.motivo_anulacion is string
             && resumenNotaAnuladaValido()
           )
         );
@@ -2181,9 +2151,63 @@ service cloud.firestore {
     }
 
     match /notas_credito_resumen_clientes/{clienteId} {
+      // Permitimos lectura para que la transacción del ADMIN pueda verificar el estado previo
+      allow read: if isStaff(); 
+
+      allow create: if isStaff()
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.get('autorizadas', 0) == 0
+        && request.resource.data.get('rechazadas', 0) == 0
+        && request.resource.data.get('anuladas', 0) == 0
+        && request.resource.data.ultimo_estado == 'Pendiente';
+
+      allow update: if isStaff()
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && (
+          isSU() || (
+            // Blindaje: El ADMIN puede sumar a 'pendientes' y 'monto_total_notas',
+            // PERO NUNCA puede alterar los acumulados de dinero autorizado, rechazado o anulado.
+            request.resource.data.get('autorizadas', 0) == resource.data.get('autorizadas', 0)
+            && request.resource.data.get('rechazadas', 0) == resource.data.get('rechazadas', 0)
+            && request.resource.data.get('anuladas', 0) == resource.data.get('anuladas', 0)
+            && request.resource.data.ultimo_estado == 'Pendiente'
+          )
+        );
+
+      allow delete: if false;
+    }
+    match /notas_credito_resumen_clientes/{clienteId} {
       allow read: if isSU();
 
-      allow create, update: if isStaff()
+      // ✅ FIX 7C: Separación de permisos para evitar que ADMIN altere datos históricos
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+          'id', 'cliente_id', 'cliente', 'total_solicitudes', 'pendientes', 
+          'autorizadas', 'rechazadas', 'anuladas', 'monto_total_notas', 
+          'ultimo_estado', 'ultimo_monto_nota', 'ultimo_folio', 
+          'ultimo_movimiento_at', 'ultimo_solicitado_por', 'ultimo_resuelto_por', 'activo'
+        ])
+        && request.resource.data.id == clienteId
+        && request.resource.data.cliente_id == clienteId
+        && request.resource.data.cliente is string
+        && request.resource.data.cliente != ''
+        && (!request.resource.data.keys().hasAny(['total_solicitudes']) || (request.resource.data.total_solicitudes is number && request.resource.data.total_solicitudes >= 0))
+        && (!request.resource.data.keys().hasAny(['pendientes']) || (request.resource.data.pendientes is number && request.resource.data.pendientes >= 0))
+        && (!request.resource.data.keys().hasAny(['autorizadas']) || request.resource.data.autorizadas == 0)
+        && (!request.resource.data.keys().hasAny(['rechazadas']) || request.resource.data.rechazadas == 0)
+        && (!request.resource.data.keys().hasAny(['anuladas']) || request.resource.data.anuladas == 0)
+        && (!request.resource.data.keys().hasAny(['monto_total_notas']) || request.resource.data.monto_total_notas == 0)
+        && request.resource.data.ultimo_estado == 'Pendiente'
+        && (!request.resource.data.keys().hasAny(['ultimo_monto_nota']) || request.resource.data.ultimo_monto_nota is number)
+        && (!request.resource.data.keys().hasAny(['ultimo_folio']) || request.resource.data.ultimo_folio is string)
+        && request.resource.data.ultimo_movimiento_at is timestamp
+        && (!request.resource.data.keys().hasAny(['ultimo_solicitado_por']) || request.resource.data.ultimo_solicitado_por is string)
+        && (!request.resource.data.keys().hasAny(['ultimo_resuelto_por']) || request.resource.data.ultimo_resuelto_por == '')
+        && request.resource.data.activo is bool;
+
+      allow update: if isStaff()
         && request.resource.data.keys().hasOnly([
           'id', 'cliente_id', 'cliente', 'total_solicitudes', 'pendientes', 
           'autorizadas', 'rechazadas', 'anuladas', 'monto_total_notas', 
@@ -2206,14 +2230,22 @@ service cloud.firestore {
         && request.resource.data.ultimo_movimiento_at is timestamp
         && (!request.resource.data.keys().hasAny(['ultimo_solicitado_por']) || request.resource.data.ultimo_solicitado_por is string)
         && (!request.resource.data.keys().hasAny(['ultimo_resuelto_por']) || request.resource.data.ultimo_resuelto_por is string)
-        && request.resource.data.activo is bool;
+        && request.resource.data.activo is bool
+        && (
+          isSU() || (
+            request.resource.data.get('autorizadas', 0) == resource.data.get('autorizadas', 0)
+            && request.resource.data.get('rechazadas', 0) == resource.data.get('rechazadas', 0)
+            && request.resource.data.get('anuladas', 0) == resource.data.get('anuladas', 0)
+            && request.resource.data.get('monto_total_notas', 0) == resource.data.get('monto_total_notas', 0)
+            && request.resource.data.ultimo_estado == 'Pendiente'
+          )
+        );
 
       allow delete: if false;
     }
 
     match /compromisos/{compromisoId} {
       allow read: if isStaff();
-
       allow create: if isStaff()
         && request.resource.data.keys().hasOnly([
           'tipo_vinculo', 'titulo', 'motivo', 'cliente_id', 'cliente_nombre', 
@@ -2328,11 +2360,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-
     match /abonos_index/{abonoIndexId} {
       allow read: if isSU();
 
-      allow create, update: if isStaff()
+      allow create: if isStaff()
         && request.resource.data.keys().hasOnly([
           'id', 'id_abono', 'factura_id', 'folio', 'cliente_id', 'cliente',
           'fecha', 'monto', 'metodo', 'registrado_por', 'registrado_por_uid',
@@ -2354,15 +2385,28 @@ service cloud.firestore {
         && request.resource.data.metodo is string
         && request.resource.data.registrado_por is string
         && request.resource.data.registrado_por_uid is string
-        && request.resource.data.estado in ['ACTIVO', 'CANCELADO', 'ELIMINADO_PRUEBA']
-        && request.resource.data.activo is bool
+        && request.resource.data.estado == 'ACTIVO'
+        && request.resource.data.activo == true
         && request.resource.data.origen is string
         && request.resource.data.indexado_por_uid == request.auth.uid
+        && request.resource.data.updatedAt is timestamp;
+
+      allow update: if isSU()
+        // Permitimos que el frontend de React envíe el objeto completo, 
+        // pero exigimos que la transición de estado sea válida:
+        && resource.data.estado == 'ACTIVO'
+        && request.resource.data.estado == 'CANCELADO'
+        && request.resource.data.activo == false
+        && request.resource.data.cancelado_at is timestamp
+        && request.resource.data.cancelado_por_uid == request.auth.uid
+        && request.resource.data.cancelado_por is string
         && request.resource.data.updatedAt is timestamp
-        && (
-          request.resource.data.estado == 'ACTIVO'
-          || isSU()
-        );
+        // Blindaje financiero: los datos base del abono NO pueden cambiar en la anulación
+        && campoNoCambia('monto')
+        && campoNoCambia('factura_id')
+        && campoNoCambia('cliente_id')
+        && campoNoCambia('id_abono')
+        && campoNoCambia('fecha');
 
       allow delete: if false;
     }
