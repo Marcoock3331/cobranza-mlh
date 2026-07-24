@@ -98,6 +98,13 @@ export const generarDiasRango = (inicio, fin) => {
 };
 
 export const clasificarFacturaAgenda = (factura) => {
+  if (
+    factura?.cancelada === true ||
+    factura?.estatus === "Cancelada"
+  ) {
+    return null;
+  }
+
   const saldo = Number(factura?.saldo_pendiente) || 0;
   if (saldo <= 0) return null;
 

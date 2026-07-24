@@ -11,6 +11,11 @@ import { GlobalContext } from "../context/GlobalContext";
 import { db } from "../config/firebase";
 import PaginacionGlobal from "../components/ui/PaginacionGlobal";
 import { calcularDiasVencidos } from "../utils/fechas";
+import {
+  esFacturaCancelada,
+  esFacturaPagada,
+  esFacturaVencida,
+} from "../utils/estadosFactura";
 import { clientesService } from "../services/clientesService";
 import { lineaCreditoService } from "../services/lineaCreditoService";
 import { useFacturasCliente } from "../hooks/useFacturasCliente";
@@ -126,9 +131,11 @@ const obtenerResumenFacturaVisual = (factura = {}) => {
   const saldoPendiente = Number(factura.saldo_pendiente) || 0;
   const totalNotasCredito = obtenerTotalNotasCredito(factura);
   const montoAbonado = obtenerMontoAbonadoSeguro(factura);
-  const esVencida = factura.estatus === "Vencida";
-  const esPagada = saldoPendiente <= 0;
-  const diasVencidos = esVencida
+const esCancelada = esFacturaCancelada(factura);
+const esVencida = esFacturaVencida(factura);
+const esPagada = esFacturaPagada(factura);
+const diasVencidos =
+  esVencida && !esCancelada
     ? calcularDiasVencidos(factura.vencimiento)
     : 0;
 
@@ -145,9 +152,26 @@ const obtenerResumenFacturaVisual = (factura = {}) => {
     porcentajeLiquidado,
     esVencida,
     esPagada,
+    esCancelada,
     diasVencidos,
   };
 };
+    const obtenerEtiquetaEstadoFactura = ({
+  esCancelada,
+  esPagada,
+  esVencida,
+  diasVencidos,
+  estatus,
+}) => {
+  if (esCancelada) return "Cancelada";
+
+  if (esPagada) return "Pagada";
+
+  if (esVencida) return `Vencida (${diasVencidos}d)`;
+
+  return estatus || "Pendiente";
+};
+
 
 const normalizarEstatusNotaCredito = (estatus = "") => {
   const valor = String(estatus || "Pendiente").toLowerCase();
@@ -166,6 +190,10 @@ const normalizarEstatusNotaCredito = (estatus = "") => {
 
   return "Pendiente";
 };
+
+  const notaCreditoEstaAnulada = (nota = {}) =>
+  nota?.cancelada === true ||
+  ["Anulada", "Cancelada"].includes(nota?.estado);
 
 const obtenerEstiloNotaCredito = (estatus) => {
   const normalizado = normalizarEstatusNotaCredito(estatus);
@@ -334,7 +362,7 @@ const obtenerHistorialNotasCreditoExpediente = (
     }
 
     const estatus =
-      notaRelacionada?.cancelada || ["Anulada", "Cancelada"].includes(notaRelacionada?.estado)
+      notaCreditoEstaAnulada(notaRelacionada)
         ? "Anulada"
         : normalizarEstatusNotaCredito(solicitud.estatus);
 
@@ -381,8 +409,7 @@ const obtenerHistorialNotasCreditoExpediente = (
       ...nota,
       tipo_historial: "NOTA_DIRECTA",
       estatus_historial:
-        nota.cancelada || ["Anulada", "Cancelada"].includes(nota.estado)
-          ? "Anulada"
+notaCreditoEstaAnulada(nota)          ? "Anulada"
           : "Autorizada",
       fechaTexto: formatearFechaNotaCredito(nota.fecha_anulacion || nota.fecha),
       fechaOrden: nota.fecha_anulacion || nota.fecha,
@@ -1008,7 +1035,7 @@ export default function ExpedienteCliente() {
     if (userRole !== "SU") {
       mostrarNotificacion(
         "Acción no permitida",
-        "Solo el SU puede eliminar facturas.",
+        "Solo el SU puede cancelar facturas.",
         "error",
       );
       return;
@@ -1026,7 +1053,7 @@ export default function ExpedienteCliente() {
     if (!facturaSeleccionada?.id) {
       mostrarNotificacion(
         "Error",
-        "No se identificó la factura que será eliminada.",
+        "No se identificó la factura que será cancelada.",
         "error",
       );
       return;
@@ -1040,7 +1067,7 @@ export default function ExpedienteCliente() {
       if (!respuesta?.success) {
         mostrarNotificacion(
           "Error",
-          respuesta?.error || "No se pudo eliminar la factura.",
+          respuesta?.error || "No se pudo cancelar la factura.",
           "error",
         );
         return;
@@ -1050,15 +1077,15 @@ export default function ExpedienteCliente() {
       await recargarFacturasCliente();
 
       mostrarNotificacion(
-        "Factura eliminada",
-        "Se eliminó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
+        "Factura cancelada",
+        "Se archivó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
         "exito",
       );
     } catch (error) {
-      console.error("Error eliminando factura desde expediente:", error);
+      console.error("Error cancelando factura desde expediente:", error);
       mostrarNotificacion(
         "Error",
-        "Ocurrió un error inesperado al eliminar la factura.",
+        "Ocurrió un error inesperado al cancelar la factura.",
         "error",
       );
     } finally {
@@ -1341,7 +1368,12 @@ export default function ExpedienteCliente() {
             </h3>
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <div className="flex bg-gray-100 p-1 rounded-xl md:rounded-lg border border-gray-200 w-full sm:w-auto overflow-x-auto hide-scrollbar-mobile shrink-0">
-                {["Historial", "Vencidas", "Pagadas"].map((tab) => (
+                {[
+  "Historial",
+  "Vencidas",
+  "Pagadas",
+  ...(userRole === "SU" ? ["Canceladas"] : []),
+].map((tab) => (
                   <button
                     key={tab}
                     onClick={() => cambiarFiltroFacturas(tab)}
@@ -1370,7 +1402,7 @@ export default function ExpedienteCliente() {
                           Total
                         </th>
                         <th className="px-4 py-3 text-right whitespace-nowrap">
-                          Saldo
+                          Restante
                         </th>
                         <th className="px-4 py-3 text-center whitespace-nowrap">
                           Estado
@@ -1385,6 +1417,7 @@ export default function ExpedienteCliente() {
                           montoTotal,
                           esVencida,
                           esPagada,
+                          esCancelada,
                           diasVencidos,
                         } = obtenerResumenFacturaVisual(fac);
 
@@ -1396,20 +1429,22 @@ export default function ExpedienteCliente() {
                             }}
                             className="hover:bg-blue-50/40 cursor-pointer transition-colors text-xs"
                           >
-                            <td className="px-4 py-3 font-mono font-black text-blue-600 whitespace-nowrap">
+                            <td className={`px-4 py-3 font-mono font-black whitespace-nowrap ${esCancelada ? 'text-gray-400' : 'text-blue-600'}`}>
                               {fac.folio}
                             </td>
 
                             <td className="px-4 py-3 text-gray-600 whitespace-nowrap">
-                              <div className="font-medium">
-                                Emi: {fac.emision}
+                              <div className="text-[11px] text-gray-600">
+                                <span className="font-semibold">Emisión:</span> {fac.emision}
                               </div>
-                              <div className="text-[11px] text-red-500 font-mono">
-                                Vence: {fac.vencimiento}
+
+                              <div className="text-[11px] text-gray-600">
+                                <span className="font-bold">Vence:</span>{" "}
+                                {fac.vencimiento}
                               </div>
                             </td>
 
-                            <td className="px-4 py-3 font-black text-gray-900 text-right whitespace-nowrap">
+                            <td className={`px-4 py-3 font-black text-right whitespace-nowrap ${esCancelada ? 'text-gray-400' : 'text-gray-900'}`}>
                               ${montoTotal.toLocaleString("es-MX")}
                             </td>
 
@@ -1417,33 +1452,33 @@ export default function ExpedienteCliente() {
                               {saldoPendiente > 0 ? (
                                 <span
                                   className={
-                                    esVencida
-                                      ? "text-red-600"
-                                      : "text-[#0a192f]"
+                                    esCancelada
+                                      ? "text-gray-400"
+                                      : esVencida
+                                        ? "text-red-600"
+                                        : "text-[#0a192f]"
                                   }
                                 >
                                   ${saldoPendiente.toLocaleString("es-MX")}
                                 </span>
                               ) : (
-                                <span className="text-green-600">$0.00</span>
+                                <span className={esCancelada ? "text-gray-400" : "text-green-600"}>$0.00</span>
                               )}
                             </td>
 
                             <td className="px-4 py-3 text-center whitespace-nowrap">
                               <span
-                                className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase border inline-flex items-center justify-center ${
-                                  esPagada
-                                    ? "bg-green-50 border-green-200 text-green-700"
-                                    : esVencida
-                                      ? "bg-red-50 border-red-200 text-red-700"
-                                      : "bg-blue-50 border-blue-200 text-blue-700"
+                                className={`inline-block px-2.5 py-1 md:py-0.5 font-black uppercase rounded text-[10px] md:text-[10px] ${
+                                  esCancelada ? "bg-slate-100 text-slate-600" : esPagada ? "bg-green-100 text-green-800" : esVencida ? "bg-red-100 text-red-800" : "bg-blue-100 text-blue-800"
                                 }`}
                               >
-                                {esPagada
-                                  ? "Pagada"
-                                  : esVencida
-                                    ? `Vencida (${diasVencidos}d)`
-                                    : fac.estatus}
+{obtenerEtiquetaEstadoFactura({
+  esCancelada,
+  esPagada,
+  esVencida,
+  diasVencidos,
+  estatus: fac.estatus,
+})}
                               </span>
                             </td>
                           </tr>
@@ -1455,13 +1490,15 @@ export default function ExpedienteCliente() {
 
                 <div className="md:hidden divide-y divide-gray-100">
                   {facturasPaginadas.map((fac) => {
-                    const saldoPendiente = Number(fac.saldo_pendiente) || 0;
-                    const montoTotal = Number(fac.monto_total) || 0;
-                    const esVencida = fac.estatus === "Vencida";
-                    const esPagada = saldoPendiente <= 0;
-                    const diasVencidos = esVencida
-                      ? calcularDiasVencidos(fac.vencimiento)
-                      : 0;
+                    const {
+                      saldoPendiente,
+                      montoTotal,
+                      esVencida,
+                      esPagada,
+                      esCancelada,
+                      diasVencidos,
+                    } = obtenerResumenFacturaVisual(fac);
+
 
                     return (
                       <button
@@ -1473,28 +1510,34 @@ export default function ExpedienteCliente() {
                         className="w-full p-4 text-left active:bg-blue-50 transition-colors"
                       >
                         <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="font-mono font-black text-blue-600 text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className={`font-mono font-black text-sm truncate ${esCancelada ? 'text-gray-400' : 'text-blue-600'}`}>
                               {fac.folio}
                             </p>
                             <p className="text-[11px] text-gray-500 mt-1">
-                              Emi: {fac.emision}
-                            </p>
-                            <p className="text-[11px] text-red-500 font-mono">
-                              Vence: {fac.vencimiento}
+                                <span className="font-semibold">Emisión:</span> {fac.emision}
+                              </p>
+
+                              <p className="text-[11px] text-gray-600">
+                              <span className="font-bold">Vence:</span>{" "}
+                              {fac.vencimiento}
                             </p>
                           </div>
 
                           <span
                             className={`shrink-0 px-2 py-1 rounded-md text-[9px] font-black uppercase border ${
-                              esPagada
+                              esCancelada
+                                ? "bg-slate-50 border-slate-200 text-slate-500"
+                                : esPagada
                                 ? "bg-green-50 border-green-200 text-green-700"
                                 : esVencida
                                   ? "bg-red-50 border-red-200 text-red-700"
                                   : "bg-blue-50 border-blue-200 text-blue-700"
                             }`}
                           >
-                            {esPagada
+                            {esCancelada
+                              ? "Cancelada"
+                              : esPagada
                               ? "Pagada"
                               : esVencida
                                 ? `${diasVencidos}d`
@@ -1505,24 +1548,26 @@ export default function ExpedienteCliente() {
                         <div className="grid grid-cols-2 gap-3 mt-3">
                           <div className="rounded-lg bg-gray-50 border border-gray-100 p-2">
                             <p className="text-[9px] font-black uppercase text-gray-400">
-                              Total
+                              Monto total
                             </p>
-                            <p className="text-sm font-black text-[#0a192f] mt-0.5">
+                            <p className={`text-sm font-black mt-0.5 ${esCancelada ? 'text-gray-400' : 'text-[#0a192f]'}`}>
                               ${montoTotal.toLocaleString("es-MX")}
                             </p>
                           </div>
 
                           <div className="rounded-lg bg-gray-50 border border-gray-100 p-2">
                             <p className="text-[9px] font-black uppercase text-gray-400">
-                              Saldo
+                              Restante
                             </p>
                             <p
                               className={`text-sm font-black mt-0.5 ${
-                                saldoPendiente > 0
-                                  ? esVencida
-                                    ? "text-red-600"
-                                    : "text-[#0a192f]"
-                                  : "text-green-600"
+                                esCancelada
+                                  ? "text-gray-400"
+                                  : saldoPendiente > 0
+                                    ? esVencida
+                                      ? "text-red-600"
+                                      : "text-[#0a192f]"
+                                    : "text-green-600"
                               }`}
                             >
                               ${saldoPendiente.toLocaleString("es-MX")}
@@ -1605,7 +1650,7 @@ export default function ExpedienteCliente() {
                   {modalActivo === "confirmarEliminarFactura" && (
                     <>
                       <AlertTriangle className="h-5 w-5 md:h-4 md:w-4 mr-2 text-red-600" />{" "}
-                      Eliminar Factura
+                      Cancelar Factura
                     </>
                   )}
                 </h2>
@@ -1631,6 +1676,7 @@ export default function ExpedienteCliente() {
                     porcentajeLiquidado,
                     esVencida,
                     esPagada,
+                    esCancelada,
                     diasVencidos,
                   } = obtenerResumenFacturaVisual(fac);
                   const observacionLimpia = String(fac.observaciones || "")
@@ -1677,7 +1723,7 @@ export default function ExpedienteCliente() {
                               |
                             </span>{" "}
                             <span
-                              className={`block md:inline mt-0.5 md:mt-0 ${esVencida ? "text-red-500" : ""}`}
+                              className={`block md:inline mt-0.5 md:mt-0 ${esVencida && !esCancelada ? "text-red-500" : ""}`}
                             >
                               {fac.vencimiento}
                             </span>
@@ -1688,9 +1734,13 @@ export default function ExpedienteCliente() {
                             Estatus Actual
                           </span>
                           <span
-                            className={`inline-block px-2.5 py-1 md:py-0.5 font-black uppercase rounded text-[10px] md:text-[10px] ${esPagada ? "bg-green-100 text-green-800" : esVencida ? "bg-red-100 text-red-800" : "bg-blue-100 text-blue-800"}`}
+                            className={`inline-block px-2.5 py-1 md:py-0.5 font-black uppercase rounded text-[10px] md:text-[10px] ${
+                              esCancelada ? "bg-slate-100 text-slate-600" : esPagada ? "bg-green-100 text-green-800" : esVencida ? "bg-red-100 text-red-800" : "bg-blue-100 text-blue-800"
+                            }`}
                           >
-                            {esPagada
+                            {esCancelada
+                              ? "Cancelada"
+                              : esPagada
                               ? "Pagada"
                               : esVencida
                                 ? `Vencida (${diasVencidos}d)`
@@ -1708,7 +1758,7 @@ export default function ExpedienteCliente() {
                         </div>
                         <div className="w-full bg-gray-100 rounded-full h-2.5 md:h-2">
                           <div
-                            className={`h-2.5 md:h-2 rounded-full transition-all duration-500 ${esPagada ? "bg-green-500" : esVencida ? "bg-red-500" : "bg-blue-500"}`}
+                            className={`h-2.5 md:h-2 rounded-full transition-all duration-500 ${esCancelada ? "bg-gray-400" : esPagada ? "bg-green-500" : esVencida ? "bg-red-500" : "bg-blue-500"}`}
                             style={{ width: `${porcentajeLiquidado}%` }}
                           ></div>
                         </div>
@@ -1742,7 +1792,15 @@ export default function ExpedienteCliente() {
                               Faltante
                             </span>
                             <span
-                              className={`text-sm md:text-xs font-black ${esPagada ? "text-green-600" : esVencida ? "text-red-600" : "text-[#0a192f]"}`}
+                              className={`text-sm md:text-xs font-black ${
+                                esCancelada
+                                  ? "text-gray-400"
+                                  : esPagada 
+                                    ? "text-green-600" 
+                                    : esVencida 
+                                      ? "text-red-600" 
+                                      : "text-[#0a192f]"
+                              }`}
                             >
                               ${saldoPendiente.toLocaleString("es-MX")}
                             </span>
@@ -1960,9 +2018,7 @@ export default function ExpedienteCliente() {
                                       {nota.esDirecta ? (
                                         <p>
                                           Aplicada directamente por:{" "}
-                                          <strong>
-                                            {nota.aplicado_por || "SU"}
-                                          </strong>
+                                          <strong>{nota.aplicado_por || "SU"}</strong>
                                         </p>
                                       ) : (
                                         <>
@@ -2037,16 +2093,6 @@ export default function ExpedienteCliente() {
                         </div>
                       </div>
 
-                      {userRole === "SU" && (
-                        <button
-                          type="button"
-                          onClick={() => setModalActivo("confirmarEliminarFactura")}
-                          className="w-full px-4 py-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-black text-xs flex items-center justify-center hover:bg-red-100 active:bg-red-100 transition-colors"
-                        >
-                          <Trash2 className="h-4 w-4 mr-2" />
-                          Eliminar factura
-                        </button>
-                      )}
                     </div>
                   );
                 })()}
@@ -2061,11 +2107,11 @@ export default function ExpedienteCliente() {
 
                       <div>
                         <h3 className="text-lg font-black text-[#0a192f]">
-                          ¿Eliminar esta factura?
+                          ¿Cancelar (Archivar) esta factura?
                         </h3>
 
                         <p className="text-sm text-gray-600 mt-2 leading-relaxed">
-                          Se eliminará la factura{" "}
+                          Estás a punto de cancelar la factura{" "}
                           <span className="font-black text-[#0a192f]">
                             {facturaSeleccionada.folio}
                           </span>{" "}
@@ -2078,10 +2124,9 @@ export default function ExpedienteCliente() {
                       </div>
                     </div>
 
-                    <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-xs text-red-700 leading-relaxed">
-                      Esta acción solo puede realizarla el SU. También se
-                      ajustará el saldo del cliente, el crédito disponible, las
-                      métricas globales y quedará registro en la bitácora.
+                    <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-xs text-red-700 leading-relaxed text-left">
+                      <strong>Atención:</strong> Esta acción solo puede realizarla el SU. La factura quedará archivada como 'Cancelada' para proteger el rastro de auditoría. También se
+                      ajustará el saldo del cliente, el crédito disponible y las métricas globales.
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2091,7 +2136,7 @@ export default function ExpedienteCliente() {
                         disabled={procesandoEliminacionFactura}
                         className="w-full px-4 py-3 bg-white text-gray-700 border border-gray-300 rounded-xl font-black text-xs hover:bg-gray-50 disabled:opacity-60"
                       >
-                        Cancelar
+                        Volver
                       </button>
 
                       <button
@@ -2103,12 +2148,12 @@ export default function ExpedienteCliente() {
                         {procesandoEliminacionFactura ? (
                           <>
                             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Eliminando...
+                            Cancelando...
                           </>
                         ) : (
                           <>
                             <Trash2 className="h-4 w-4 mr-2" />
-                            Sí, eliminar
+                            Sí, cancelar
                           </>
                         )}
                       </button>
@@ -2501,7 +2546,7 @@ export default function ExpedienteCliente() {
               )}
             </div>
 
-            {modalActivo !== "registrarLineaCredito" && (
+            {modalActivo !== "registrarLineaCredito" && modalActivo !== "confirmarEliminarFactura" && (
               <div className="p-4 md:p-4 border-t border-gray-100 bg-white md:bg-gray-50 flex flex-col-reverse md:flex-row justify-end gap-3 md:gap-3 rounded-b-xl shrink-0">
                 {modalActivo === "notificacion" ? (
                   <button
@@ -2528,17 +2573,31 @@ export default function ExpedienteCliente() {
                     </button>
                   </>
                 ) : modalActivo === "verFactura" && facturaSeleccionada ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      navigate("/facturas", {
-                        state: { editarFactura: facturaSeleccionada },
-                      })
-                    }
-                    className="w-full md:w-auto px-8 py-3.5 md:py-2 bg-amber-50 text-amber-700 border border-amber-200 font-black text-sm md:text-xs rounded-xl md:rounded-lg hover:bg-amber-100 active:bg-amber-100"
-                  >
-                    Editar esta factura
-                  </button>
+                  <>
+                    {facturaSeleccionada.estatus !== "Cancelada" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          navigate("/facturas", {
+                            state: { editarFactura: facturaSeleccionada },
+                          })
+                        }
+                        className="w-full md:w-auto px-8 py-3.5 md:py-2 bg-amber-50 text-amber-700 border border-amber-200 font-black text-sm md:text-xs rounded-xl md:rounded-lg hover:bg-amber-100 active:bg-amber-100"
+                      >
+                        Editar esta factura
+                      </button>
+                    )}
+                    {userRole === "SU" && facturaSeleccionada.estatus !== "Cancelada" && (
+                      <button
+                        type="button"
+                        onClick={() => setModalActivo("confirmarEliminarFactura")}
+                        className="w-full md:w-auto px-6 py-3.5 md:py-2 bg-red-50 text-red-700 border border-red-200 font-black text-sm md:text-xs rounded-xl md:rounded-lg hover:bg-red-100 active:bg-red-100 flex items-center justify-center transition-colors"
+                      >
+                        <Trash2 className="h-4 w-4 mr-1.5" />
+                        Cancelar factura
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <button
                     onClick={cerrarModal}

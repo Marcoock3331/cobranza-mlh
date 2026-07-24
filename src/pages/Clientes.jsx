@@ -14,7 +14,6 @@ import {
   XCircle,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-
 import { GlobalContext } from "../context/GlobalContext";
 import { useClientes } from "../hooks/useClientes";
 import PaginacionGlobal from "../components/ui/PaginacionGlobal";
@@ -231,7 +230,7 @@ export default function Clientes() {
   const [accionEstadoCliente, setAccionEstadoCliente] = useState("inactivar");
   const [motivoEstadoCliente, setMotivoEstadoCliente] = useState("");
   const [isInactivating, setIsInactivating] = useState(false);
-
+  const [errorMotivoEstado, setErrorMotivoEstado] = useState("");
   const [formData, setFormData] = useState(ESTADO_INICIAL);
 
   const cambiarFiltroRapido = (nuevoFiltro) => {
@@ -432,11 +431,21 @@ export default function Clientes() {
     setClienteEstadoPendiente(cliente);
     setAccionEstadoCliente(accion);
     setMotivoEstadoCliente("");
+    setErrorMotivoEstado("");
     setMenuAbiertoId(null);
   };
 
   const confirmarCambioEstadoCliente = async () => {
-    if (!clienteEstadoPendiente || !motivoEstadoCliente.trim()) return;
+    if (!clienteEstadoPendiente) return;
+
+    if (!motivoEstadoCliente.trim()) {
+      setErrorMotivoEstado(
+        accionEstadoCliente === "reactivar"
+          ? "Debes escribir el motivo de la reactivación."
+          : "Debes escribir el motivo de la inactivación."
+      );
+      return;
+    }
 
     setIsInactivating(true);
 
@@ -461,6 +470,7 @@ export default function Clientes() {
         );
         setClienteEstadoPendiente(null);
         setMotivoEstadoCliente("");
+        setErrorMotivoEstado("");
         return;
       }
 
@@ -1056,35 +1066,52 @@ export default function Clientes() {
               </p>
 
               <textarea
-                value={motivoEstadoCliente}
-                onChange={(event) => setMotivoEstadoCliente(event.target.value)}
-                rows="3"
-                disabled={isInactivating}
-                placeholder={
-                  accionEstadoCliente === "reactivar"
-                    ? "Motivo de reactivación"
-                    : "Motivo de inactivación"
-                }
-                className="mb-4 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-semibold text-[#0a192f] outline-none transition focus:border-[#ffd700] focus:bg-white focus:ring-2 focus:ring-[#ffd700]/40 disabled:opacity-60"
-              />
+  value={motivoEstadoCliente}
+  onChange={(event) => {
+    setMotivoEstadoCliente(event.target.value);
 
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setClienteEstadoPendiente(null);
-                    setMotivoEstadoCliente("");
-                  }}
-                  disabled={isInactivating}
-                  className="flex-1 px-4 py-3 md:py-2 text-sm font-bold text-gray-700 bg-white border border-gray-300 rounded-xl md:rounded-lg active:bg-gray-50 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-                >
-                  Cancelar
-                </button>
+    if (errorMotivoEstado) {
+      setErrorMotivoEstado("");
+    }
+  }}
+  rows="3"
+  disabled={isInactivating}
+  placeholder={
+    accionEstadoCliente === "reactivar"
+      ? "Motivo de reactivación"
+      : "Motivo de inactivación"
+  }
+  className={`mb-4 w-full rounded-xl bg-gray-50 px-4 py-3 text-sm font-semibold text-[#0a192f] outline-none transition focus:border-[#ffd700] focus:bg-white focus:ring-2 focus:ring-[#ffd700]/40 disabled:opacity-60 ${
+    errorMotivoEstado
+      ? "border border-red-500 ring-2 ring-red-200"
+      : "border border-gray-200"
+  }`}
+/>
+
+{errorMotivoEstado && (
+  <p className="mb-4 text-left text-xs font-bold text-red-600">
+    {errorMotivoEstado}
+  </p>
+)}
+
+<div className="flex space-x-3">
+  <button
+    type="button"
+    onClick={() => {
+      setClienteEstadoPendiente(null);
+      setMotivoEstadoCliente("");
+      setErrorMotivoEstado("");
+    }}
+    disabled={isInactivating}
+    className="flex-1 px-4 py-3 md:py-2 text-sm font-bold text-gray-700 bg-white border border-gray-300 rounded-xl md:rounded-lg active:bg-gray-50 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+  >
+    Cancelar
+  </button>
 
                 <button
                   type="button"
                   onClick={confirmarCambioEstadoCliente}
-                  disabled={isInactivating || !motivoEstadoCliente.trim()}
+                  ddisabled={isInactivating}
                   className={`flex-1 px-4 py-3 md:py-2 text-sm font-bold text-white rounded-xl md:rounded-lg disabled:opacity-70 flex items-center justify-center transition-colors shadow-sm ${
                     accionEstadoCliente === "reactivar"
                       ? "bg-green-600 active:bg-green-700 hover:bg-green-700"

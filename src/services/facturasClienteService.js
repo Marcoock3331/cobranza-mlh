@@ -7,6 +7,12 @@ import {
   where,
 } from "firebase/firestore";
 
+import {
+  esFacturaCancelada,
+  esFacturaPagada,
+  esFacturaVencida,
+} from "../utils/estadosFactura";
+
 import { db } from "../config/firebase";
 import { facturasConsultaService } from "./facturasConsultaService";
 import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
@@ -17,32 +23,37 @@ const LIMITE_RESUMEN_CLIENTE = 500;
 const mapearFiltroExpediente = (filtro = "Historial") => {
   if (filtro === "Vencidas") return "Vencida";
   if (filtro === "Pagadas") return "Pagada";
+  if (filtro === "Canceladas") return "Cancelada";
+
   return "Todas";
 };
 
 const calcularResumenFacturas = (facturas = []) => {
   return facturas.reduce(
     (resumen, factura) => {
-      const saldo = Number(factura.saldo_pendiente) || 0;
-      const total = Number(factura.monto_total) || 0;
-      const estatus = factura.estatus || "Pendiente";
+if (esFacturaCancelada(factura)) {
+  return resumen;
+}
 
-      resumen.totalFacturas += 1;
-      resumen.totalFacturado += total;
-      resumen.saldoActual += Math.max(0, saldo);
+const saldo = Number(factura.saldo_pendiente) || 0;
+const total = Number(factura.monto_total) || 0;
 
-      if (saldo <= 0 || estatus === "Pagada") {
-        resumen.facturasPagadas += 1;
-        return resumen;
-      }
+resumen.totalFacturas += 1;
+resumen.totalFacturado += total;
+resumen.saldoActual += Math.max(0, saldo);
 
-      if (estatus === "Vencida") {
-        resumen.facturasVencidas += 1;
-        resumen.saldoVencido += Math.max(0, saldo);
-        return resumen;
-      }
+if (saldo <= 0 || esFacturaPagada(factura)) {
+  resumen.facturasPagadas += 1;
+  return resumen;
+}
 
-      resumen.facturasPendientes += 1;
+if (esFacturaVencida(factura)) {
+  resumen.facturasVencidas += 1;
+  resumen.saldoVencido += Math.max(0, saldo);
+  return resumen;
+}
+
+resumen.facturasPendientes += 1;
       return resumen;
     },
     {

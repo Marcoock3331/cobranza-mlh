@@ -13,6 +13,11 @@ import {
   where,
 } from "firebase/firestore";
 
+
+import { ESTADOS_FACTURA } from "../constants/facturaConstants";
+
+import { calcularEstadoFactura } from "../utils/estadosFactura";
+
 import {
   construirAbonoIndexId,
   construirAbonoIndexPayload,
@@ -297,55 +302,83 @@ const esFacturaVencida = (factura) => {
   return fechaVencimiento < hoy;
 };
 
-const esMismoMes = (fechaTarget) => {
-  if (!fechaTarget) return false;
+const validarFacturaOperable = (factura) => {
+  if (!factura) {
+    throw new Error("No se encontró la factura.");
+  }
 
-  const fecha = fechaTarget.toDate
-    ? fechaTarget.toDate()
-    : new Date(fechaTarget);
+  if (
+    factura.cancelada === true ||
+    factura.estatus === "Cancelada"
+  ) {
+    throw new Error(
+      "La factura fue cancelada y ya no admite modificaciones.",
+    );
+  }
 
-  const hoy = new Date();
-
-  return (
-    fecha.getMonth() === hoy.getMonth() &&
-    fecha.getFullYear() === hoy.getFullYear()
-  );
+  return factura;
 };
 
-const esMismaSemana = (fechaTarget) => {
-  if (!fechaTarget) return false;
+const obtenerEstadoFinancieroFactura = (factura) => {
+  const montoTotal = redondearMoneda(factura.monto_total);
 
-  const fecha = fechaTarget.toDate
-    ? fechaTarget.toDate()
-    : new Date(fechaTarget);
-
-  const hoy = new Date();
-
-  const obtenerSemana = (date) => {
-    const fechaUTC = new Date(
-      Date.UTC(
-        date.getFullYear(),
-        date.getMonth(),
-        date.getDate(),
-      ),
-    );
-
-    const numeroDia = fechaUTC.getUTCDay() || 7;
-    fechaUTC.setUTCDate(fechaUTC.getUTCDate() + 4 - numeroDia);
-
-    const inicioAnio = new Date(
-      Date.UTC(fechaUTC.getUTCFullYear(), 0, 1),
-    );
-
-    return Math.ceil(
-      (((fechaUTC - inicioAnio) / 86400000) + 1) / 7,
-    );
-  };
-
-  return (
-    fecha.getFullYear() === hoy.getFullYear() &&
-    obtenerSemana(fecha) === obtenerSemana(hoy)
+  const saldo = redondearMoneda(
+    factura.saldo_pendiente,
   );
+
+  const totalNotas = redondearMoneda(
+    factura.total_notas_credito,
+  );
+
+  const montoPagadoGuardado = Number(
+    factura.monto_pagado,
+  );
+
+  const pagado = Number.isFinite(montoPagadoGuardado)
+    ? redondearMoneda(montoPagadoGuardado)
+    : redondearMoneda(
+        Math.max(
+          0,
+          montoTotal - saldo - totalNotas,
+        ),
+      );
+
+  const total = redondearMoneda(
+    saldo + pagado + totalNotas,
+  );
+
+  if (total !== montoTotal) {
+    throw new Error(
+      "La factura está descuadrada. Revisa su integridad antes de continuar.",
+    );
+  }
+
+  return {
+    montoTotal,
+    saldo,
+    pagado,
+    totalNotas,
+  };
+};
+
+const validarIntegridadFinanciera = ({
+  montoTotal,
+  saldo,
+  pagado,
+  notas,
+  mensaje,
+}) => {
+  const total = redondearMoneda(
+    saldo +
+    pagado +
+    notas,
+  );
+
+  if (total !== redondearMoneda(montoTotal)) {
+    throw new Error(mensaje);
+  }
+
+  return total;
 };
 
 const construirDeltasFinancierosFactura = ({
@@ -749,6 +782,8 @@ export const facturasService = {
           ...facturaSnapshot.data(),
         };
 
+        validarFacturaOperable(facturaActual);
+
         const clienteId = String(facturaActual.cliente_id || "").trim();
 
         if (!clienteId) {
@@ -769,28 +804,12 @@ export const facturasService = {
           ...clienteSnapshot.data(),
         };
 
-        const saldoActual = redondearMoneda(facturaActual.saldo_pendiente);
-        const montoTotal = redondearMoneda(facturaActual.monto_total);
-        const totalNotasCredito = redondearMoneda(
-          facturaActual.total_notas_credito,
-        );
-
-        const montoPagadoGuardado = Number(facturaActual.monto_pagado);
-        const montoPagadoActual = Number.isFinite(montoPagadoGuardado)
-          ? redondearMoneda(montoPagadoGuardado)
-          : redondearMoneda(
-              Math.max(0, montoTotal - saldoActual - totalNotasCredito),
-            );
-
-        const totalFinancieroActual = redondearMoneda(
-          saldoActual + montoPagadoActual + totalNotasCredito,
-        );
-
-        if (totalFinancieroActual !== montoTotal) {
-          throw new Error(
-            "La factura está descuadrada. Antes de registrar el abono, revisa que saldo + pagado + notas coincida con el monto total.",
-          );
-        }
+        const {
+  montoTotal,
+  saldo: saldoActual,
+  pagado: montoPagadoActual,
+  totalNotas: totalNotasCredito,
+} = obtenerEstadoFinancieroFactura(facturaActual);
 
         if (saldoActual <= 0 || facturaActual.estatus === "Pagada") {
           throw new Error("La factura ya no tiene saldo pendiente.");
@@ -810,24 +829,22 @@ export const facturasService = {
 
         const nuevoSaldo = redondearMoneda(saldoActual - monto);
         const nuevoMontoPagado = redondearMoneda(montoPagadoActual + monto);
-        const totalFinancieroNuevo = redondearMoneda(
-          nuevoSaldo + nuevoMontoPagado + totalNotasCredito,
-        );
-
-        if (totalFinancieroNuevo !== montoTotal) {
-          throw new Error(
-            "El abono produciría una factura descuadrada y fue cancelado.",
-          );
-        }
+        validarIntegridadFinanciera({
+  montoTotal,
+  saldo: nuevoSaldo,
+  pagado: nuevoMontoPagado,
+  notas: totalNotasCredito,
+  mensaje:
+    "El abono produciría una factura descuadrada y fue cancelado.",
+});
 
         const nuevoEstatus =
-          nuevoSaldo === 0
-            ? "Pagada"
-            : facturaActual.estatus === "Reprogramado"
-              ? "Reprogramado"
-              : esFacturaVencida(facturaActual)
-                ? "Vencida"
-                : "Pendiente";
+  facturaActual.estatus === ESTADOS_FACTURA.REPROGRAMADA
+    ? ESTADOS_FACTURA.REPROGRAMADA
+    : calcularEstadoFactura({
+        saldoPendiente: nuevoSaldo,
+        estadoAnterior: facturaActual.estatus,
+      });
 
         const deudaActual = redondearMoneda(clienteActual.deuda_actual);
 
@@ -1063,6 +1080,8 @@ export const facturasService = {
           ...facturaSnapshot.data(),
         };
 
+        validarFacturaOperable(facturaActual);
+
         const clienteId = String(facturaActual.cliente_id || "").trim();
 
         if (!clienteId) {
@@ -1159,24 +1178,22 @@ export const facturasService = {
           );
         }
 
-        const totalFinancieroNuevo = redondearMoneda(
-          nuevoSaldo + nuevoMontoPagado + totalNotasCredito,
-        );
+        validarIntegridadFinanciera({
+  montoTotal,
+  saldo: nuevoSaldo,
+  pagado: nuevoMontoPagado,
+  notas: totalNotasCredito,
+  mensaje:
+    "La anulación dejaría la factura descuadrada y fue cancelada.",
+});
 
-        if (totalFinancieroNuevo !== montoTotal) {
-          throw new Error(
-            "La anulación dejaría la factura descuadrada y fue cancelada.",
-          );
-        }
-
-        const nuevoEstatus =
-          nuevoSaldo === 0
-            ? "Pagada"
-            : facturaActual.estatus === "Reprogramado"
-              ? "Reprogramado"
-              : esFacturaVencida(facturaActual)
-                ? "Vencida"
-                : "Pendiente";
+const nuevoEstatus =
+  facturaActual.estatus === ESTADOS_FACTURA.REPROGRAMADA
+    ? ESTADOS_FACTURA.REPROGRAMADA
+    : calcularEstadoFactura({
+        saldoPendiente: nuevoSaldo,
+        estadoAnterior: facturaActual.estatus,
+      });
 
         const deudaActual = redondearMoneda(
           clienteActual.deuda_actual,
@@ -1587,15 +1604,20 @@ export const facturasService = {
         const saldoNuevo = redondearMoneda(
           montoNuevo - montoPagado - totalNotasCredito,
         );
-        const totalFinancieroNuevo = redondearMoneda(
-          saldoNuevo + montoPagado + totalNotasCredito,
-        );
+        if (saldoNuevo < 0) {
+  throw new Error(
+    "La edición produciría una factura descuadrada y fue cancelada.",
+  );
+}
 
-        if (saldoNuevo < 0 || totalFinancieroNuevo !== montoNuevo) {
-          throw new Error(
-            "La edición produciría una factura descuadrada y fue cancelada.",
-          );
-        }
+validarIntegridadFinanciera({
+  montoTotal: montoNuevo,
+  saldo: saldoNuevo,
+  pagado: montoPagado,
+  notas: totalNotasCredito,
+  mensaje:
+    "La edición produciría una factura descuadrada y fue cancelada.",
+});
 
         const estatusAnteriorReal = calcularEstatusFinanciero({
           saldo: saldoAnterior,
@@ -1993,6 +2015,7 @@ export const facturasService = {
           id: facturaSnap.id,
           ...facturaSnap.data(),
         };
+validarFacturaOperable(facturaActual);
 
         if (!facturaActual.cliente_id) {
           throw new Error(
@@ -2105,22 +2128,19 @@ export const facturasService = {
 
         const saldoRestante = redondearMoneda(saldoAnterior - monto);
         const totalNotasNuevo = redondearMoneda(totalNotasActual + monto);
-        const totalFinancieroNuevo = redondearMoneda(
-          saldoRestante + montoPagado + totalNotasNuevo,
-        );
+        validarIntegridadFinanciera({
+  montoTotal,
+  saldo: saldoRestante,
+  pagado: montoPagado,
+  notas: totalNotasNuevo,
+  mensaje:
+    "La nota de crédito produciría una factura descuadrada y fue cancelada.",
+});
 
-        if (totalFinancieroNuevo !== montoTotal) {
-          throw new Error(
-            "La nota de crédito produciría una factura descuadrada y fue cancelada.",
-          );
-        }
-
-        const nuevoEstatus =
-          saldoRestante === 0
-            ? "Pagada"
-            : esFacturaVencida(facturaActual)
-              ? "Vencida"
-              : "Pendiente";
+const nuevoEstatus = calcularEstadoFactura({
+  saldoPendiente: saldoRestante,
+  estadoAnterior: facturaActual.estatus,
+}); 
 
         const nuevaNota = {
           id_nota: notaId,
@@ -2338,6 +2358,8 @@ export const facturasService = {
           ...facturaSnap.data(),
         };
 
+        validarFacturaOperable(facturaActual);
+
         if (!facturaActual.cliente_id) {
           throw new Error(
             "La factura no tiene cliente_id y no puede ajustarse de forma segura.",
@@ -2513,19 +2535,23 @@ export const facturasService = {
         const saldoNuevo = redondearMoneda(
           montoTotal - montoPagado - totalNotasNuevo,
         );
-        const totalFinancieroNuevo = redondearMoneda(
-          saldoNuevo + montoPagado + totalNotasNuevo,
-        );
-
         if (
-          saldoNuevo < 0 ||
-          saldoNuevo < saldoActual ||
-          totalFinancieroNuevo !== montoTotal
-        ) {
-          throw new Error(
-            "La anulación produciría una factura descuadrada y fue bloqueada.",
-          );
-        }
+  saldoNuevo < 0 ||
+  saldoNuevo < saldoActual
+) {
+  throw new Error(
+    "La anulación produciría una factura descuadrada y fue bloqueada.",
+  );
+}
+
+validarIntegridadFinanciera({
+  montoTotal,
+  saldo: saldoNuevo,
+  pagado: montoPagado,
+  notas: totalNotasNuevo,
+  mensaje:
+    "La anulación produciría una factura descuadrada y fue bloqueada.",
+});
 
         const nuevoEstatus =
           saldoNuevo === 0
@@ -2716,25 +2742,19 @@ export const facturasService = {
     }
   },
 
-  eliminarFactura: async ({
+  eliminarFactura: async ({ 
     idFactura,
     userName,
     actor_uid,
   }) => {
     if (!actor_uid) {
-      return {
-        success: false,
-        error: "No se identificó al usuario responsable.",
-      };
+      return { success: false, error: "No se identificó al usuario responsable." };
     }
 
     const facturaIdSeguro = String(idFactura || "").trim();
 
     if (!facturaIdSeguro) {
-      return {
-        success: false,
-        error: "No se identificó la factura que será eliminada.",
-      };
+      return { success: false, error: "No se identificó la factura que será cancelada." };
     }
 
     try {
@@ -2744,26 +2764,21 @@ export const facturasService = {
         query(
           collection(db, SOLICITUDES_NOTAS_CREDITO_COLLECTION),
           where("factura_id", "==", facturaIdSeguro),
+          where("estatus", "in", ["Pendiente", "Autorizado"]), 
           limit(1),
         ),
       );
 
       if (!solicitudesVinculadasSnapshot.empty) {
         throw new Error(
-          "No se puede eliminar la factura porque conserva una solicitud o historial de nota de crédito. Anula o depura primero ese vínculo desde el flujo correspondiente.",
+          "No se puede cancelar la factura porque conserva una solicitud o nota de crédito activa. Anula primero ese vínculo.",
         );
       }
 
-      const facturaRef = doc(
-        db,
-        FACTURAS_COLLECTION,
-        facturaIdSeguro,
-      );
+      const facturaRef = doc(db, FACTURAS_COLLECTION, facturaIdSeguro);
       const statsRef = doc(db, STATS_COLLECTION, STATS_DOC);
       const auditRef = doc(collection(db, ACTIVIDAD_COLLECTION));
-      const metricasMovimientoRef = doc(
-        collection(db, METRICAS_MOVIMIENTOS_COLLECTION),
-      );
+      const metricasMovimientoRef = doc(collection(db, METRICAS_MOVIMIENTOS_COLLECTION));
 
       const resultado = await runTransaction(db, async (transaction) => {
         const facturaSnap = await transaction.get(facturaRef);
@@ -2773,130 +2788,63 @@ export const facturasService = {
           throw new Error("La factura ya no existe en Firestore.");
         }
 
-        const factura = {
-          id: facturaSnap.id,
-          ...facturaSnap.data(),
-        };
+        const factura = { id: facturaSnap.id, ...facturaSnap.data() };
+
+        validarFacturaOperable(factura);
+
+if (!factura.cliente_id) {
+  throw new Error(
+    "La factura no tiene cliente_id y no puede cancelarse de forma segura.",
+  );
+}
 
         if (!factura.cliente_id) {
-          throw new Error(
-            "La factura no tiene cliente_id y no puede eliminarse de forma segura.",
-          );
+          throw new Error("La factura no tiene cliente_id y no puede cancelarse de forma segura.");
         }
 
-        const clienteRef = doc(
-          db,
-          CLIENTES_COLLECTION,
-          factura.cliente_id,
-        );
-
+        const clienteRef = doc(db, CLIENTES_COLLECTION, factura.cliente_id);
         const clienteSnap = await transaction.get(clienteRef);
 
         if (!clienteSnap.exists()) {
-          throw new Error(
-            "No se encontró el cliente enlazado a la factura.",
-          );
+          throw new Error("No se encontró el cliente enlazado a la factura.");
         }
 
         const cliente = clienteSnap.data();
 
         const montoTotal = redondearMoneda(factura.monto_total);
-        const saldoPendiente = redondearMoneda(
-          factura.saldo_pendiente,
-        );
-        const totalNotasCredito = redondearMoneda(
-          factura.total_notas_credito,
-        );
+        const saldoPendiente = redondearMoneda(factura.saldo_pendiente);
+        const totalNotasCredito = redondearMoneda(factura.total_notas_credito);
         const montoPagado = redondearMoneda(
           Number.isFinite(Number(factura.monto_pagado))
             ? factura.monto_pagado
-            : Math.max(
-                0,
-                montoTotal - saldoPendiente - totalNotasCredito,
-              ),
+            : Math.max(0, montoTotal - saldoPendiente - totalNotasCredito)
         );
 
-        const abonos = Array.isArray(factura.abonos)
-          ? factura.abonos
-          : [];
-        const notasCredito = Array.isArray(factura.notas_credito)
-          ? factura.notas_credito
-          : [];
+        const abonos = Array.isArray(factura.abonos) ? factura.abonos : [];
+        const notasCredito = Array.isArray(factura.notas_credito) ? factura.notas_credito : [];
         const notasCreditoActivas = notasCredito.filter(
-          (nota) =>
-            nota?.cancelada !== true &&
-            !["Anulada", "Cancelada"].includes(nota?.estado),
+          (nota) => nota?.cancelada !== true && !["Anulada", "Cancelada"].includes(nota?.estado)
         );
 
         if (abonos.length > 0 || montoPagado > 0) {
-          throw new Error(
-            "No se puede eliminar una factura que conserva abonos activos o un monto pagado. Anula primero los pagos desde el historial.",
-          );
+          throw new Error("No se puede cancelar una factura que conserva abonos activos o un monto pagado. Anula primero los pagos.");
         }
 
-        if (
-          notasCreditoActivas.length > 0 ||
-          totalNotasCredito > 0
-        ) {
-          throw new Error(
-            "No se puede eliminar una factura con notas de crédito activas. Anula primero las notas desde su historial.",
-          );
+        if (notasCreditoActivas.length > 0 || totalNotasCredito > 0) {
+          throw new Error("No se puede cancelar una factura con notas de crédito activas. Anula primero las notas.");
         }
 
-        const totalAbonosRegistrados = redondearMoneda(
-          abonos.reduce(
-            (total, abono) => total + (Number(abono.monto) || 0),
-            0,
-          ),
-        );
-
-        const abonosMes = redondearMoneda(
-          abonos.reduce(
-            (total, abono) =>
-              total +
-              (esMismoMes(abono.fecha) ? Number(abono.monto) || 0 : 0),
-            0,
-          ),
-        );
-
-        const abonosSemana = redondearMoneda(
-          abonos.reduce(
-            (total, abono) =>
-              total +
-              (esMismaSemana(abono.fecha)
-                ? Number(abono.monto) || 0
-                : 0),
-            0,
-          ),
-        );
-
-        const estabaVencida =
-          saldoPendiente > 0 && factura.estatus === "Vencida";
+        const estabaVencida = saldoPendiente > 0 && factura.estatus === "Vencida";
         const estabaPagada = saldoPendiente === 0;
         const estabaPendiente = saldoPendiente > 0;
 
         const limiteCredito = redondearMoneda(cliente.limite_credito);
         const deudaActual = redondearMoneda(cliente.deuda_actual);
-        const creditoDisponible = redondearMoneda(
-          cliente.credito_disponible,
-        );
+        const creditoDisponible = redondearMoneda(cliente.credito_disponible);
 
-        const nuevaDeuda = Math.max(
-          0,
-          redondearMoneda(deudaActual - saldoPendiente),
-        );
-
-        const nuevoCreditoDisponible =
-          limiteCredito > 0
-            ? Math.min(
-                limiteCredito,
-                Math.max(
-                  0,
-                  redondearMoneda(
-                    creditoDisponible + saldoPendiente,
-                  ),
-                ),
-              )
+        const nuevaDeuda = Math.max(0, redondearMoneda(deudaActual - saldoPendiente));
+        const nuevoCreditoDisponible = limiteCredito > 0
+            ? Math.min(limiteCredito, Math.max(0, redondearMoneda(creditoDisponible + saldoPendiente)))
             : 0;
 
         transaction.update(clienteRef, {
@@ -2905,50 +2853,26 @@ export const facturasService = {
           updatedAt: serverTimestamp(),
         });
 
-        const totalAbonosARevertir =
-          totalAbonosRegistrados > 0
-            ? totalAbonosRegistrados
-            : montoPagado;
-
         aplicarMetricasTransaccionales({
-          transaction,
-          statsSnapshot,
-          statsRef,
-          movimientoRef: metricasMovimientoRef,
-          actorUid,
+          transaction, statsSnapshot, statsRef,
+          movimientoRef: metricasMovimientoRef, actorUid,
           actorNombre: userName || "SU",
           tipo: "FACTURA_ELIMINADA",
-          entidadTipo: "FACTURA",
-          entidadId: facturaIdSeguro,
-          facturaId: facturaIdSeguro,
-          clienteId: factura.cliente_id,
-          actividadId: auditRef.id,
+          entidadTipo: "FACTURA", entidadId: facturaIdSeguro,
+          facturaId: facturaIdSeguro, clienteId: factura.cliente_id, actividadId: auditRef.id,
           deltas: {
-            cartera_total:
-              saldoPendiente > 0 ? -saldoPendiente : 0,
-            cartera_vencida:
-              estabaVencida ? -saldoPendiente : 0,
-            ingresos_mes: abonosMes > 0 ? -abonosMes : 0,
-            ingresos_semana:
-              abonosSemana > 0 ? -abonosSemana : 0,
+            cartera_total: saldoPendiente > 0 ? -saldoPendiente : 0,
+            cartera_vencida: estabaVencida ? -saldoPendiente : 0,
+            ingresos_mes: 0,
+            ingresos_semana: 0,
             facturas_vencidas: estabaVencida ? -1 : 0,
             facturas_pendientes: estabaPendiente ? -1 : 0,
             facturas_pagadas: estabaPagada ? -1 : 0,
             facturas_total: -1,
             total_facturado: -montoTotal,
-            total_liquidado:
-              estabaPagada ? -montoTotal : 0,
-            cobrado_historico:
-              montoPagado > 0 ? -montoPagado : 0,
-            abonos_registrados:
-              totalAbonosARevertir > 0
-                ? -totalAbonosARevertir
-                : 0,
-            abonos_cantidad: abonos.length > 0 ? -abonos.length : 0,
-            monto_recuperado:
-              montoPagado > 0 ? -montoPagado : 0,
-            total_notas_credito:
-              totalNotasCredito > 0 ? -totalNotasCredito : 0,
+            total_liquidado: estabaPagada ? -montoTotal : 0,
+            cobrado_historico: 0, abonos_registrados: 0, abonos_cantidad: 0, monto_recuperado: 0,
+            total_notas_credito: totalNotasCredito > 0 ? -totalNotasCredito : 0,
           },
         });
 
@@ -2957,7 +2881,7 @@ export const facturasService = {
           metricas_movimiento_id: metricasMovimientoRef.id,
           usuario: userName || "SU",
           modulo: "Facturación",
-          tipo: "Eliminación de Factura",
+          tipo: "Cancelación de Factura",
           factura_id: facturaIdSeguro,
           folio: factura.folio || "S/F",
           cliente: factura.cliente || cliente.nombre || "S/N",
@@ -2965,36 +2889,33 @@ export const facturasService = {
           valores_eliminados: {
             folio: factura.folio || "",
             cliente: factura.cliente || "",
-            cliente_id: factura.cliente_id || "",
             monto_total: montoTotal,
-            monto_pagado: montoPagado,
             saldo_pendiente: saldoPendiente,
             estatus: factura.estatus || "",
-            abonos: abonos.length,
           },
-          detalle: `El SU eliminó la factura ${factura.folio || "S/F"} de ${factura.cliente || cliente.nombre || "S/N"}. Se ajustaron saldo del cliente, crédito disponible, métricas globales y auditoría.`,
+          detalle: `El SU canceló (archivó) la factura ${factura.folio || "S/F"} de ${factura.cliente || cliente.nombre || "S/N"}. Se ajustaron métricas y auditoría.`,
           serverTime: serverTimestamp(),
         });
 
-        transaction.delete(facturaRef);
+        // PASO 7D: Update en lugar de Delete físico
+        transaction.update(facturaRef, {
+          estatus: "Cancelada",
+          cancelada_at: serverTimestamp(),
+          cancelada_por_uid: actorUid,
+          cancelada_por: userName || "SU",
+          ultima_edicion_audit_id: auditRef.id,
+          ultimo_metricas_movimiento_id: metricasMovimientoRef.id,
+          ultimo_metricas_tipo: "FACTURA_ELIMINADA",
+          updatedAt: serverTimestamp(),
+        });
 
-        return {
-          folio: factura.folio || "S/F",
-          cliente: factura.cliente || cliente.nombre || "S/N",
-        };
+        return { folio: factura.folio || "S/F", cliente: factura.cliente || cliente.nombre || "S/N" };
       });
 
-      return {
-        success: true,
-        data: resultado,
-      };
+      return { success: true, data: resultado };
     } catch (error) {
-      console.error("Error al eliminar la factura:", error);
-
-      return {
-        success: false,
-        error: mapearErrorFirestore(error),
-      };
+      console.error("Error al cancelar la factura:", error);
+      return { success: false, error: mapearErrorFirestore(error) };
     }
   },
 };

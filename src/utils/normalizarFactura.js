@@ -37,6 +37,13 @@ const fechaComparable = (fecha) => {
 };
 
 export const calcularEstatusVisibleFactura = (factura = {}) => {
+  if (
+  factura.cancelada === true ||
+  factura.estatus === "Cancelada"
+) {
+  return "Cancelada";
+}
+
   const saldoPendiente = Number(factura.saldo_pendiente) || 0;
 
   if (saldoPendiente <= 0) {
@@ -57,9 +64,7 @@ export const calcularEstatusVisibleFactura = (factura = {}) => {
 
 const normalizarAbono = (abono = {}) => ({
   ...abono,
-  fecha: abono.fecha?.toDate
-    ? abono.fecha.toDate().toLocaleString("es-MX")
-    : abono.fecha,
+  fecha: abono.fecha,
 });
 
 export const normalizarFacturaData = (id, data = {}) => {

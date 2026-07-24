@@ -6,6 +6,11 @@ import { useFacturasPaginadas } from "../hooks/useFacturasPaginadas";
 import PaginacionGlobal from "../components/ui/PaginacionGlobal";
 import { calcularDiasVencidos } from "../utils/fechas";
 import { generarMensajeWA, normalizarTelefonoMX } from "../utils/whatsapp";
+import {
+  esFacturaCancelada,
+  esFacturaPagada,
+  esFacturaVencida,
+} from "../utils/estadosFactura";
 import Select from "react-select";
 import {
   Search,
@@ -83,20 +88,6 @@ const obtenerTotalNotasCredito = (factura = {}) => {
   );
 };
 
-const obtenerMontoPagadoSeguro = (factura = {}) => {
-  const montoPagadoGuardado = Number(factura.monto_pagado);
-
-  if (Number.isFinite(montoPagadoGuardado)) {
-    return montoPagadoGuardado;
-  }
-
-  const montoTotal = Number(factura.monto_total) || 0;
-  const saldoPendiente = Number(factura.saldo_pendiente) || 0;
-  const totalNotasCredito = obtenerTotalNotasCredito(factura);
-
-  return Math.max(0, montoTotal - saldoPendiente - totalNotasCredito);
-};
-
 const formatearFechaNotaCredito = (fecha) => {
   if (!fecha) return "Sin fecha";
 
@@ -145,6 +136,18 @@ const obtenerTiempoAbono = (abono = {}) => {
     new Date(abono.fecha || 0).getTime();
 
   return Number.isFinite(tiempo) ? tiempo : 0;
+};
+
+const obtenerUltimoAbono = (factura = {}) => {
+  const abonos = Array.isArray(factura.abonos) ? factura.abonos : [];
+
+  if (abonos.length === 0) {
+    return null;
+  }
+
+  return [...abonos].sort(
+    (a, b) => obtenerTiempoAbono(b) - obtenerTiempoAbono(a),
+  )[0];
 };
 
 const normalizarEstatusNotaCredito = (estatus = "") => {
@@ -1103,7 +1106,7 @@ export default function Facturacion() {
         if (userRole !== "SU") {
           mostrarNotificacion(
             "Acción no permitida",
-            "Solo el SU puede eliminar facturas.",
+            "Solo el SU puede cancelar facturas.",
             "error",
           );
           return;
@@ -1114,7 +1117,7 @@ export default function Facturacion() {
         if (!res?.success) {
           mostrarNotificacion(
             "Error",
-            res?.error || "No se pudo eliminar la factura.",
+            res?.error || "No se pudo cancelar la factura.",
             "error",
           );
           return;
@@ -1125,8 +1128,8 @@ export default function Facturacion() {
         setFacturaSeleccionada(null);
 
         mostrarNotificacion(
-          "Factura eliminada",
-          "Se eliminó la factura y se ajustaron saldo, crédito, métricas y auditoría.",
+          "Factura cancelada",
+          "Se canceló (archivó) la factura y se ajustaron saldo, crédito, métricas y auditoría.",
         );
       } else if (itemAEliminar.tipo === "abono") {
         const res = await eliminarAbonoEnNube(
@@ -1195,20 +1198,35 @@ export default function Facturacion() {
     setModalActivo("opcionesFactura");
   };
 
-  const BadgeEstatus = ({ estatus }) => {
-    const configs = {
-      Pagada: "bg-green-100 text-green-800 border-green-200",
-      Pendiente: "bg-blue-100 text-blue-800 border-blue-200",
-      Vencida: "bg-red-100 text-red-800 border-red-200",
-    };
-    return (
-      <span
-        className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border whitespace-nowrap ${configs[estatus]}`}
-      >
-        {estatus}
-      </span>
-    );
+
+const BadgeEstatus = ({ factura }) => {
+  const esCancelada = esFacturaCancelada(factura);
+  const esPagada = esFacturaPagada(factura);
+  const esVencida = esFacturaVencida(factura);
+
+  let estatus = "Pendiente";
+
+  if (esCancelada) estatus = "Cancelada";
+  else if (esPagada) estatus = "Pagada";
+  else if (esVencida) estatus = "Vencida";
+
+  const configs = {
+    Pagada: "bg-green-100 text-green-800 border-green-200",
+    Pendiente: "bg-blue-100 text-blue-800 border-blue-200",
+    Vencida: "bg-red-100 text-red-800 border-red-200",
+    Cancelada: "bg-slate-100 text-slate-500 border-slate-200",
   };
+
+  return (
+    <span
+      className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border whitespace-nowrap ${
+        configs[estatus] || "bg-gray-100 text-gray-800"
+      }`}
+    >
+      {estatus}
+    </span>
+  );
+};
 
   return (
     <div className="flex flex-col space-y-4 md:space-y-6 relative pb-10 text-sm animate-fade-in">
@@ -1388,6 +1406,7 @@ export default function Facturacion() {
               { value: "Pendiente", label: "Pendientes" },
               { value: "Vencida", label: "Vencidas" },
               { value: "Pagada", label: "Pagadas" },
+              ...(userRole === "SU" ? [{ value: "Cancelada", label: "Canceladas" }] : []),
             ].map((opcion) => (
               <button
                 key={opcion.value}
@@ -1506,9 +1525,11 @@ export default function Facturacion() {
               facturasPaginadas.map((fac) => {
                 const montoTotal = Number(fac.monto_total) || 0;
                 const saldoPendiente = Number(fac.saldo_pendiente) || 0;
-                const montoPagado = obtenerMontoPagadoSeguro(fac);
                 const totalNotas = obtenerTotalNotasCredito(fac);
-                const estaVencida = fac.estatus === "Vencida";
+                const ultimoAbono = obtenerUltimoAbono(fac);
+                
+                const esCancelada = esFacturaCancelada(fac);
+                const esVencida = esFacturaVencida(fac);
 
                 return (
                   <article
@@ -1516,35 +1537,34 @@ export default function Facturacion() {
                     className="rounded-xl border border-gray-100 bg-white p-3 shadow-sm"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-[9px] font-black uppercase tracking-wide text-blue-500">
-                          Folio
-                        </p>
-                        <p className="truncate font-mono text-base font-black text-[#0a192f]">
-                          {fac.folio || "S/F"}
-                        </p>
-                        <p className="mt-1 line-clamp-2 text-xs font-black uppercase leading-tight text-gray-600">
-                          {fac.cliente || "Cliente sin nombre"}
-                        </p>
-                      </div>
+  <div className="min-w-0 flex-1">
+    <h3 className="truncate text-sm font-black text-[#0a192f]">
+      {fac.folio || "Sin folio"}
+    </h3>
 
-                      <button
-                        type="button"
-                        onClick={() => abrirMenuOpciones(fac)}
-                        className="shrink-0 rounded-lg bg-gray-50 p-2 text-gray-500 active:bg-gray-200"
-                        aria-label="Opciones de factura"
-                      >
-                        <MoreVertical className="h-4 w-4" />
-                      </button>
-                    </div>
+    <p className="mt-0.5 truncate text-xs font-semibold text-gray-600">
+      {fac.cliente_nombre || fac.cliente || "Cliente sin nombre"}
+    </p>
+  </div>
+
+  <div className="shrink-0 text-right">
+    <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400">
+      Vence
+    </p>
+
+    <p className="text-xs font-black text-gray-700">
+  {fac.vencimiento || "S/F"}
+</p>
+  </div>
+</div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <BadgeEstatus estatus={fac.estatus} />
-                      {estaVencida && (
+                      <BadgeEstatus factura={fac} />
+                      {esVencida && (
                         <span className="inline-flex rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[9px] font-black text-red-700">
                           Hace {calcularDiasVencidos(fac.vencimiento)} días
                         </span>
-                      )}
+                      )} 
                     </div>
 
                     <div className="mt-3 grid grid-cols-2 gap-1.5">
@@ -1558,13 +1578,23 @@ export default function Facturacion() {
                       </div>
 
                       <div className="rounded-lg border border-green-100 bg-green-50/60 p-2 min-w-0">
-                        <p className="text-[7px] font-black uppercase tracking-wide text-green-500">
-                          Pagado
-                        </p>
-                        <p className="mt-0.5 break-words text-[11px] font-black text-green-600">
-                          ${montoPagado.toLocaleString("es-MX")}
-                        </p>
-                      </div>
+  <p className="text-[7px] font-black uppercase tracking-wide text-green-500">
+    Último pago
+  </p>
+
+  <p className="mt-0.5 break-words text-[11px] font-black text-green-600">
+  $
+  {ultimoAbono
+    ? Number(ultimoAbono.monto || 0).toLocaleString("es-MX")
+    : "0"}
+</p>
+
+<p className="text-[9px] text-gray-500">
+  {ultimoAbono?.fecha
+  ? formatearFechaAbono(ultimoAbono.fecha).split(",")[0]
+  : "Sin pagos"}
+</p>
+</div>
 
                       <div className="rounded-lg border border-red-100 bg-red-50/60 p-2 min-w-0">
                         <p className="text-[7px] font-black uppercase tracking-wide text-red-400">
@@ -1573,7 +1603,7 @@ export default function Facturacion() {
                         <p
                           className={`mt-0.5 break-words text-[11px] font-black ${
                             saldoPendiente > 0
-                              ? estaVencida
+                              ? esVencida
                                 ? "text-red-600"
                                 : "text-[#0a192f]"
                               : "text-green-600"
@@ -1600,20 +1630,26 @@ export default function Facturacion() {
                       </div>
                       <div>
                         <p className="font-black uppercase tracking-wide text-gray-400">Vence</p>
-                        <p className={`mt-0.5 font-mono font-black ${estaVencida ? "text-red-600" : "text-[#0a192f]"}`}>
+                        <p className={`mt-0.5 font-mono font-black ${esVencida ? "text-red-600" : "text-[#0a192f]"}`}>
                           {fac.vencimiento || "S/F"}
                         </p>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => abrirMenuOpciones(fac)}
-                      className="mt-3 flex w-full items-center justify-center rounded-lg bg-[#0a192f] py-2 text-[10px] font-black text-white active:bg-[#112240]"
-                    >
-                      Gestionar factura
-                      <MoreVertical className="ml-1 h-3.5 w-3.5" />
-                    </button>
+                    {!esCancelada ? (
+                      <button
+                        type="button"
+                        onClick={() => abrirMenuOpciones(fac)}
+                        className="mt-3 flex w-full items-center justify-center rounded-lg bg-[#0a192f] py-2 text-[10px] font-black text-white active:bg-[#112240]"
+                      >
+                        Gestionar factura
+                        <MoreVertical className="ml-1 h-3.5 w-3.5" />
+                      </button>
+                    ) : (
+                      <div className="mt-3 flex w-full items-center justify-center rounded-lg bg-gray-100 py-2 text-[10px] font-black text-gray-400 uppercase">
+                        Factura Archivada
+                      </div>
+                    )}
                   </article>
                 );
               })
@@ -1627,7 +1663,7 @@ export default function Facturacion() {
             )}
           </div>
 
-          <div className="hidden overflow-x-auto md:block">
+          <div className="hidden md:block">
             <table className="w-full min-w-[1000px] text-left text-sm border-separate border-spacing-0">
             <thead className="bg-[#0a192f] text-white uppercase text-[10px] font-bold tracking-wider sticky top-0 z-10">
               <tr>
@@ -1641,10 +1677,10 @@ export default function Facturacion() {
                   Monto Total
                 </th>
                 <th className="px-4 py-3 text-right border-b border-gray-200 whitespace-nowrap">
-                  Monto Pagado
+                  Último pago
                 </th>
                 <th className="px-4 py-3 text-right border-b border-gray-200 whitespace-nowrap">
-                  Saldo
+                  Restante
                 </th>
                 <th className="px-4 py-3 text-center border-b border-gray-200 whitespace-nowrap">
                   Estado
@@ -1683,25 +1719,28 @@ export default function Facturacion() {
                 </tr>
               ) : facturasPaginadas.length > 0 ? (
                 facturasPaginadas.map((fac) => {
-                  const montoTotal = Number(fac.monto_total) || 0;
-                  const saldoPendiente = Number(fac.saldo_pendiente) || 0;
-                  const montoPagado = obtenerMontoPagadoSeguro(fac);
+  const montoTotal = Number(fac.monto_total) || 0;
+  const saldoPendiente = Number(fac.saldo_pendiente) || 0;
+  const ultimoAbono = obtenerUltimoAbono(fac);
 
-                  return (
+  const esCancelada = esFacturaCancelada(fac);
+  const esVencida = esFacturaVencida(fac);
+
+  return (
                     <tr
                       key={fac.id}
                       className="hover:bg-blue-50/30 active:bg-blue-50/50 transition-colors group"
                     >
                       <td
-                        className="px-4 py-4 md:py-3 bg-white cursor-pointer"
-                        onClick={() => abrirMenuOpciones(fac)}
+                        className={`px-4 py-4 md:py-3 bg-white ${!esCancelada ? 'cursor-pointer' : ''}`}
+                        onClick={() => !esCancelada && abrirMenuOpciones(fac)}
                       >
                         <div className="flex flex-col">
-                          <span className="font-black text-[#0a192f] text-base">
+                          <span className={`font-black text-base ${esCancelada ? 'text-gray-400' : 'text-[#0a192f]'}`}>
                             {fac.folio}
                           </span>
                           <span
-                            className="text-gray-600 font-medium truncate max-w-[200px]"
+                            className={`${esCancelada ? 'text-gray-400' : 'text-gray-600'} font-medium truncate max-w-[200px]`}
                             title={fac.cliente}
                           >
                             {fac.cliente}
@@ -1717,42 +1756,65 @@ export default function Facturacion() {
                           Vence:{" "}
                           <span className="font-mono">{fac.vencimiento}</span>
                         </p>
-                        {fac.estatus === "Vencida" && (
+                        {esVencida && (
                           <span className="block text-[11px] font-black text-red-500 mt-0.5">
                             (Hace {calcularDiasVencidos(fac.vencimiento)} días)
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-4 md:py-3 text-right font-semibold text-gray-700 bg-white whitespace-nowrap">
+                      <td className={`px-4 py-4 md:py-3 text-right font-semibold bg-white whitespace-nowrap ${esCancelada ? 'text-gray-400' : 'text-gray-700'}`}>
                         ${montoTotal.toLocaleString("es-MX")}
                       </td>
-                      <td className="px-4 py-4 md:py-3 text-right font-semibold text-green-600 bg-white whitespace-nowrap">
-                        ${montoPagado.toLocaleString("es-MX")}
-                      </td>
+                      <td
+  className={`px-4 py-4 md:py-3 text-right bg-white whitespace-nowrap ${
+    esCancelada ? "text-gray-400" : "text-green-600"
+  }`}
+>
+  <div className="flex flex-col items-end">
+    <span className="font-semibold">
+      $
+      {ultimoAbono
+        ? Number(ultimoAbono.monto || 0).toLocaleString("es-MX")
+        : "0"}
+    </span>
+
+    <span className="text-[11px] text-gray-500">
+      {ultimoAbono?.fecha
+  ? formatearFechaAbono(ultimoAbono.fecha).split(",")[0]
+  : "Sin pagos"}
+    </span>
+  </div>
+</td>
                       <td className="px-4 py-4 md:py-3 text-right bg-white whitespace-nowrap">
                         <span
                           className={`text-base font-black ${
-                            saldoPendiente > 0
-                              ? fac.estatus === "Vencida"
-                                ? "text-red-600"
-                                : "text-[#0a192f]"
-                              : "text-green-600"
+                            esCancelada 
+                              ? "text-gray-400"
+                              : saldoPendiente > 0
+                                ? esVencida
+                                  ? "text-red-600"
+                                  : "text-[#0a192f]"
+                                : "text-green-600"
                           }`}
                         >
                           ${saldoPendiente.toLocaleString("es-MX")}
                         </span>
                       </td>
                       <td className="px-4 py-4 md:py-3 text-center bg-white">
-                        <BadgeEstatus estatus={fac.estatus} />
+                        <BadgeEstatus factura={fac} />
                       </td>
                       <td className="px-4 py-4 md:py-3 text-center bg-white">
-                        <button
-                          onClick={() => abrirMenuOpciones(fac)}
-                          className="p-3 md:p-1.5 text-gray-400 active:text-blue-600 hover:text-blue-600 active:bg-blue-50 hover:bg-blue-50 rounded-full md:rounded-lg transition-colors border border-transparent"
-                          title="Ver Opciones"
-                        >
-                          <MoreVertical className="h-5 w-5 md:h-5 md:w-5 mx-auto" />
-                        </button>
+                        {!esCancelada ? (
+                          <button
+                            onClick={() => abrirMenuOpciones(fac)}
+                            className="p-3 md:p-1.5 text-gray-400 active:text-blue-600 hover:text-blue-600 active:bg-blue-50 hover:bg-blue-50 rounded-full md:rounded-lg transition-colors border border-transparent"
+                            title="Ver Opciones"
+                          >
+                            <MoreVertical className="h-5 w-5 md:h-5 md:w-5 mx-auto" />
+                          </button>
+                        ) : (
+                          <span className="text-[9px] font-black uppercase text-gray-400">Archivada</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1833,8 +1895,9 @@ export default function Facturacion() {
                 </p>
               </div>
               <div className="p-5 md:p-4 space-y-3 md:space-y-2 bg-gray-50/50 overflow-y-auto custom-scrollbar">
-                {facturaSeleccionada?.saldo_pendiente > 0 && (
-                  <button
+                      {facturaSeleccionada?.estatus !== "Cancelada" &&
+facturaSeleccionada?.saldo_pendiente > 0 &&(                  
+                        <button
                     onClick={() => abrirFormulario("nuevoPago")}
                     className="w-full p-3.5 md:p-3 bg-green-600 text-white active:bg-green-700 hover:bg-green-700 rounded-xl md:rounded-lg flex items-center justify-center font-black text-sm shadow-sm transition-colors"
                   >
@@ -1857,7 +1920,8 @@ export default function Facturacion() {
                   de Notas ({obtenerHistorialNotasCredito(facturaSeleccionada).length})
                 </button>
                 {["SU", "ADMIN"].includes(userRole) &&
-                  Number(facturaSeleccionada?.saldo_pendiente) > 0 && (
+facturaSeleccionada?.estatus !== "Cancelada" &&
+Number(facturaSeleccionada?.saldo_pendiente) > 0&& (
                     <button
                       onClick={() => abrirFormulario("notaCredito")}
                       className="w-full p-3.5 md:p-3 bg-purple-600 text-white active:bg-purple-700 hover:bg-purple-700 rounded-xl md:rounded-lg flex items-center justify-center font-black text-sm shadow-sm transition-colors"
@@ -1880,24 +1944,29 @@ export default function Facturacion() {
                     userRole === "SU" ? "grid-cols-2" : "grid-cols-1"
                   }`}
                 >
-                  <button
-                    type="button"
-                    onClick={() => abrirFormulario("editarFactura")}
-                    className="p-3 md:p-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-amber-100 active:bg-amber-100 transition-colors"
-                  >
-                    <Edit className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Editar
-                  </button>
-                  {userRole === "SU" && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        confirmarEliminacion("factura", facturaSeleccionada)
-                      }
-                      className="p-3 md:p-2 bg-red-50 text-red-700 border border-red-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-red-100 active:bg-red-100 transition-colors"
-                    >
-                      <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" /> Eliminar
-                    </button>
-                  )}
+                  {facturaSeleccionada?.estatus !== "Cancelada"&& (
+  <button
+    type="button"
+    onClick={() => abrirFormulario("editarFactura")}
+    className="p-3 md:p-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-amber-100 active:bg-amber-100 transition-colors"
+  >
+    <Edit className="h-5 w-5 md:h-4 md:w-4 mb-1" />
+    Editar
+  </button>
+)}
+                  {userRole === "SU" &&
+facturaSeleccionada?.estatus !== "Cancelada"&& (
+  <button
+    type="button"
+    onClick={() =>
+      confirmarEliminacion("factura", facturaSeleccionada)
+    }
+    className="p-3 md:p-2 bg-red-50 text-red-700 border border-red-200 rounded-xl md:rounded-lg flex flex-col items-center justify-center font-bold text-xs hover:bg-red-100 active:bg-red-100 transition-colors"
+  >
+    <Trash2 className="h-5 w-5 md:h-4 md:w-4 mb-1" />
+    Cancelar
+  </button>
+)}
                 </div>
               </div>
             </div>
@@ -2221,7 +2290,7 @@ export default function Facturacion() {
                   type="button"
                   disabled={isSubmitting}
                   onClick={() => setModalActivo("historialNotasCredito")}
-                  className="w-full px-4 py-3 md:py-2 text-sm md:text-xs font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 disabled:opacity-50"
+                  className="w-full md:w-auto px-4 py-3 md:py-2 text-sm md:text-xs font-bold text-gray-600 bg-white border border-gray-300 rounded-xl md:rounded active:bg-gray-100 disabled:opacity-50"
                 >
                   Regresar
                 </button>
@@ -2229,7 +2298,7 @@ export default function Facturacion() {
                   type="button"
                   disabled={isSubmitting}
                   onClick={handleCancelarNotaCredito}
-                  className="w-full px-4 py-3 md:py-2 text-sm md:text-xs font-black text-white bg-red-600 rounded-xl md:rounded active:bg-red-700 disabled:opacity-70 flex items-center justify-center"
+                  className="w-full md:w-auto px-4 py-3 md:py-2 text-sm md:text-xs font-black text-white bg-red-600 rounded-xl md:rounded active:bg-red-700 disabled:opacity-70 flex items-center justify-center"
                 >
                   {isSubmitting ? (
                     <>
@@ -2590,13 +2659,13 @@ export default function Facturacion() {
                 <div>
                   <h3 className="text-xl md:text-lg font-black text-[#0a192f]">
                     {itemAEliminar?.tipo === "factura"
-                      ? "¿Eliminar Factura?"
+                      ? "¿Cancelar (Archivar) Factura?"
                       : "¿Eliminar Abono?"}
                   </h3>
                   <p className="text-sm md:text-sm text-gray-600 mt-2">
                     {itemAEliminar?.tipo === "factura" ? (
                       <>
-                        Estás a punto de eliminar la factura{" "}
+                        Estás a punto de cancelar la factura{" "}
                         <span className="font-bold text-[#0a192f]">
                           {itemAEliminar.data?.folio}
                         </span>{" "}
@@ -2604,9 +2673,8 @@ export default function Facturacion() {
                         <span className="font-bold text-[#0a192f]">
                           {itemAEliminar.data?.cliente}
                         </span>
-                        . Esta operación también ajustará el saldo del cliente,
-                        el crédito disponible, las métricas globales y la
-                        bitácora.
+                        . Esta operación ajustará el saldo del cliente,
+                        el crédito disponible, las métricas globales y la bitácora.
                       </>
                     ) : (
                       <>
@@ -2627,7 +2695,7 @@ export default function Facturacion() {
                   <p>
                     <strong>Atención:</strong>{" "}
                     {itemAEliminar?.tipo === "factura"
-                      ? "Solo el SU puede eliminar facturas. La factura dejará de existir en el listado activo y su movimiento quedará auditado."
+                      ? "Solo el SU puede cancelar facturas. Esta quedará archivada como 'Cancelada' para proteger el rastro de auditoría."
                       : "El saldo de la factura se recalculará automáticamente."}{" "}
                     Esta acción es irreversible.
                   </p>
@@ -2657,7 +2725,7 @@ export default function Facturacion() {
                   ) : (
                     <>
                       <Trash2 className="h-4 w-4 mr-1.5 md:mr-1" />
-                      Sí, eliminar
+                      {itemAEliminar?.tipo === "factura" ? "Sí, cancelar factura" : "Sí, eliminar"}
                     </>
                   )}
                 </button>

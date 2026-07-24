@@ -35,10 +35,18 @@ export const calendarioConsultaService = {
 
       const snapshot = await getDocs(consulta);
 
-      return {
-        success: true,
-        facturas: snapshot.docs.map(normalizarFacturaSnapshot),
-      };
+const facturas = snapshot.docs
+  .map(normalizarFacturaSnapshot)
+  .filter(
+    (factura) =>
+      factura.cancelada !== true &&
+      factura.estatus !== "Cancelada",
+  );
+
+return {
+  success: true,
+  facturas,
+};
     } catch (error) {
       console.error("Error consultando facturas del calendario:", error);
 
@@ -87,8 +95,13 @@ export const calendarioConsultaService = {
 
       const snapshot = await getDocs(consulta);
       const facturas = snapshot.docs
-        .map(normalizarFacturaSnapshot)
-        .filter((factura) => Number(factura.saldo_pendiente) > 0);
+  .map(normalizarFacturaSnapshot)
+  .filter(
+    (factura) =>
+      Number(factura.saldo_pendiente) > 0 &&
+      factura.cancelada !== true &&
+      factura.estatus !== "Cancelada",
+  );
 
       return { success: true, facturas };
     } catch (error) {

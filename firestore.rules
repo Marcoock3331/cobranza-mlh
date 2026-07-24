@@ -1,4 +1,4 @@
-// MLH_PASO7C_SEGURIDAD_OPERATIVA_ROLES_2026_07_16
+// MLH_PASO7D_CONSERVACION_HISTORICA_2026_07_17
 rules_version = '2';
 
 service cloud.firestore {
@@ -7,1611 +7,173 @@ service cloud.firestore {
     // ==========================================
     // FUNCIONES GLOBALES DE AUTENTICACIÓN Y ROLES
     // ==========================================
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-
-    function userPath() {
-      return /databases/$(database)/documents/usuarios/$(request.auth.uid);
-    }
-
-    function userExists() {
-      return isAuthenticated() && exists(userPath());
-    }
-
-    function userData() {
-      return get(userPath()).data;
-    }
-
-    function perfilStaffValido(perfil) {
-      return perfil.activo == true
-        && perfil.rol in ['SU', 'ADMIN'];
-    }
-
-    function perfilRolValido(perfil, rolEsperado) {
-      return perfil.activo == true
-        && perfil.rol == rolEsperado;
-    }
-
-    function isStaff() {
-      return isAuthenticated()
-        && perfilStaffValido(get(userPath()).data);
-    }
-
-    function isSU() {
-      return isAuthenticated()
-        && perfilRolValido(get(userPath()).data, 'SU');
-    }
-
-    function isADMIN() {
-      return isAuthenticated()
-        && perfilRolValido(get(userPath()).data, 'ADMIN');
-    }
-
-    function actorValido() {
-      return isAuthenticated()
-        && request.resource.data.actor_uid is string
-        && request.resource.data.actor_uid == request.auth.uid;
-    }
+    function isAuthenticated() { return request.auth != null; }
+    function userPath() { return /databases/$(database)/documents/usuarios/$(request.auth.uid); }
+    function userExists() { return isAuthenticated() && exists(userPath()); }
+    function userData() { return get(userPath()).data; }
+    function perfilStaffValido(perfil) { return perfil.activo == true && perfil.rol in ['SU', 'ADMIN']; }
+    function perfilRolValido(perfil, rolEsperado) { return perfil.activo == true && perfil.rol == rolEsperado; }
+    function isStaff() { return isAuthenticated() && perfilStaffValido(get(userPath()).data); }
+    function isSU() { return isAuthenticated() && perfilRolValido(get(userPath()).data, 'SU'); }
+    function isADMIN() { return isAuthenticated() && perfilRolValido(get(userPath()).data, 'ADMIN'); }
+    function actorValido() { return isAuthenticated() && request.resource.data.actor_uid is string && request.resource.data.actor_uid == request.auth.uid; }
 
     // ==========================================
     // FUNCIONES DE VALIDACIÓN FINANCIERA
     // ==========================================
-    function totalNotasCreditoActual() {
-      return resource.data.keys().hasAny(['total_notas_credito'])
-        && resource.data.total_notas_credito is number
-          ? resource.data.total_notas_credito
-          : 0;
-    }
-
-    function totalNotasCreditoNuevo() {
-      return request.resource.data.keys().hasAny(['total_notas_credito'])
-        && request.resource.data.total_notas_credito is number
-          ? request.resource.data.total_notas_credito
-          : 0;
-    }
-
-    function campoNoCambia(campo) {
-      return request.resource.data.get(campo, null) == resource.data.get(campo, null);
-    }
-
-    function limiteCreditoClienteNuevo() {
-      return request.resource.data.get('limite_credito', 0) is number
-        ? request.resource.data.get('limite_credito', 0)
-        : 0;
-    }
-
-    function sumaFacturaActualizada() {
-      return request.resource.data.saldo_pendiente
-        + request.resource.data.monto_pagado
-        + totalNotasCreditoNuevo();
-    }
-
-    function montoTotalActual() {
-      return resource.data.monto_total;
-    }
-
-    function montosFacturaCuadran() {
-      return sumaFacturaActualizada() >= montoTotalActual() - 0.011
-        && sumaFacturaActualizada() <= montoTotalActual() + 0.011;
-    }
-
+    function totalNotasCreditoActual() { return resource.data.keys().hasAny(['total_notas_credito']) && resource.data.total_notas_credito is number ? resource.data.total_notas_credito : 0; }
+    function totalNotasCreditoNuevo() { return request.resource.data.keys().hasAny(['total_notas_credito']) && request.resource.data.total_notas_credito is number ? request.resource.data.total_notas_credito : 0; }
+    function campoNoCambia(campo) { return request.resource.data.get(campo, null) == resource.data.get(campo, null); }
+    function limiteCreditoClienteNuevo() { return request.resource.data.get('limite_credito', 0) is number ? request.resource.data.get('limite_credito', 0) : 0; }
+    function sumaFacturaActualizada() { return request.resource.data.saldo_pendiente + request.resource.data.monto_pagado + totalNotasCreditoNuevo(); }
+    function montoTotalActual() { return resource.data.monto_total; }
+    function montosFacturaCuadran() { return sumaFacturaActualizada() >= montoTotalActual() - 0.011 && sumaFacturaActualizada() <= montoTotalActual() + 0.011; }
     function saldoFacturaEditadaCuadra() {
-      let saldoEsperado = request.resource.data.monto_total
-        - request.resource.data.monto_pagado
-        - totalNotasCreditoNuevo();
-
-      return request.resource.data.saldo_pendiente >= saldoEsperado - 0.011
-        && request.resource.data.saldo_pendiente <= saldoEsperado + 0.011;
+      let saldoEsperado = request.resource.data.monto_total - request.resource.data.monto_pagado - totalNotasCreditoNuevo();
+      return request.resource.data.saldo_pendiente >= saldoEsperado - 0.011 && request.resource.data.saldo_pendiente <= saldoEsperado + 0.011;
     }
-
     function cambioClienteFacturaPermitido() {
       let cambiaCliente = request.resource.data.cliente_id != resource.data.cliente_id;
-      let sinNotasGuardadas = !resource.data.keys().hasAny(['notas_credito'])
-        || (
-          resource.data.notas_credito is list
-          && resource.data.notas_credito.size() == 0
-        );
-
-      return !cambiaCliente
-        || (
-          resource.data.monto_pagado == 0
-          && totalNotasCreditoActual() == 0
-          && resource.data.abonos is list
-          && resource.data.abonos.size() == 0
-          && sinNotasGuardadas
-        );
+      let sinNotasGuardadas = !resource.data.keys().hasAny(['notas_credito']) || (resource.data.notas_credito is list && resource.data.notas_credito.size() == 0);
+      return !cambiaCliente || (resource.data.monto_pagado == 0 && totalNotasCreditoActual() == 0 && resource.data.abonos is list && resource.data.abonos.size() == 0 && sinNotasGuardadas);
     }
-
     function auditoriaEdicionFacturaValida(facturaId) {
       let auditId = request.resource.data.ultima_edicion_audit_id;
       let auditPath = /databases/$(database)/documents/actividad/$(auditId);
-
-      return auditId is string
-        && auditId != ''
-        && request.resource.data.ultima_edicion_actor_uid == request.auth.uid
-        && request.resource.data.ultima_edicion_at is timestamp
-        && existsAfter(auditPath)
-        && getAfter(auditPath).data.actor_uid == request.auth.uid
-        && getAfter(auditPath).data.modulo == 'Facturación'
-        && getAfter(auditPath).data.tipo == 'Edición de Factura'
-        && getAfter(auditPath).data.factura_id == facturaId;
+      return auditId is string && auditId != '' && request.resource.data.ultima_edicion_actor_uid == request.auth.uid && request.resource.data.ultima_edicion_at is timestamp && existsAfter(auditPath) && getAfter(auditPath).data.actor_uid == request.auth.uid && getAfter(auditPath).data.modulo == 'Facturación' && getAfter(auditPath).data.tipo == 'Edición de Factura' && getAfter(auditPath).data.factura_id == facturaId;
     }
-
     function clientesEdicionFacturaValidos() {
-      let clienteAnteriorId = resource.data.cliente_id;
-      let clienteNuevoId = request.resource.data.cliente_id;
-      let clienteAnteriorPath = /databases/$(database)/documents/clientes/$(clienteAnteriorId);
-      let clienteNuevoPath = /databases/$(database)/documents/clientes/$(clienteNuevoId);
-      let saldoAnterior = resource.data.saldo_pendiente;
-      let saldoNuevo = request.resource.data.saldo_pendiente;
-
-      return exists(clienteAnteriorPath)
-        && exists(clienteNuevoPath)
-        && get(clienteNuevoPath).data.activo == true
-        && (
-          (
-            clienteAnteriorId == clienteNuevoId
-            && getAfter(clienteAnteriorPath).data.deuda_actual
-              == get(clienteAnteriorPath).data.deuda_actual + saldoNuevo - saldoAnterior
-            && getAfter(clienteAnteriorPath).data.credito_disponible
-              == get(clienteAnteriorPath).data.credito_disponible - saldoNuevo + saldoAnterior
-          )
-          ||
-          (
-            clienteAnteriorId != clienteNuevoId
-            && getAfter(clienteAnteriorPath).data.deuda_actual
-              == get(clienteAnteriorPath).data.deuda_actual - saldoAnterior
-            && getAfter(clienteAnteriorPath).data.credito_disponible
-              == get(clienteAnteriorPath).data.credito_disponible + saldoAnterior
-            && getAfter(clienteNuevoPath).data.deuda_actual
-              == get(clienteNuevoPath).data.deuda_actual + saldoNuevo
-            && getAfter(clienteNuevoPath).data.credito_disponible
-              == get(clienteNuevoPath).data.credito_disponible - saldoNuevo
-          )
+      let clienteAnteriorId = resource.data.cliente_id; let clienteNuevoId = request.resource.data.cliente_id;
+      let clienteAnteriorPath = /databases/$(database)/documents/clientes/$(clienteAnteriorId); let clienteNuevoPath = /databases/$(database)/documents/clientes/$(clienteNuevoId);
+      let saldoAnterior = resource.data.saldo_pendiente; let saldoNuevo = request.resource.data.saldo_pendiente;
+      return exists(clienteAnteriorPath) && exists(clienteNuevoPath) && get(clienteNuevoPath).data.activo == true && (
+          (clienteAnteriorId == clienteNuevoId && getAfter(clienteAnteriorPath).data.deuda_actual == get(clienteAnteriorPath).data.deuda_actual + saldoNuevo - saldoAnterior && getAfter(clienteAnteriorPath).data.credito_disponible == get(clienteAnteriorPath).data.credito_disponible - saldoNuevo + saldoAnterior)
+          || (clienteAnteriorId != clienteNuevoId && getAfter(clienteAnteriorPath).data.deuda_actual == get(clienteAnteriorPath).data.deuda_actual - saldoAnterior && getAfter(clienteAnteriorPath).data.credito_disponible == get(clienteAnteriorPath).data.credito_disponible + saldoAnterior && getAfter(clienteNuevoPath).data.deuda_actual == get(clienteNuevoPath).data.deuda_actual + saldoNuevo && getAfter(clienteNuevoPath).data.credito_disponible == get(clienteNuevoPath).data.credito_disponible - saldoNuevo)
         );
     }
-
-
-
-    function resumenNotaPath(clienteId) {
-      return /databases/$(database)/documents/notas_credito_resumen_clientes/$(clienteId);
-    }
-
+    function resumenNotaPath(clienteId) { return /databases/$(database)/documents/notas_credito_resumen_clientes/$(clienteId); }
     function resumenNotaAutorizadaValido() {
       let path = resumenNotaPath(resource.data.cliente_id);
-
-      return resource.data.cliente_id is string
-        && resource.data.cliente_id != ''
-        && exists(path)
-        && existsAfter(path)
-        && get(path).data.get('pendientes', 0) >= 1
-        && getAfter(path).data.id == resource.data.cliente_id
-        && getAfter(path).data.cliente_id == resource.data.cliente_id
-        && getAfter(path).data.get('total_solicitudes', 0)
-          == get(path).data.get('total_solicitudes', 0)
-        && getAfter(path).data.get('pendientes', 0)
-          == get(path).data.get('pendientes', 0) - 1
-        && getAfter(path).data.get('autorizadas', 0)
-          == get(path).data.get('autorizadas', 0) + 1
-        && getAfter(path).data.get('rechazadas', 0)
-          == get(path).data.get('rechazadas', 0)
-        && getAfter(path).data.get('anuladas', 0)
-          == get(path).data.get('anuladas', 0)
-        && getAfter(path).data.get('monto_total_notas', 0)
-          == get(path).data.get('monto_total_notas', 0)
-        && getAfter(path).data.get('ultimo_solicitado_por', '')
-          == get(path).data.get('ultimo_solicitado_por', '')
-        && getAfter(path).data.ultimo_estado == 'Autorizado'
-        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
-        && getAfter(path).data.ultimo_folio == resource.data.folio
-        && getAfter(path).data.ultimo_movimiento_at is timestamp
-        && getAfter(path).data.ultimo_resuelto_por is string
-        && getAfter(path).data.ultimo_resuelto_por != ''
-        && getAfter(path).data.activo == true;
+      return resource.data.cliente_id is string && resource.data.cliente_id != '' && exists(path) && existsAfter(path) && get(path).data.get('pendientes', 0) >= 1 && getAfter(path).data.id == resource.data.cliente_id && getAfter(path).data.cliente_id == resource.data.cliente_id && getAfter(path).data.get('total_solicitudes', 0) == get(path).data.get('total_solicitudes', 0) && getAfter(path).data.get('pendientes', 0) == get(path).data.get('pendientes', 0) - 1 && getAfter(path).data.get('autorizadas', 0) == get(path).data.get('autorizadas', 0) + 1 && getAfter(path).data.get('rechazadas', 0) == get(path).data.get('rechazadas', 0) && getAfter(path).data.get('anuladas', 0) == get(path).data.get('anuladas', 0) && getAfter(path).data.get('monto_total_notas', 0) == get(path).data.get('monto_total_notas', 0) && getAfter(path).data.get('ultimo_solicitado_por', '') == get(path).data.get('ultimo_solicitado_por', '') && getAfter(path).data.ultimo_estado == 'Autorizado' && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota && getAfter(path).data.ultimo_folio == resource.data.folio && getAfter(path).data.ultimo_movimiento_at is timestamp && getAfter(path).data.ultimo_resuelto_por is string && getAfter(path).data.ultimo_resuelto_por != '' && getAfter(path).data.activo == true;
     }
-
     function resumenNotaRechazadaValido() {
       let path = resumenNotaPath(resource.data.cliente_id);
-
-      return resource.data.cliente_id is string
-        && resource.data.cliente_id != ''
-        && exists(path)
-        && existsAfter(path)
-        && get(path).data.get('pendientes', 0) >= 1
-        && getAfter(path).data.id == resource.data.cliente_id
-        && getAfter(path).data.cliente_id == resource.data.cliente_id
-        && getAfter(path).data.get('total_solicitudes', 0)
-          == get(path).data.get('total_solicitudes', 0)
-        && getAfter(path).data.get('pendientes', 0)
-          == get(path).data.get('pendientes', 0) - 1
-        && getAfter(path).data.get('autorizadas', 0)
-          == get(path).data.get('autorizadas', 0)
-        && getAfter(path).data.get('rechazadas', 0)
-          == get(path).data.get('rechazadas', 0) + 1
-        && getAfter(path).data.get('anuladas', 0)
-          == get(path).data.get('anuladas', 0)
-        && getAfter(path).data.get('monto_total_notas', 0)
-          == get(path).data.get('monto_total_notas', 0)
-        && getAfter(path).data.get('ultimo_solicitado_por', '')
-          == get(path).data.get('ultimo_solicitado_por', '')
-        && getAfter(path).data.ultimo_estado == 'Rechazado'
-        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
-        && getAfter(path).data.ultimo_folio == resource.data.folio
-        && getAfter(path).data.ultimo_movimiento_at is timestamp
-        && getAfter(path).data.ultimo_resuelto_por is string
-        && getAfter(path).data.ultimo_resuelto_por != ''
-        && getAfter(path).data.activo == true;
+      return resource.data.cliente_id is string && resource.data.cliente_id != '' && exists(path) && existsAfter(path) && get(path).data.get('pendientes', 0) >= 1 && getAfter(path).data.id == resource.data.cliente_id && getAfter(path).data.cliente_id == resource.data.cliente_id && getAfter(path).data.get('total_solicitudes', 0) == get(path).data.get('total_solicitudes', 0) && getAfter(path).data.get('pendientes', 0) == get(path).data.get('pendientes', 0) - 1 && getAfter(path).data.get('autorizadas', 0) == get(path).data.get('autorizadas', 0) && getAfter(path).data.get('rechazadas', 0) == get(path).data.get('rechazadas', 0) + 1 && getAfter(path).data.get('anuladas', 0) == get(path).data.get('anuladas', 0) && getAfter(path).data.get('monto_total_notas', 0) == get(path).data.get('monto_total_notas', 0) && getAfter(path).data.get('ultimo_solicitado_por', '') == get(path).data.get('ultimo_solicitado_por', '') && getAfter(path).data.ultimo_estado == 'Rechazado' && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota && getAfter(path).data.ultimo_folio == resource.data.folio && getAfter(path).data.ultimo_movimiento_at is timestamp && getAfter(path).data.ultimo_resuelto_por is string && getAfter(path).data.ultimo_resuelto_por != '' && getAfter(path).data.activo == true;
     }
-
     function resumenNotaAnuladaValido() {
       let path = resumenNotaPath(resource.data.cliente_id);
-
-      return resource.data.cliente_id is string
-        && resource.data.cliente_id != ''
-        && exists(path)
-        && existsAfter(path)
-        && get(path).data.get('autorizadas', 0) >= 1
-        && getAfter(path).data.id == resource.data.cliente_id
-        && getAfter(path).data.cliente_id == resource.data.cliente_id
-        && getAfter(path).data.get('total_solicitudes', 0)
-          == get(path).data.get('total_solicitudes', 0)
-        && getAfter(path).data.get('pendientes', 0)
-          == get(path).data.get('pendientes', 0)
-        && getAfter(path).data.get('autorizadas', 0)
-          == get(path).data.get('autorizadas', 0) - 1
-        && getAfter(path).data.get('rechazadas', 0)
-          == get(path).data.get('rechazadas', 0)
-        && getAfter(path).data.get('anuladas', 0)
-          == get(path).data.get('anuladas', 0) + 1
-        && getAfter(path).data.get('monto_total_notas', 0)
-          == get(path).data.get('monto_total_notas', 0)
-        && getAfter(path).data.get('ultimo_solicitado_por', '')
-          == get(path).data.get('ultimo_solicitado_por', '')
-        && getAfter(path).data.ultimo_estado == 'Anulada'
-        && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota
-        && getAfter(path).data.ultimo_folio == resource.data.folio
-        && getAfter(path).data.ultimo_movimiento_at is timestamp
-        && getAfter(path).data.ultimo_resuelto_por is string
-        && getAfter(path).data.ultimo_resuelto_por != ''
-        && getAfter(path).data.activo == true;
+      return resource.data.cliente_id is string && resource.data.cliente_id != '' && exists(path) && existsAfter(path) && get(path).data.get('autorizadas', 0) >= 1 && getAfter(path).data.id == resource.data.cliente_id && getAfter(path).data.cliente_id == resource.data.cliente_id && getAfter(path).data.get('total_solicitudes', 0) == get(path).data.get('total_solicitudes', 0) && getAfter(path).data.get('pendientes', 0) == get(path).data.get('pendientes', 0) && getAfter(path).data.get('autorizadas', 0) == get(path).data.get('autorizadas', 0) - 1 && getAfter(path).data.get('rechazadas', 0) == get(path).data.get('rechazadas', 0) && getAfter(path).data.get('anuladas', 0) == get(path).data.get('anuladas', 0) + 1 && getAfter(path).data.get('monto_total_notas', 0) == get(path).data.get('monto_total_notas', 0) && getAfter(path).data.get('ultimo_solicitado_por', '') == get(path).data.get('ultimo_solicitado_por', '') && getAfter(path).data.ultimo_estado == 'Anulada' && getAfter(path).data.ultimo_monto_nota == resource.data.monto_nota && getAfter(path).data.ultimo_folio == resource.data.folio && getAfter(path).data.ultimo_movimiento_at is timestamp && getAfter(path).data.ultimo_resuelto_por is string && getAfter(path).data.ultimo_resuelto_por != '' && getAfter(path).data.activo == true;
     }
-
-    function casiIguales(primero, segundo) {
-      return primero is number
-        && segundo is number
-        && primero >= segundo - 0.011
-        && primero <= segundo + 0.011;
-    }
-
-    function grupoClienteDocumento(cliente) {
-      return cliente.keys().hasAny(['grupo'])
-        && cliente.grupo is string
-        && cliente.grupo != ''
-          ? cliente.grupo
-          : 'GENERAL';
-    }
-
+    function casiIguales(primero, segundo) { return primero is number && segundo is number && primero >= segundo - 0.011 && primero <= segundo + 0.011; }
+    function grupoClienteDocumento(cliente) { return cliente.keys().hasAny(['grupo']) && cliente.grupo is string && cliente.grupo != '' ? cliente.grupo : 'GENERAL'; }
     function clienteCreacionFacturaValido() {
       let clientePath = /databases/$(database)/documents/clientes/$(request.resource.data.cliente_id);
-      let clienteAntes = get(clientePath).data;
-      let clienteDespues = getAfter(clientePath).data;
+      let clienteAntes = get(clientePath).data; let clienteDespues = getAfter(clientePath).data;
       let monto = request.resource.data.monto_total;
-
-      return clienteAntes.activo == true
-        && clienteAntes.estatus == 'Activo'
-        && clienteAntes.nombre == request.resource.data.cliente
-        && grupoClienteDocumento(clienteAntes) == request.resource.data.grupo
-        && clienteAntes.limite_credito is number
-        && clienteAntes.limite_credito > 0
-        && clienteAntes.linea_credito_estado == 'Activa'
-        && clienteAntes.deuda_actual is number
-        && clienteAntes.deuda_actual >= 0
-        && clienteAntes.credito_disponible is number
-        && clienteAntes.credito_disponible >= 0
-        && casiIguales(
-          clienteAntes.credito_disponible,
-          clienteAntes.limite_credito - clienteAntes.deuda_actual
-        )
-        && monto <= clienteAntes.credito_disponible + 0.011
-        && clienteDespues.diff(clienteAntes).affectedKeys().hasOnly([
-          'deuda_actual', 'credito_disponible', 'updatedAt'
-        ])
-        && casiIguales(
-          clienteDespues.deuda_actual,
-          clienteAntes.deuda_actual + monto
-        )
-        && casiIguales(
-          clienteDespues.credito_disponible,
-          clienteAntes.credito_disponible - monto
-        )
-        && clienteDespues.updatedAt is timestamp;
+      return clienteAntes.activo == true && clienteAntes.estatus == 'Activo' && clienteAntes.nombre == request.resource.data.cliente && grupoClienteDocumento(clienteAntes) == request.resource.data.grupo && clienteAntes.limite_credito is number && clienteAntes.limite_credito > 0 && clienteAntes.linea_credito_estado == 'Activa' && clienteAntes.deuda_actual is number && clienteAntes.deuda_actual >= 0 && clienteAntes.credito_disponible is number && clienteAntes.credito_disponible >= 0 && casiIguales(clienteAntes.credito_disponible, clienteAntes.limite_credito - clienteAntes.deuda_actual) && monto <= clienteAntes.credito_disponible + 0.011 && clienteDespues.diff(clienteAntes).affectedKeys().hasOnly(['deuda_actual', 'credito_disponible', 'updatedAt']) && casiIguales(clienteDespues.deuda_actual, clienteAntes.deuda_actual + monto) && casiIguales(clienteDespues.credito_disponible, clienteAntes.credito_disponible - monto) && clienteDespues.updatedAt is timestamp;
     }
-
     function auditoriaCreacionFacturaValida(facturaId) {
-      let auditId = request.resource.data.creacion_audit_id;
-      let auditPath = /databases/$(database)/documents/actividad/$(auditId);
+      let auditId = request.resource.data.creacion_audit_id; let auditPath = /databases/$(database)/documents/actividad/$(auditId);
       let auditoria = getAfter(auditPath).data;
-
-      return auditId is string
-        && auditId != ''
-        && request.resource.data.creacion_actor_uid == request.auth.uid
-        && request.resource.data.creacion_at is timestamp
-        && auditoria.actor_uid == request.auth.uid
-        && auditoria.modulo == 'Facturación'
-        && auditoria.tipo == 'Creación'
-        && auditoria.factura_id == facturaId
-        && auditoria.folio == request.resource.data.folio
-        && auditoria.cliente_id == request.resource.data.cliente_id
-        && auditoria.cliente == request.resource.data.cliente
-        && auditoria.grupo == request.resource.data.grupo
-        && casiIguales(
-          auditoria.monto_total,
-          request.resource.data.monto_total
-        )
-        && auditoria.detalle is string
-        && auditoria.detalle != ''
-        && auditoria.serverTime is timestamp;
+      return auditId is string && auditId != '' && request.resource.data.creacion_actor_uid == request.auth.uid && request.resource.data.creacion_at is timestamp && auditoria.actor_uid == request.auth.uid && auditoria.modulo == 'Facturación' && auditoria.tipo == 'Creación' && auditoria.factura_id == facturaId && auditoria.folio == request.resource.data.folio && auditoria.cliente_id == request.resource.data.cliente_id && auditoria.cliente == request.resource.data.cliente && auditoria.grupo == request.resource.data.grupo && casiIguales(auditoria.monto_total, request.resource.data.monto_total) && auditoria.detalle is string && auditoria.detalle != '' && auditoria.serverTime is timestamp;
     }
-
-    function metricasStatsPath() {
-      return /databases/$(database)/documents/metricas_globales/stats_actuales;
-    }
-
-    function metricasMovimientoPath(movimientoId) {
-      return /databases/$(database)/documents/metricas_movimientos/$(movimientoId);
-    }
-
+    function metricasStatsPath() { return /databases/$(database)/documents/metricas_globales/stats_actuales; }
+    function metricasMovimientoPath(movimientoId) { return /databases/$(database)/documents/metricas_movimientos/$(movimientoId); }
     function deltasMetricasValidos(deltas) {
-      return deltas is map
-        && deltas.keys().hasOnly([
-          'cartera_total', 'cartera_vencida', 'ingresos_mes',
-          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
-          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
-          'total_facturado', 'total_liquidado', 'cobrado_historico',
-          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
-          'total_notas_credito'
-        ])
-        && deltas.cartera_total is number
-        && deltas.cartera_vencida is number
-        && deltas.ingresos_mes is number
-        && deltas.ingresos_semana is number
-        && deltas.clientes_activos is number
-        && deltas.facturas_vencidas is number
-        && deltas.facturas_pendientes is number
-        && deltas.facturas_pagadas is number
-        && deltas.facturas_total is number
-        && deltas.total_facturado is number
-        && deltas.total_liquidado is number
-        && deltas.cobrado_historico is number
-        && deltas.abonos_registrados is number
-        && deltas.abonos_cantidad is number
-        && deltas.monto_recuperado is number
-        && deltas.total_notas_credito is number;
+      return deltas is map && deltas.keys().hasOnly(['cartera_total', 'cartera_vencida', 'ingresos_mes', 'ingresos_semana', 'clientes_activos', 'facturas_vencidas', 'facturas_pendientes', 'facturas_pagadas', 'facturas_total', 'total_facturado', 'total_liquidado', 'cobrado_historico', 'abonos_registrados', 'abonos_cantidad', 'monto_recuperado', 'total_notas_credito']) && deltas.cartera_total is number && deltas.cartera_vencida is number && deltas.ingresos_mes is number && deltas.ingresos_semana is number && deltas.clientes_activos is number && deltas.facturas_vencidas is number && deltas.facturas_pendientes is number && deltas.facturas_pagadas is number && deltas.facturas_total is number && deltas.total_facturado is number && deltas.total_liquidado is number && deltas.cobrado_historico is number && deltas.abonos_registrados is number && deltas.abonos_cantidad is number && deltas.monto_recuperado is number && deltas.total_notas_credito is number;
     }
-
     function metricasNoNegativas(metricas) {
-      return metricas.cartera_total is number
-        && metricas.cartera_total >= 0
-        && metricas.cartera_vencida is number
-        && metricas.cartera_vencida >= 0
-        && metricas.ingresos_mes is number
-        && metricas.ingresos_mes >= 0
-        && metricas.ingresos_semana is number
-        && metricas.ingresos_semana >= 0
-        && metricas.clientes_activos is number
-        && metricas.clientes_activos >= 0
-        && metricas.facturas_vencidas is number
-        && metricas.facturas_vencidas >= 0
-        && metricas.facturas_pendientes is number
-        && metricas.facturas_pendientes >= 0
-        && metricas.facturas_pagadas is number
-        && metricas.facturas_pagadas >= 0
-        && metricas.facturas_total is number
-        && metricas.facturas_total >= 0
-        && metricas.total_facturado is number
-        && metricas.total_facturado >= 0
-        && metricas.total_liquidado is number
-        && metricas.total_liquidado >= 0
-        && metricas.cobrado_historico is number
-        && metricas.cobrado_historico >= 0
-        && metricas.abonos_registrados is number
-        && metricas.abonos_registrados >= 0
-        && metricas.abonos_cantidad is number
-        && metricas.abonos_cantidad >= 0
-        && metricas.monto_recuperado is number
-        && metricas.monto_recuperado >= 0
-        && metricas.total_notas_credito is number
-        && metricas.total_notas_credito >= 0;
+      return metricas.cartera_total is number && metricas.cartera_total >= 0 && metricas.cartera_vencida is number && metricas.cartera_vencida >= 0 && metricas.ingresos_mes is number && metricas.ingresos_mes >= 0 && metricas.ingresos_semana is number && metricas.ingresos_semana >= 0 && metricas.clientes_activos is number && metricas.clientes_activos >= 0 && metricas.facturas_vencidas is number && metricas.facturas_vencidas >= 0 && metricas.facturas_pendientes is number && metricas.facturas_pendientes >= 0 && metricas.facturas_pagadas is number && metricas.facturas_pagadas >= 0 && metricas.facturas_total is number && metricas.facturas_total >= 0 && metricas.total_facturado is number && metricas.total_facturado >= 0 && metricas.total_liquidado is number && metricas.total_liquidado >= 0 && metricas.cobrado_historico is number && metricas.cobrado_historico >= 0 && metricas.abonos_registrados is number && metricas.abonos_registrados >= 0 && metricas.abonos_cantidad is number && metricas.abonos_cantidad >= 0 && metricas.monto_recuperado is number && metricas.monto_recuperado >= 0 && metricas.total_notas_credito is number && metricas.total_notas_credito >= 0;
     }
-
-    function facturaGuardadaVencida(factura) {
-      return factura.get('saldo_pendiente', 0) > 0
-        && factura.get('estatus', '') == 'Vencida';
-    }
-
-    function facturaGuardadaPagada(factura) {
-      return factura.get('saldo_pendiente', 0) == 0;
-    }
-
+    function facturaGuardadaVencida(factura) { return factura.get('saldo_pendiente', 0) > 0 && factura.get('estatus', '') == 'Vencida'; }
+    function facturaGuardadaPagada(factura) { return factura.get('saldo_pendiente', 0) == 0; }
     function deltasComunesActualizacionFacturaValidos(antes, despues, deltas) {
-      let vencidaAntes = facturaGuardadaVencida(antes);
-      let vencidaDespues = facturaGuardadaVencida(despues);
-      let pagadaAntes = facturaGuardadaPagada(antes);
-      let pagadaDespues = facturaGuardadaPagada(despues);
-
-      return casiIguales(
-          deltas.cartera_total,
-          despues.saldo_pendiente - antes.saldo_pendiente
-        )
-        && casiIguales(
-          deltas.cartera_vencida,
-          (vencidaDespues ? despues.saldo_pendiente : 0)
-            - (vencidaAntes ? antes.saldo_pendiente : 0)
-        )
-        && deltas.clientes_activos == 0
-        && deltas.facturas_vencidas
-          == (vencidaDespues ? 1 : 0) - (vencidaAntes ? 1 : 0)
-        && deltas.facturas_pendientes
-          == (despues.saldo_pendiente > 0 ? 1 : 0)
-            - (antes.saldo_pendiente > 0 ? 1 : 0)
-        && deltas.facturas_pagadas
-          == (pagadaDespues ? 1 : 0) - (pagadaAntes ? 1 : 0)
-        && deltas.facturas_total == 0
-        && casiIguales(
-          deltas.total_facturado,
-          despues.monto_total - antes.monto_total
-        )
-        && casiIguales(
-          deltas.total_liquidado,
-          (pagadaDespues ? despues.monto_total : 0)
-            - (pagadaAntes ? antes.monto_total : 0)
-        )
-        && casiIguales(
-          deltas.total_notas_credito,
-          despues.get('total_notas_credito', 0)
-            - antes.get('total_notas_credito', 0)
-        );
+      let vencidaAntes = facturaGuardadaVencida(antes); let vencidaDespues = facturaGuardadaVencida(despues); let pagadaAntes = facturaGuardadaPagada(antes); let pagadaDespues = facturaGuardadaPagada(despues);
+      return casiIguales(deltas.cartera_total, despues.saldo_pendiente - antes.saldo_pendiente) && casiIguales(deltas.cartera_vencida, (vencidaDespues ? despues.saldo_pendiente : 0) - (vencidaAntes ? antes.saldo_pendiente : 0)) && deltas.clientes_activos == 0 && deltas.facturas_vencidas == (vencidaDespues ? 1 : 0) - (vencidaAntes ? 1 : 0) && deltas.facturas_pendientes == (despues.saldo_pendiente > 0 ? 1 : 0) - (antes.saldo_pendiente > 0 ? 1 : 0) && deltas.facturas_pagadas == (pagadaDespues ? 1 : 0) - (pagadaAntes ? 1 : 0) && deltas.facturas_total == 0 && casiIguales(deltas.total_facturado, despues.monto_total - antes.monto_total) && casiIguales(deltas.total_liquidado, (pagadaDespues ? despues.monto_total : 0) - (pagadaAntes ? antes.monto_total : 0)) && casiIguales(deltas.total_notas_credito, despues.get('total_notas_credito', 0) - antes.get('total_notas_credito', 0));
     }
-
     function deltasFacturaCreadaValidos() {
-      let factura = getAfter(
-        /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)
-      ).data;
-      let deltas = request.resource.data.deltas_fuente;
-      let vencida = facturaGuardadaVencida(factura);
-
-      return request.resource.data.factura_id == request.resource.data.entidad_id
-        && casiIguales(deltas.cartera_total, factura.monto_total)
-        && casiIguales(
-          deltas.cartera_vencida,
-          vencida ? factura.monto_total : 0
-        )
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == 0
-        && deltas.facturas_vencidas == (vencida ? 1 : 0)
-        && deltas.facturas_pendientes == 1
-        && deltas.facturas_pagadas == 0
-        && deltas.facturas_total == 1
-        && casiIguales(deltas.total_facturado, factura.monto_total)
-        && deltas.total_liquidado == 0
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && deltas.total_notas_credito == 0;
+      let factura = getAfter(/databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)).data; let deltas = request.resource.data.deltas_fuente; let vencida = facturaGuardadaVencida(factura);
+      return request.resource.data.factura_id == request.resource.data.entidad_id && casiIguales(deltas.cartera_total, factura.monto_total) && casiIguales(deltas.cartera_vencida, vencida ? factura.monto_total : 0) && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.clientes_activos == 0 && deltas.facturas_vencidas == (vencida ? 1 : 0) && deltas.facturas_pendientes == 1 && deltas.facturas_pagadas == 0 && deltas.facturas_total == 1 && casiIguales(deltas.total_facturado, factura.monto_total) && deltas.total_liquidado == 0 && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0 && deltas.total_notas_credito == 0;
     }
-
     function deltasActualizacionFacturaValidos() {
-      let path = /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id);
-      let antes = get(path).data;
-      let despues = getAfter(path).data;
-      let deltas = request.resource.data.deltas_fuente;
-      let tipo = request.resource.data.tipo;
-      let montoAbono = antes.saldo_pendiente - despues.saldo_pendiente;
-      let montoAnulado = despues.saldo_pendiente - antes.saldo_pendiente;
-
-      return request.resource.data.factura_id == request.resource.data.entidad_id
-        && deltasComunesActualizacionFacturaValidos(
-          antes,
-          despues,
-          deltas
-        )
-        && (
-          (
-            tipo == 'ABONO_REGISTRADO'
-            && montoAbono > 0
-            && casiIguales(deltas.ingresos_mes, montoAbono)
-            && casiIguales(deltas.ingresos_semana, montoAbono)
-            && casiIguales(deltas.cobrado_historico, montoAbono)
-            && casiIguales(deltas.abonos_registrados, montoAbono)
-            && deltas.abonos_cantidad == 1
-            && casiIguales(deltas.monto_recuperado, montoAbono)
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'ABONO_ANULADO'
-            && montoAnulado > 0
-            && (
-              deltas.ingresos_mes == 0
-              || casiIguales(deltas.ingresos_mes, -montoAnulado)
-            )
-            && (
-              deltas.ingresos_semana == 0
-              || casiIguales(deltas.ingresos_semana, -montoAnulado)
-            )
-            && casiIguales(deltas.cobrado_historico, -montoAnulado)
-            && casiIguales(deltas.abonos_registrados, -montoAnulado)
-            && deltas.abonos_cantidad == -1
-            && casiIguales(deltas.monto_recuperado, -montoAnulado)
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'FACTURA_EDITADA'
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'NOTA_CREDITO_APLICADA'
-            && deltas.total_notas_credito > 0
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-          )
-          ||
-          (
-            tipo == 'NOTA_CREDITO_ANULADA'
-            && deltas.total_notas_credito < 0
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-          )
-        );
+      let path = /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id); let antes = get(path).data; let despues = getAfter(path).data; let deltas = request.resource.data.deltas_fuente; let tipo = request.resource.data.tipo; let montoAbono = antes.saldo_pendiente - despues.saldo_pendiente; let montoAnulado = despues.saldo_pendiente - antes.saldo_pendiente;
+      return request.resource.data.factura_id == request.resource.data.entidad_id && deltasComunesActualizacionFacturaValidos(antes, despues, deltas) && ((tipo == 'ABONO_REGISTRADO' && montoAbono > 0 && casiIguales(deltas.ingresos_mes, montoAbono) && casiIguales(deltas.ingresos_semana, montoAbono) && casiIguales(deltas.cobrado_historico, montoAbono) && casiIguales(deltas.abonos_registrados, montoAbono) && deltas.abonos_cantidad == 1 && casiIguales(deltas.monto_recuperado, montoAbono) && deltas.total_notas_credito == 0) || (tipo == 'ABONO_ANULADO' && montoAnulado > 0 && (deltas.ingresos_mes == 0 || casiIguales(deltas.ingresos_mes, -montoAnulado)) && (deltas.ingresos_semana == 0 || casiIguales(deltas.ingresos_semana, -montoAnulado)) && casiIguales(deltas.cobrado_historico, -montoAnulado) && casiIguales(deltas.abonos_registrados, -montoAnulado) && deltas.abonos_cantidad == -1 && casiIguales(deltas.monto_recuperado, -montoAnulado) && deltas.total_notas_credito == 0) || (tipo == 'FACTURA_EDITADA' && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0 && deltas.total_notas_credito == 0) || (tipo == 'NOTA_CREDITO_APLICADA' && deltas.total_notas_credito > 0 && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0) || (tipo == 'NOTA_CREDITO_ANULADA' && deltas.total_notas_credito < 0 && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0));
     }
-
     function deltasFacturaEliminadaValidos() {
-      let factura = get(
-        /databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)
-      ).data;
-      let deltas = request.resource.data.deltas_fuente;
-      let vencida = facturaGuardadaVencida(factura);
-      let pagada = facturaGuardadaPagada(factura);
-
-      return request.resource.data.factura_id == request.resource.data.entidad_id
-        && casiIguales(
-          deltas.cartera_total,
-          -factura.get('saldo_pendiente', 0)
-        )
-        && casiIguales(
-          deltas.cartera_vencida,
-          vencida ? -factura.get('saldo_pendiente', 0) : 0
-        )
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == 0
-        && deltas.facturas_vencidas == (vencida ? -1 : 0)
-        && deltas.facturas_pendientes
-          == (factura.get('saldo_pendiente', 0) > 0 ? -1 : 0)
-        && deltas.facturas_pagadas == (pagada ? -1 : 0)
-        && deltas.facturas_total == -1
-        && casiIguales(deltas.total_facturado, -factura.monto_total)
-        && casiIguales(
-          deltas.total_liquidado,
-          pagada ? -factura.monto_total : 0
-        )
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && casiIguales(
-          deltas.total_notas_credito,
-          -factura.get('total_notas_credito', 0)
-        );
+      let factura = get(/databases/$(database)/documents/facturas/$(request.resource.data.entidad_id)).data; let deltas = request.resource.data.deltas_fuente; let vencida = facturaGuardadaVencida(factura); let pagada = facturaGuardadaPagada(factura);
+      return request.resource.data.factura_id == request.resource.data.entidad_id && casiIguales(deltas.cartera_total, -factura.get('saldo_pendiente', 0)) && casiIguales(deltas.cartera_vencida, vencida ? -factura.get('saldo_pendiente', 0) : 0) && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.clientes_activos == 0 && deltas.facturas_vencidas == (vencida ? -1 : 0) && deltas.facturas_pendientes == (factura.get('saldo_pendiente', 0) > 0 ? -1 : 0) && deltas.facturas_pagadas == (pagada ? -1 : 0) && deltas.facturas_total == -1 && casiIguales(deltas.total_facturado, -factura.monto_total) && casiIguales(deltas.total_liquidado, pagada ? -factura.monto_total : 0) && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0 && casiIguales(deltas.total_notas_credito, -factura.get('total_notas_credito', 0));
     }
-
     function deltasClienteValidos() {
-      let deltas = request.resource.data.deltas_fuente;
-      let tipo = request.resource.data.tipo;
-      let deltaEsperado = tipo == 'CLIENTE_INACTIVADO' ? -1 : 1;
-
-      return request.resource.data.cliente_id == request.resource.data.entidad_id
-        && deltas.cartera_total == 0
-        && deltas.cartera_vencida == 0
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == deltaEsperado
-        && deltas.facturas_vencidas == 0
-        && deltas.facturas_pendientes == 0
-        && deltas.facturas_pagadas == 0
-        && deltas.facturas_total == 0
-        && deltas.total_facturado == 0
-        && deltas.total_liquidado == 0
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && deltas.total_notas_credito == 0;
+      let deltas = request.resource.data.deltas_fuente; let tipo = request.resource.data.tipo; let deltaEsperado = tipo == 'CLIENTE_INACTIVADO' ? -1 : 1;
+      return request.resource.data.cliente_id == request.resource.data.entidad_id && deltas.cartera_total == 0 && deltas.cartera_vencida == 0 && deltas.ingresos_mes == 0 && deltas.ingresos_semana == 0 && deltas.clientes_activos == deltaEsperado && deltas.facturas_vencidas == 0 && deltas.facturas_pendientes == 0 && deltas.facturas_pagadas == 0 && deltas.facturas_total == 0 && deltas.total_facturado == 0 && deltas.total_liquidado == 0 && deltas.cobrado_historico == 0 && deltas.abonos_registrados == 0 && deltas.abonos_cantidad == 0 && deltas.monto_recuperado == 0 && deltas.total_notas_credito == 0;
     }
-
     function deltasFuenteLigadosAEntidad() {
       let tipo = request.resource.data.tipo;
-
-      return (
-          tipo == 'FACTURA_CREADA'
-          && deltasFacturaCreadaValidos()
-        )
-        || (
-          tipo in [
-            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
-            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
-          ]
-          && deltasActualizacionFacturaValidos()
-        )
-        || (
-          tipo == 'FACTURA_ELIMINADA'
-          && deltasFacturaEliminadaValidos()
-        )
-        || (
-          tipo in [
-            'CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'
-          ]
-          && deltasClienteValidos()
-        )
-        || (
-          tipo == 'RECONSTRUCCION_METRICAS'
-          && isSU()
-        );
+      return (tipo == 'FACTURA_CREADA' && deltasFacturaCreadaValidos()) || (tipo in ['ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA', 'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'] && deltasActualizacionFacturaValidos()) || (tipo == 'FACTURA_ELIMINADA' && deltasFacturaEliminadaValidos()) || (tipo in ['CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'] && deltasClienteValidos()) || (tipo == 'RECONSTRUCCION_METRICAS' && isSU());
     }
 
+    // PASO 7D: Update to ensure logical cancellation is read as valid
     function movimientoMetricasLigadoAEntidad(movimientoId) {
-      let tipo = request.resource.data.tipo;
-      let entidadId = request.resource.data.entidad_id;
-      let facturaPath = /databases/$(database)/documents/facturas/$(entidadId);
-      let clientePath = /databases/$(database)/documents/clientes/$(entidadId);
-
-      return (
-          tipo == 'FACTURA_CREADA'
-          && !exists(facturaPath)
-          && getAfter(facturaPath).data.metricas_movimiento_id == movimientoId
-        )
-        || (
-          tipo in [
-            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
-            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
-          ]
-          && exists(facturaPath)
-          && getAfter(facturaPath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(facturaPath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo == 'FACTURA_ELIMINADA'
-          && exists(facturaPath)
-          && !existsAfter(facturaPath)
-        )
-        || (
-          tipo == 'CLIENTE_CREADO'
-          && !exists(clientePath)
-          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo in ['CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO']
-          && exists(clientePath)
-          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo == 'RECONSTRUCCION_METRICAS'
-          && isSU()
-          && request.resource.data.entidad_tipo == 'METRICAS'
-          && request.resource.data.entidad_id == 'stats_actuales'
-        );
+      let tipo = request.resource.data.tipo; let entidadId = request.resource.data.entidad_id; let facturaPath = /databases/$(database)/documents/facturas/$(entidadId); let clientePath = /databases/$(database)/documents/clientes/$(entidadId);
+      return (tipo == 'FACTURA_CREADA' && !exists(facturaPath) && getAfter(facturaPath).data.metricas_movimiento_id == movimientoId) || (tipo in ['ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA', 'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'] && exists(facturaPath) && getAfter(facturaPath).data.ultimo_metricas_movimiento_id == movimientoId && getAfter(facturaPath).data.ultimo_metricas_tipo == tipo) || (tipo == 'FACTURA_ELIMINADA' && exists(facturaPath) && getAfter(facturaPath).data.estatus == 'Cancelada' && getAfter(facturaPath).data.ultimo_metricas_movimiento_id == movimientoId) || (tipo == 'CLIENTE_CREADO' && !exists(clientePath) && getAfter(clientePath).data.ultimo_metricas_movimiento_id == movimientoId && getAfter(clientePath).data.ultimo_metricas_tipo == tipo) || (tipo in ['CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'] && exists(clientePath) && getAfter(clientePath).data.ultimo_metricas_movimiento_id == movimientoId && getAfter(clientePath).data.ultimo_metricas_tipo == tipo) || (tipo == 'RECONSTRUCCION_METRICAS' && isSU() && request.resource.data.entidad_tipo == 'METRICAS' && request.resource.data.entidad_id == 'stats_actuales');
     }
-
     function actividadMovimientoMetricasValida() {
-      let actividadId = request.resource.data.actividad_id;
-      let actividadPath = /databases/$(database)/documents/actividad/$(actividadId);
-      let actividad = getAfter(actividadPath).data;
-
-      return actividadId is string
-        && actividadId != ''
-        && actividad.actor_uid == request.auth.uid
-        && actividad.metricas_movimiento_id == request.resource.data.id
-        && actividad.serverTime is timestamp;
+      let actividadId = request.resource.data.actividad_id; let actividadPath = /databases/$(database)/documents/actividad/$(actividadId); let actividad = getAfter(actividadPath).data;
+      return actividadId is string && actividadId != '' && actividad.actor_uid == request.auth.uid && actividad.metricas_movimiento_id == request.resource.data.id && actividad.serverTime is timestamp;
     }
-
     function deltasAplicadosMetricasValidos() {
-      let stats = get(metricasStatsPath()).data;
-      let fuente = request.resource.data.deltas_fuente;
-      let aplicado = request.resource.data.deltas_aplicados;
-      let reiniciaMes = request.resource.data.reinicio_mes;
-      let reiniciaSemana = request.resource.data.reinicio_semana;
-      let mesAnterior = stats.get('periodo_mes', '');
-      let semanaAnterior = stats.get('periodo_semana', '');
-
-      return exists(metricasStatsPath())
-        && request.resource.data.periodo_mes_anterior == mesAnterior
-        && request.resource.data.periodo_semana_anterior == semanaAnterior
-        && request.resource.data.periodo_mes_nuevo is string
-        && request.resource.data.periodo_mes_nuevo != ''
-        && request.resource.data.periodo_semana_nuevo is string
-        && request.resource.data.periodo_semana_nuevo != ''
-        && reiniciaMes is bool
-        && reiniciaSemana is bool
-        && (
-          (
-            reiniciaMes == true
-            && mesAnterior != ''
-            && mesAnterior != request.resource.data.periodo_mes_nuevo
-            && casiIguales(
-              aplicado.ingresos_mes,
-              fuente.ingresos_mes - stats.get('ingresos_mes', 0)
-            )
-          )
-          ||
-          (
-            reiniciaMes == false
-            && (
-              mesAnterior == ''
-              || mesAnterior == request.resource.data.periodo_mes_nuevo
-            )
-            && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes)
-          )
-        )
-        && (
-          (
-            reiniciaSemana == true
-            && semanaAnterior != ''
-            && semanaAnterior != request.resource.data.periodo_semana_nuevo
-            && casiIguales(
-              aplicado.ingresos_semana,
-              fuente.ingresos_semana - stats.get('ingresos_semana', 0)
-            )
-          )
-          ||
-          (
-            reiniciaSemana == false
-            && (
-              semanaAnterior == ''
-              || semanaAnterior == request.resource.data.periodo_semana_nuevo
-            )
-            && casiIguales(
-              aplicado.ingresos_semana,
-              fuente.ingresos_semana
-            )
-          )
-        )
-        && casiIguales(aplicado.cartera_total, fuente.cartera_total)
-        && casiIguales(aplicado.cartera_vencida, fuente.cartera_vencida)
-        && casiIguales(aplicado.clientes_activos, fuente.clientes_activos)
-        && casiIguales(aplicado.facturas_vencidas, fuente.facturas_vencidas)
-        && casiIguales(aplicado.facturas_pendientes, fuente.facturas_pendientes)
-        && casiIguales(aplicado.facturas_pagadas, fuente.facturas_pagadas)
-        && casiIguales(aplicado.facturas_total, fuente.facturas_total)
-        && casiIguales(aplicado.total_facturado, fuente.total_facturado)
-        && casiIguales(aplicado.total_liquidado, fuente.total_liquidado)
-        && casiIguales(aplicado.cobrado_historico, fuente.cobrado_historico)
-        && casiIguales(aplicado.abonos_registrados, fuente.abonos_registrados)
-        && casiIguales(aplicado.abonos_cantidad, fuente.abonos_cantidad)
-        && casiIguales(aplicado.monto_recuperado, fuente.monto_recuperado)
-        && casiIguales(
-          aplicado.total_notas_credito,
-          fuente.total_notas_credito
-        );
+      let stats = get(metricasStatsPath()).data; let fuente = request.resource.data.deltas_fuente; let aplicado = request.resource.data.deltas_aplicados; let reiniciaMes = request.resource.data.reinicio_mes; let reiniciaSemana = request.resource.data.reinicio_semana; let mesAnterior = stats.get('periodo_mes', ''); let semanaAnterior = stats.get('periodo_semana', '');
+      return exists(metricasStatsPath()) && request.resource.data.periodo_mes_anterior == mesAnterior && request.resource.data.periodo_semana_anterior == semanaAnterior && request.resource.data.periodo_mes_nuevo is string && request.resource.data.periodo_mes_nuevo != '' && request.resource.data.periodo_semana_nuevo is string && request.resource.data.periodo_semana_nuevo != '' && reiniciaMes is bool && reiniciaSemana is bool && ((reiniciaMes == true && mesAnterior != '' && mesAnterior != request.resource.data.periodo_mes_nuevo && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes - stats.get('ingresos_mes', 0))) || (reiniciaMes == false && (mesAnterior == '' || mesAnterior == request.resource.data.periodo_mes_nuevo) && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes))) && ((reiniciaSemana == true && semanaAnterior != '' && semanaAnterior != request.resource.data.periodo_semana_nuevo && casiIguales(aplicado.ingresos_semana, fuente.ingresos_semana - stats.get('ingresos_semana', 0))) || (reiniciaSemana == false && (semanaAnterior == '' || semanaAnterior == request.resource.data.periodo_semana_nuevo) && casiIguales(aplicado.ingresos_semana, fuente.ingresos_semana))) && casiIguales(aplicado.cartera_total, fuente.cartera_total) && casiIguales(aplicado.cartera_vencida, fuente.cartera_vencida) && casiIguales(aplicado.clientes_activos, fuente.clientes_activos) && casiIguales(aplicado.facturas_vencidas, fuente.facturas_vencidas) && casiIguales(aplicado.facturas_pendientes, fuente.facturas_pendientes) && casiIguales(aplicado.facturas_pagadas, fuente.facturas_pagadas) && casiIguales(aplicado.facturas_total, fuente.facturas_total) && casiIguales(aplicado.total_facturado, fuente.total_facturado) && casiIguales(aplicado.total_liquidado, fuente.total_liquidado) && casiIguales(aplicado.cobrado_historico, fuente.cobrado_historico) && casiIguales(aplicado.abonos_registrados, fuente.abonos_registrados) && casiIguales(aplicado.abonos_cantidad, fuente.abonos_cantidad) && casiIguales(aplicado.monto_recuperado, fuente.monto_recuperado) && casiIguales(aplicado.total_notas_credito, fuente.total_notas_credito);
     }
-
     function metricasDespuesCoincidenMovimiento(movimiento) {
       let deltas = movimiento.deltas_aplicados;
-
-      return casiIguales(
-          request.resource.data.cartera_total,
-          resource.data.get('cartera_total', 0) + deltas.cartera_total
-        )
-        && casiIguales(
-          request.resource.data.cartera_vencida,
-          resource.data.get('cartera_vencida', 0) + deltas.cartera_vencida
-        )
-        && casiIguales(
-          request.resource.data.ingresos_mes,
-          resource.data.get('ingresos_mes', 0) + deltas.ingresos_mes
-        )
-        && casiIguales(
-          request.resource.data.ingresos_semana,
-          resource.data.get('ingresos_semana', 0) + deltas.ingresos_semana
-        )
-        && request.resource.data.clientes_activos
-          == resource.data.get('clientes_activos', 0) + deltas.clientes_activos
-        && request.resource.data.facturas_vencidas
-          == resource.data.get('facturas_vencidas', 0)
-            + deltas.facturas_vencidas
-        && request.resource.data.facturas_pendientes
-          == resource.data.get('facturas_pendientes', 0)
-            + deltas.facturas_pendientes
-        && request.resource.data.facturas_pagadas
-          == resource.data.get('facturas_pagadas', 0)
-            + deltas.facturas_pagadas
-        && request.resource.data.facturas_total
-          == resource.data.get('facturas_total', 0) + deltas.facturas_total
-        && casiIguales(
-          request.resource.data.total_facturado,
-          resource.data.get('total_facturado', 0) + deltas.total_facturado
-        )
-        && casiIguales(
-          request.resource.data.total_liquidado,
-          resource.data.get('total_liquidado', 0) + deltas.total_liquidado
-        )
-        && casiIguales(
-          request.resource.data.cobrado_historico,
-          resource.data.get('cobrado_historico', 0)
-            + deltas.cobrado_historico
-        )
-        && casiIguales(
-          request.resource.data.abonos_registrados,
-          resource.data.get('abonos_registrados', 0)
-            + deltas.abonos_registrados
-        )
-        && request.resource.data.abonos_cantidad
-          == resource.data.get('abonos_cantidad', 0)
-            + deltas.abonos_cantidad
-        && casiIguales(
-          request.resource.data.monto_recuperado,
-          resource.data.get('monto_recuperado', 0)
-            + deltas.monto_recuperado
-        )
-        && casiIguales(
-          request.resource.data.total_notas_credito,
-          resource.data.get('total_notas_credito', 0)
-            + deltas.total_notas_credito
-        )
-        && request.resource.data.periodo_mes
-          == movimiento.periodo_mes_nuevo
-        && request.resource.data.periodo_semana
-          == movimiento.periodo_semana_nuevo
-        && request.resource.data.ultimo_movimiento_id == movimiento.id
-        && request.resource.data.ultima_actualizacion is timestamp;
+      return casiIguales(request.resource.data.cartera_total, resource.data.get('cartera_total', 0) + deltas.cartera_total) && casiIguales(request.resource.data.cartera_vencida, resource.data.get('cartera_vencida', 0) + deltas.cartera_vencida) && casiIguales(request.resource.data.ingresos_mes, resource.data.get('ingresos_mes', 0) + deltas.ingresos_mes) && casiIguales(request.resource.data.ingresos_semana, resource.data.get('ingresos_semana', 0) + deltas.ingresos_semana) && request.resource.data.clientes_activos == resource.data.get('clientes_activos', 0) + deltas.clientes_activos && request.resource.data.facturas_vencidas == resource.data.get('facturas_vencidas', 0) + deltas.facturas_vencidas && request.resource.data.facturas_pendientes == resource.data.get('facturas_pendientes', 0) + deltas.facturas_pendientes && request.resource.data.facturas_pagadas == resource.data.get('facturas_pagadas', 0) + deltas.facturas_pagadas && request.resource.data.facturas_total == resource.data.get('facturas_total', 0) + deltas.facturas_total && casiIguales(request.resource.data.total_facturado, resource.data.get('total_facturado', 0) + deltas.total_facturado) && casiIguales(request.resource.data.total_liquidado, resource.data.get('total_liquidado', 0) + deltas.total_liquidado) && casiIguales(request.resource.data.cobrado_historico, resource.data.get('cobrado_historico', 0) + deltas.cobrado_historico) && casiIguales(request.resource.data.abonos_registrados, resource.data.get('abonos_registrados', 0) + deltas.abonos_registrados) && request.resource.data.abonos_cantidad == resource.data.get('abonos_cantidad', 0) + deltas.abonos_cantidad && casiIguales(request.resource.data.monto_recuperado, resource.data.get('monto_recuperado', 0) + deltas.monto_recuperado) && casiIguales(request.resource.data.total_notas_credito, resource.data.get('total_notas_credito', 0) + deltas.total_notas_credito) && request.resource.data.periodo_mes == movimiento.periodo_mes_nuevo && request.resource.data.periodo_semana == movimiento.periodo_semana_nuevo && request.resource.data.ultimo_movimiento_id == movimiento.id && request.resource.data.ultima_actualizacion is timestamp;
     }
 
-
-    // ==============================================================
-    // PASO 7B V2.3 — VALIDACIÓN CENTRALIZADA DEL BUNDLE DE MÉTRICAS
-    // Se ejecuta desde stats_actuales. Los helpers globales y la auditoría
-    // usan una sola lectura por ruta para respetar el presupuesto de accesos.
-    // ==============================================================
-    function deltasFacturaCreadaMovimientoValidos(movimiento) {
-      let factura = getAfter(
-        /databases/$(database)/documents/facturas/$(movimiento.entidad_id)
-      ).data;
-      let deltas = movimiento.deltas_fuente;
-      let vencida = facturaGuardadaVencida(factura);
-
-      return movimiento.factura_id == movimiento.entidad_id
-        && casiIguales(deltas.cartera_total, factura.monto_total)
-        && casiIguales(
-          deltas.cartera_vencida,
-          vencida ? factura.monto_total : 0
-        )
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == 0
-        && deltas.facturas_vencidas == (vencida ? 1 : 0)
-        && deltas.facturas_pendientes == 1
-        && deltas.facturas_pagadas == 0
-        && deltas.facturas_total == 1
-        && casiIguales(deltas.total_facturado, factura.monto_total)
-        && deltas.total_liquidado == 0
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && deltas.total_notas_credito == 0;
-    }
-
-    function deltasActualizacionFacturaMovimientoValidos(movimiento) {
-      let path = /databases/$(database)/documents/facturas/$(movimiento.entidad_id);
-      let antes = get(path).data;
-      let despues = getAfter(path).data;
-      let deltas = movimiento.deltas_fuente;
-      let tipo = movimiento.tipo;
-      let montoAbono = antes.saldo_pendiente - despues.saldo_pendiente;
-      let montoAnulado = despues.saldo_pendiente - antes.saldo_pendiente;
-
-      return movimiento.factura_id == movimiento.entidad_id
-        && deltasComunesActualizacionFacturaValidos(
-          antes,
-          despues,
-          deltas
-        )
-        && (
-          (
-            tipo == 'ABONO_REGISTRADO'
-            && montoAbono > 0
-            && casiIguales(deltas.ingresos_mes, montoAbono)
-            && casiIguales(deltas.ingresos_semana, montoAbono)
-            && casiIguales(deltas.cobrado_historico, montoAbono)
-            && casiIguales(deltas.abonos_registrados, montoAbono)
-            && deltas.abonos_cantidad == 1
-            && casiIguales(deltas.monto_recuperado, montoAbono)
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'ABONO_ANULADO'
-            && montoAnulado > 0
-            && (
-              deltas.ingresos_mes == 0
-              || casiIguales(deltas.ingresos_mes, -montoAnulado)
-            )
-            && (
-              deltas.ingresos_semana == 0
-              || casiIguales(deltas.ingresos_semana, -montoAnulado)
-            )
-            && casiIguales(deltas.cobrado_historico, -montoAnulado)
-            && casiIguales(deltas.abonos_registrados, -montoAnulado)
-            && deltas.abonos_cantidad == -1
-            && casiIguales(deltas.monto_recuperado, -montoAnulado)
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'FACTURA_EDITADA'
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-            && deltas.total_notas_credito == 0
-          )
-          ||
-          (
-            tipo == 'NOTA_CREDITO_APLICADA'
-            && deltas.total_notas_credito > 0
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-          )
-          ||
-          (
-            tipo == 'NOTA_CREDITO_ANULADA'
-            && deltas.total_notas_credito < 0
-            && deltas.ingresos_mes == 0
-            && deltas.ingresos_semana == 0
-            && deltas.cobrado_historico == 0
-            && deltas.abonos_registrados == 0
-            && deltas.abonos_cantidad == 0
-            && deltas.monto_recuperado == 0
-          )
-        );
-    }
-
-    function deltasFacturaEliminadaMovimientoValidos(movimiento) {
-      let factura = get(
-        /databases/$(database)/documents/facturas/$(movimiento.entidad_id)
-      ).data;
-      let deltas = movimiento.deltas_fuente;
-      let vencida = facturaGuardadaVencida(factura);
-      let pagada = facturaGuardadaPagada(factura);
-
-      return movimiento.factura_id == movimiento.entidad_id
-        && casiIguales(
-          deltas.cartera_total,
-          -factura.get('saldo_pendiente', 0)
-        )
-        && casiIguales(
-          deltas.cartera_vencida,
-          vencida ? -factura.get('saldo_pendiente', 0) : 0
-        )
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == 0
-        && deltas.facturas_vencidas == (vencida ? -1 : 0)
-        && deltas.facturas_pendientes
-          == (factura.get('saldo_pendiente', 0) > 0 ? -1 : 0)
-        && deltas.facturas_pagadas == (pagada ? -1 : 0)
-        && deltas.facturas_total == -1
-        && casiIguales(deltas.total_facturado, -factura.monto_total)
-        && casiIguales(
-          deltas.total_liquidado,
-          pagada ? -factura.monto_total : 0
-        )
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && casiIguales(
-          deltas.total_notas_credito,
-          -factura.get('total_notas_credito', 0)
-        );
-    }
-
-    function deltasClienteMovimientoValidos(movimiento) {
-      let deltas = movimiento.deltas_fuente;
-      let tipo = movimiento.tipo;
-      let deltaEsperado = tipo == 'CLIENTE_INACTIVADO' ? -1 : 1;
-
-      return movimiento.cliente_id == movimiento.entidad_id
-        && deltas.cartera_total == 0
-        && deltas.cartera_vencida == 0
-        && deltas.ingresos_mes == 0
-        && deltas.ingresos_semana == 0
-        && deltas.clientes_activos == deltaEsperado
-        && deltas.facturas_vencidas == 0
-        && deltas.facturas_pendientes == 0
-        && deltas.facturas_pagadas == 0
-        && deltas.facturas_total == 0
-        && deltas.total_facturado == 0
-        && deltas.total_liquidado == 0
-        && deltas.cobrado_historico == 0
-        && deltas.abonos_registrados == 0
-        && deltas.abonos_cantidad == 0
-        && deltas.monto_recuperado == 0
-        && deltas.total_notas_credito == 0;
-    }
-
-    function deltasFuenteMovimientoValidos(movimiento) {
-      let tipo = movimiento.tipo;
-
-      return (
-          tipo == 'FACTURA_CREADA'
-          && deltasFacturaCreadaMovimientoValidos(movimiento)
-        )
-        || (
-          tipo in [
-            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
-            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
-          ]
-          && deltasActualizacionFacturaMovimientoValidos(movimiento)
-        )
-        || (
-          tipo == 'FACTURA_ELIMINADA'
-          && deltasFacturaEliminadaMovimientoValidos(movimiento)
-        )
-        || (
-          tipo in [
-            'CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO'
-          ]
-          && deltasClienteMovimientoValidos(movimiento)
-        )
-        || (
-          tipo == 'RECONSTRUCCION_METRICAS'
-          && isSU()
-        );
-    }
-
-    function movimientoLigadoAEntidadStats(movimientoId, movimiento) {
-      let tipo = movimiento.tipo;
-      let entidadId = movimiento.entidad_id;
-      let facturaPath = /databases/$(database)/documents/facturas/$(entidadId);
-      let clientePath = /databases/$(database)/documents/clientes/$(entidadId);
-
-      return (
-          tipo == 'FACTURA_CREADA'
-          && !exists(facturaPath)
-          && getAfter(facturaPath).data.metricas_movimiento_id == movimientoId
-        )
-        || (
-          tipo in [
-            'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA',
-            'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA'
-          ]
-          && exists(facturaPath)
-          && getAfter(facturaPath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(facturaPath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo == 'FACTURA_ELIMINADA'
-          && exists(facturaPath)
-          && !existsAfter(facturaPath)
-        )
-        || (
-          tipo == 'CLIENTE_CREADO'
-          && !exists(clientePath)
-          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo in ['CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO']
-          && exists(clientePath)
-          && getAfter(clientePath).data.ultimo_metricas_movimiento_id
-            == movimientoId
-          && getAfter(clientePath).data.ultimo_metricas_tipo == tipo
-        )
-        || (
-          tipo == 'RECONSTRUCCION_METRICAS'
-          && isSU()
-          && movimiento.entidad_tipo == 'METRICAS'
-          && movimiento.entidad_id == 'stats_actuales'
-        );
-    }
-
-    function actividadMovimientoStatsValida(movimiento) {
-      let actividadId = movimiento.actividad_id;
-      let actividadPath = /databases/$(database)/documents/actividad/$(actividadId);
-      let actividad = getAfter(actividadPath).data;
-
-      return actividadId is string
-        && actividadId != ''
-        && actividad.actor_uid == request.auth.uid
-        && actividad.metricas_movimiento_id == movimiento.id
-        && actividad.serverTime is timestamp;
-    }
-
-    function deltasAplicadosMovimientoValidos(movimiento) {
-      let stats = resource.data;
-      let fuente = movimiento.deltas_fuente;
-      let aplicado = movimiento.deltas_aplicados;
-      let reiniciaMes = movimiento.reinicio_mes;
-      let reiniciaSemana = movimiento.reinicio_semana;
-      let mesAnterior = stats.get('periodo_mes', '');
-      let semanaAnterior = stats.get('periodo_semana', '');
-
-      return movimiento.periodo_mes_anterior == mesAnterior
-        && movimiento.periodo_semana_anterior == semanaAnterior
-        && movimiento.periodo_mes_nuevo is string
-        && movimiento.periodo_mes_nuevo != ''
-        && movimiento.periodo_semana_nuevo is string
-        && movimiento.periodo_semana_nuevo != ''
-        && reiniciaMes is bool
-        && reiniciaSemana is bool
-        && (
-          (
-            reiniciaMes == true
-            && mesAnterior != ''
-            && mesAnterior != movimiento.periodo_mes_nuevo
-            && casiIguales(
-              aplicado.ingresos_mes,
-              fuente.ingresos_mes - stats.get('ingresos_mes', 0)
-            )
-          )
-          ||
-          (
-            reiniciaMes == false
-            && (
-              mesAnterior == ''
-              || mesAnterior == movimiento.periodo_mes_nuevo
-            )
-            && casiIguales(aplicado.ingresos_mes, fuente.ingresos_mes)
-          )
-        )
-        && (
-          (
-            reiniciaSemana == true
-            && semanaAnterior != ''
-            && semanaAnterior != movimiento.periodo_semana_nuevo
-            && casiIguales(
-              aplicado.ingresos_semana,
-              fuente.ingresos_semana - stats.get('ingresos_semana', 0)
-            )
-          )
-          ||
-          (
-            reiniciaSemana == false
-            && (
-              semanaAnterior == ''
-              || semanaAnterior == movimiento.periodo_semana_nuevo
-            )
-            && casiIguales(
-              aplicado.ingresos_semana,
-              fuente.ingresos_semana
-            )
-          )
-        )
-        && casiIguales(aplicado.cartera_total, fuente.cartera_total)
-        && casiIguales(aplicado.cartera_vencida, fuente.cartera_vencida)
-        && casiIguales(aplicado.clientes_activos, fuente.clientes_activos)
-        && casiIguales(aplicado.facturas_vencidas, fuente.facturas_vencidas)
-        && casiIguales(aplicado.facturas_pendientes, fuente.facturas_pendientes)
-        && casiIguales(aplicado.facturas_pagadas, fuente.facturas_pagadas)
-        && casiIguales(aplicado.facturas_total, fuente.facturas_total)
-        && casiIguales(aplicado.total_facturado, fuente.total_facturado)
-        && casiIguales(aplicado.total_liquidado, fuente.total_liquidado)
-        && casiIguales(aplicado.cobrado_historico, fuente.cobrado_historico)
-        && casiIguales(aplicado.abonos_registrados, fuente.abonos_registrados)
-        && casiIguales(aplicado.abonos_cantidad, fuente.abonos_cantidad)
-        && casiIguales(aplicado.monto_recuperado, fuente.monto_recuperado)
-        && casiIguales(
-          aplicado.total_notas_credito,
-          fuente.total_notas_credito
-        );
-    }
-
-    function movimientoMetricasValidoParaStats(movimientoId) {
-      let movimientoPath = metricasMovimientoPath(movimientoId);
-      let movimiento = getAfter(movimientoPath).data;
-
-      return !exists(movimientoPath)
-        && movimiento.id == movimientoId
-        && movimiento.actor_uid == request.auth.uid
-        && deltasMetricasValidos(movimiento.deltas_fuente)
-        && deltasMetricasValidos(movimiento.deltas_aplicados)
-        && movimientoLigadoAEntidadStats(movimientoId, movimiento)
-        && deltasFuenteMovimientoValidos(movimiento)
-        && actividadMovimientoStatsValida(movimiento)
-        && (
-          (
-            movimiento.tipo == 'RECONSTRUCCION_METRICAS'
-            && isSU()
-            && movimiento.reconstruccion_id is string
-            && movimiento.reconstruccion_id != ''
-            && request.resource.data.ultima_reconciliacion is timestamp
-          )
-          ||
-          (
-            movimiento.tipo != 'RECONSTRUCCION_METRICAS'
-            && deltasAplicadosMovimientoValidos(movimiento)
-            && request.resource.data.get('ultima_reconciliacion', null)
-              == resource.data.get('ultima_reconciliacion', null)
-          )
-        )
-        && metricasDespuesCoincidenMovimiento(movimiento);
-    }
-
-
-    function clienteLineaPath(clienteId) {
-      return /databases/$(database)/documents/clientes/$(clienteId);
-    }
-
-    function movimientoLineaPath(movimientoId) {
-      return /databases/$(database)/documents/lineas_credito_movimientos/$(movimientoId);
-    }
-
-    function resumenLineaPath(clienteId) {
-      return /databases/$(database)/documents/lineas_credito_resumen_clientes/$(clienteId);
-    }
-
-    function actividadLineaPath(actividadId) {
-      return /databases/$(database)/documents/actividad/$(actividadId);
-    }
-
-    function solicitudLineaPath(solicitudId) {
-      return /databases/$(database)/documents/solicitudes/$(solicitudId);
-    }
+    function clienteLineaPath(clienteId) { return /databases/$(database)/documents/clientes/$(clienteId); }
+    function movimientoLineaPath(movimientoId) { return /databases/$(database)/documents/lineas_credito_movimientos/$(movimientoId); }
+    function resumenLineaPath(clienteId) { return /databases/$(database)/documents/lineas_credito_resumen_clientes/$(clienteId); }
+    function actividadLineaPath(actividadId) { return /databases/$(database)/documents/actividad/$(actividadId); }
+    function solicitudLineaPath(solicitudId) { return /databases/$(database)/documents/solicitudes/$(solicitudId); }
 
     function tipoMovimientoLineaValido(movimiento) {
-      return (
-          movimiento.tipo_movimiento == 'ALTA_INICIAL'
-          && movimiento.limite_anterior == 0
-          && movimiento.limite_nuevo >= 0
-        )
-        || (
-          movimiento.tipo_movimiento == 'AUMENTO'
-          && movimiento.limite_nuevo > movimiento.limite_anterior
-        )
-        || (
-          movimiento.tipo_movimiento == 'DISMINUCION'
-          && movimiento.limite_nuevo < movimiento.limite_anterior
-        )
-        || (
-          movimiento.tipo_movimiento == 'CORRECCION'
-          && !casiIguales(
-            movimiento.limite_nuevo,
-            movimiento.limite_anterior
-          )
-        );
+      return (movimiento.tipo_movimiento == 'ALTA_INICIAL' && movimiento.limite_anterior == 0 && movimiento.limite_nuevo >= 0) || (movimiento.tipo_movimiento == 'AUMENTO' && movimiento.limite_nuevo > movimiento.limite_anterior) || (movimiento.tipo_movimiento == 'DISMINUCION' && movimiento.limite_nuevo < movimiento.limite_anterior) || (movimiento.tipo_movimiento == 'CORRECCION' && !casiIguales(movimiento.limite_nuevo, movimiento.limite_anterior));
     }
-
     function estadoMovimientoLineaValido(movimiento) {
-      return (
-          movimiento.limite_nuevo == 0
-          && movimiento.deuda_actual == 0
-          && movimiento.credito_disponible_resultante == 0
-          && movimiento.estado_resultante == 'Sin línea'
-        )
-        || (
-          movimiento.limite_nuevo > 0
-          && movimiento.deuda_actual <= movimiento.limite_nuevo
-          && casiIguales(
-            movimiento.credito_disponible_resultante,
-            movimiento.limite_nuevo - movimiento.deuda_actual
-          )
-          && movimiento.estado_resultante == 'Activa'
-        );
+      return (movimiento.limite_nuevo == 0 && movimiento.deuda_actual == 0 && movimiento.credito_disponible_resultante == 0 && movimiento.estado_resultante == 'Sin línea') || (movimiento.limite_nuevo > 0 && movimiento.deuda_actual <= movimiento.limite_nuevo && casiIguales(movimiento.credito_disponible_resultante, movimiento.limite_nuevo - movimiento.deuda_actual) && movimiento.estado_resultante == 'Activa');
     }
-
     function clienteAnteriorMovimientoLineaValido(movimiento, clienteId) {
-      let cliente = get(clienteLineaPath(clienteId)).data;
-
-      return cliente.activo == true
-        && cliente.estatus == 'Activo'
-        && cliente.nombre == movimiento.cliente
-        && casiIguales(cliente.limite_credito, movimiento.limite_anterior)
-        && casiIguales(cliente.deuda_actual, movimiento.deuda_actual);
+      let cliente = get(clienteLineaPath(clienteId)).data; return cliente.activo == true && cliente.estatus == 'Activo' && cliente.nombre == movimiento.cliente && casiIguales(cliente.limite_credito, movimiento.limite_anterior) && casiIguales(cliente.deuda_actual, movimiento.deuda_actual);
     }
-
     function origenMovimientoLineaValido(movimiento, clienteId) {
-      let clientePath = clienteLineaPath(clienteId);
-
-      return (
-          movimiento.origen == 'CLIENTE_NUEVO'
-          && movimiento.solicitud_id == ''
-          && !exists(clientePath)
-          && movimiento.tipo_movimiento == 'ALTA_INICIAL'
-          && movimiento.limite_anterior == 0
-        )
-        || (
-          movimiento.origen == 'MOVIMIENTO_DIRECTO'
-          && movimiento.solicitud_id == ''
-          && clienteAnteriorMovimientoLineaValido(movimiento, clienteId)
-          && (
-            movimiento.tipo_movimiento != 'ALTA_INICIAL'
-            || (
-              movimiento.limite_anterior == 0
-              && movimiento.limite_nuevo > 0
-            )
-          )
-        )
-        || (
-          movimiento.origen == 'SOLICITUD_AUTORIZADA'
-          && movimiento.solicitud_id != ''
-          && movimiento.tipo_movimiento == 'AUMENTO'
-          && clienteAnteriorMovimientoLineaValido(movimiento, clienteId)
-        );
+      let clientePath = clienteLineaPath(clienteId); return (movimiento.origen == 'CLIENTE_NUEVO' && movimiento.solicitud_id == '' && !exists(clientePath) && movimiento.tipo_movimiento == 'ALTA_INICIAL' && movimiento.limite_anterior == 0) || (movimiento.origen == 'MOVIMIENTO_DIRECTO' && movimiento.solicitud_id == '' && clienteAnteriorMovimientoLineaValido(movimiento, clienteId) && (movimiento.tipo_movimiento != 'ALTA_INICIAL' || (movimiento.limite_anterior == 0 && movimiento.limite_nuevo > 0))) || (movimiento.origen == 'SOLICITUD_AUTORIZADA' && movimiento.solicitud_id != '' && movimiento.tipo_movimiento == 'AUMENTO' && clienteAnteriorMovimientoLineaValido(movimiento, clienteId));
     }
-
     function actividadMovimientoLineaValida(movimiento) {
-      let path = actividadLineaPath(movimiento.actividad_id);
-      let actividad = getAfter(path).data;
-
-      return movimiento.actividad_id is string
-        && movimiento.actividad_id != ''
-        && actividad.actor_uid == request.auth.uid
-        && actividad.usuario == movimiento.registrado_por_nombre
-        && actividad.cliente_id == movimiento.cliente_id
-        && actividad.movimiento_linea_credito_id == movimiento.id
-        && actividad.get('solicitud_id', '') == movimiento.solicitud_id
-        && actividad.serverTime is timestamp
-        && (
-          (
-            movimiento.origen == 'CLIENTE_NUEVO'
-            && actividad.modulo == 'Clientes'
-            && actividad.tipo == 'Creación'
-          )
-          ||
-          (
-            movimiento.origen == 'MOVIMIENTO_DIRECTO'
-            && actividad.modulo == 'Crédito'
-            && actividad.tipo == 'Movimiento de Línea'
-          )
-          ||
-          (
-            movimiento.origen == 'SOLICITUD_AUTORIZADA'
-            && actividad.modulo == 'Crédito'
-            && actividad.tipo == 'Autorización de Línea'
-          )
-        );
+      let path = actividadLineaPath(movimiento.actividad_id); let actividad = getAfter(path).data; return movimiento.actividad_id is string && movimiento.actividad_id != '' && actividad.actor_uid == request.auth.uid && actividad.usuario == movimiento.registrado_por_nombre && actividad.cliente_id == movimiento.cliente_id && actividad.movimiento_linea_credito_id == movimiento.id && actividad.get('solicitud_id', '') == movimiento.solicitud_id && actividad.serverTime is timestamp && ((movimiento.origen == 'CLIENTE_NUEVO' && actividad.modulo == 'Clientes' && actividad.tipo == 'Creación') || (movimiento.origen == 'MOVIMIENTO_DIRECTO' && actividad.modulo == 'Crédito' && actividad.tipo == 'Movimiento de Línea') || (movimiento.origen == 'SOLICITUD_AUTORIZADA' && actividad.modulo == 'Crédito' && actividad.tipo == 'Autorización de Línea'));
     }
-
     function solicitudAutorizadaMovimientoLineaValida(movimiento) {
-      let solicitudAnterior = get(
-        solicitudLineaPath(movimiento.solicitud_id)
-      ).data;
-
-      // El movimiento valida únicamente el estado anterior de la solicitud.
-      // La regla de actualización de /solicitudes valida después el movimiento.
-      // Así evitamos una dependencia circular solicitud <-> movimiento.
-      return solicitudAnterior.estatus == 'Pendiente'
-        && solicitudAnterior.cliente_id == movimiento.cliente_id
-        && casiIguales(
-          solicitudAnterior.monto_incremento,
-          movimiento.diferencia
-        );
+      let solicitudAnterior = get(solicitudLineaPath(movimiento.solicitud_id)).data; return solicitudAnterior.estatus == 'Pendiente' && solicitudAnterior.cliente_id == movimiento.cliente_id && casiIguales(solicitudAnterior.monto_incremento, movimiento.diferencia);
     }
-
     function solicitudMovimientoLineaValida(movimiento) {
-      return (
-          movimiento.origen in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO']
-          && movimiento.solicitud_id is string
-          && movimiento.solicitud_id == ''
-        )
-        || (
-          movimiento.origen == 'SOLICITUD_AUTORIZADA'
-          && movimiento.solicitud_id is string
-          && movimiento.solicitud_id != ''
-          && solicitudAutorizadaMovimientoLineaValida(movimiento)
-        );
+      return (movimiento.origen in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO'] && movimiento.solicitud_id is string && movimiento.solicitud_id == '') || (movimiento.origen == 'SOLICITUD_AUTORIZADA' && movimiento.solicitud_id is string && movimiento.solicitud_id != '' && solicitudAutorizadaMovimientoLineaValida(movimiento));
     }
-
     function datosMovimientoLineaValidos(movimiento, movimientoId) {
-      return movimiento.id == movimientoId
-        && movimiento.actor_uid == request.auth.uid
-        && movimiento.cliente_id is string
-        && movimiento.cliente_id != ''
-        && movimiento.cliente is string
-        && movimiento.cliente != ''
-        && movimiento.tipo_movimiento
-          in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION']
-        && movimiento.limite_anterior is number
-        && movimiento.limite_anterior >= 0
-        && movimiento.limite_nuevo is number
-        && movimiento.limite_nuevo >= 0
-        && movimiento.diferencia is number
-        && casiIguales(
-          movimiento.diferencia,
-          movimiento.limite_nuevo - movimiento.limite_anterior
-        )
-        && movimiento.deuda_actual is number
-        && movimiento.deuda_actual >= 0
-        && movimiento.credito_disponible_resultante is number
-        && movimiento.credito_disponible_resultante >= 0
-        && movimiento.estado_resultante in ['Sin línea', 'Activa', 'Excedida']
-        && movimiento.personal_autoriza is string
-        && movimiento.personal_autoriza != ''
-        && movimiento.motivo is string
-        && movimiento.motivo != ''
-        && movimiento.registrado_por_uid == request.auth.uid
-        && movimiento.registrado_por_nombre is string
-        && movimiento.registrado_por_nombre != ''
-        && movimiento.registrado_por_rol == userData().rol
-        && movimiento.origen
-          in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO', 'SOLICITUD_AUTORIZADA']
-        && movimiento.solicitud_id is string
-        && movimiento.actividad_id is string
-        && movimiento.actividad_id != ''
-        && movimiento.createdAt is timestamp
-        && tipoMovimientoLineaValido(movimiento)
-        && estadoMovimientoLineaValido(movimiento)
-        && origenMovimientoLineaValido(movimiento, movimiento.cliente_id);
+      return movimiento.id == movimientoId && movimiento.actor_uid == request.auth.uid && movimiento.cliente_id is string && movimiento.cliente_id != '' && movimiento.cliente is string && movimiento.cliente != '' && movimiento.tipo_movimiento in ['ALTA_INICIAL', 'AUMENTO', 'DISMINUCION', 'CORRECCION'] && movimiento.limite_anterior is number && movimiento.limite_anterior >= 0 && movimiento.limite_nuevo is number && movimiento.limite_nuevo >= 0 && movimiento.diferencia is number && casiIguales(movimiento.diferencia, movimiento.limite_nuevo - movimiento.limite_anterior) && movimiento.deuda_actual is number && movimiento.deuda_actual >= 0 && movimiento.credito_disponible_resultante is number && movimiento.credito_disponible_resultante >= 0 && movimiento.estado_resultante in ['Sin línea', 'Activa', 'Excedida'] && movimiento.personal_autoriza is string && movimiento.personal_autoriza != '' && movimiento.motivo is string && movimiento.motivo != '' && movimiento.registrado_por_uid == request.auth.uid && movimiento.registrado_por_nombre is string && movimiento.registrado_por_nombre != '' && movimiento.registrado_por_rol == userData().rol && movimiento.origen in ['CLIENTE_NUEVO', 'MOVIMIENTO_DIRECTO', 'SOLICITUD_AUTORIZADA'] && movimiento.solicitud_id is string && movimiento.actividad_id is string && movimiento.actividad_id != '' && movimiento.createdAt is timestamp && tipoMovimientoLineaValido(movimiento) && estadoMovimientoLineaValido(movimiento) && origenMovimientoLineaValido(movimiento, movimiento.cliente_id);
     }
-
     function bundleMovimientoLineaValido(movimiento, movimientoId) {
-      // Orden acíclico de integridad:
-      // actividad -> movimiento -> resumen -> cliente.
-      // El movimiento valida datos locales, cliente anterior y actividad,
-      // pero no vuelve a depender del cliente/resumen posteriores.
-      return datosMovimientoLineaValidos(movimiento, movimientoId)
-        && actividadMovimientoLineaValida(movimiento)
-        && solicitudMovimientoLineaValida(movimiento);
+      return datosMovimientoLineaValidos(movimiento, movimientoId) && actividadMovimientoLineaValida(movimiento) && solicitudMovimientoLineaValida(movimiento);
     }
-
     function movimientoLineaCreditoValido(clienteId) {
-      let movimientoId =
-        request.resource.data.linea_credito_ultimo_movimiento;
-      let movimiento = getAfter(
-        movimientoLineaPath(movimientoId)
-      ).data;
-      let resumen = getAfter(resumenLineaPath(clienteId)).data;
-
-      // El cliente es el último nodo de la cadena: solo puede cambiar cuando
-      // ya existen en el estado final el movimiento y su resumen coincidente.
-      return movimientoId is string
-        && movimientoId != ''
-        && movimiento.id == movimientoId
-        && movimiento.actor_uid == request.auth.uid
-        && movimiento.registrado_por_uid == request.auth.uid
-        && movimiento.registrado_por_rol == userData().rol
-        && movimiento.cliente_id == clienteId
-        && casiIguales(
-          movimiento.limite_nuevo,
-          request.resource.data.limite_credito
-        )
-        && casiIguales(
-          movimiento.deuda_actual,
-          request.resource.data.deuda_actual
-        )
-        && casiIguales(
-          movimiento.credito_disponible_resultante,
-          request.resource.data.credito_disponible
-        )
-        && movimiento.estado_resultante
-          == request.resource.data.linea_credito_estado
-        && movimiento.personal_autoriza
-          == request.resource.data.linea_credito_autorizado_por
-        && resumen.id == clienteId
-        && resumen.cliente_id == clienteId
-        && resumen.ultimo_movimiento_id == movimientoId
-        && resumen.ultimo_registrado_por_uid == request.auth.uid
-        && resumen.ultimo_registrado_por_rol == movimiento.registrado_por_rol
-        && resumen.ultimo_tipo_movimiento == movimiento.tipo_movimiento
-        && casiIguales(
-          resumen.limite_actual,
-          request.resource.data.limite_credito
-        )
-        && casiIguales(
-          resumen.deuda_actual,
-          request.resource.data.deuda_actual
-        )
-        && casiIguales(
-          resumen.credito_disponible_actual,
-          request.resource.data.credito_disponible
-        )
-        && resumen.estado_resultante
-          == request.resource.data.linea_credito_estado
-        && resumen.activo == true;
+      let movimientoId = request.resource.data.linea_credito_ultimo_movimiento; let movimiento = getAfter(movimientoLineaPath(movimientoId)).data; let resumen = getAfter(resumenLineaPath(clienteId)).data;
+      return movimientoId is string && movimientoId != '' && movimiento.id == movimientoId && movimiento.actor_uid == request.auth.uid && movimiento.registrado_por_uid == request.auth.uid && movimiento.registrado_por_rol == userData().rol && movimiento.cliente_id == clienteId && casiIguales(movimiento.limite_nuevo, request.resource.data.limite_credito) && casiIguales(movimiento.deuda_actual, request.resource.data.deuda_actual) && casiIguales(movimiento.credito_disponible_resultante, request.resource.data.credito_disponible) && movimiento.estado_resultante == request.resource.data.linea_credito_estado && movimiento.personal_autoriza == request.resource.data.linea_credito_autorizado_por && resumen.id == clienteId && resumen.cliente_id == clienteId && resumen.ultimo_movimiento_id == movimientoId && resumen.ultimo_registrado_por_uid == request.auth.uid && resumen.ultimo_registrado_por_rol == movimiento.registrado_por_rol && resumen.ultimo_tipo_movimiento == movimiento.tipo_movimiento && casiIguales(resumen.limite_actual, request.resource.data.limite_credito) && casiIguales(resumen.deuda_actual, request.resource.data.deuda_actual) && casiIguales(resumen.credito_disponible_actual, request.resource.data.credito_disponible) && resumen.estado_resultante == request.resource.data.linea_credito_estado && resumen.activo == true;
     }
-
     function resumenLineaCreditoCoincideMovimiento(clienteId) {
-      // El resumen depende del movimiento, pero el movimiento ya no depende
-      // del resumen. Esto elimina el ciclo que provocaba permission-denied.
-      let movimientoId = request.resource.data.ultimo_movimiento_id;
-      let path = movimientoLineaPath(movimientoId);
-      let movimiento = getAfter(path).data;
-
-      return movimientoId is string
-        && movimientoId != ''
-        && movimiento.id == movimientoId
-        && movimiento.actor_uid == request.auth.uid
-        && movimiento.registrado_por_uid == request.auth.uid
-        && movimiento.registrado_por_rol == userData().rol
-        && movimiento.cliente_id == clienteId
-        && request.resource.data.cliente == movimiento.cliente
-        && casiIguales(
-          request.resource.data.limite_actual,
-          movimiento.limite_nuevo
-        )
-        && casiIguales(
-          request.resource.data.deuda_actual,
-          movimiento.deuda_actual
-        )
-        && casiIguales(
-          request.resource.data.credito_disponible_actual,
-          movimiento.credito_disponible_resultante
-        )
-        && request.resource.data.estado_resultante
-          == movimiento.estado_resultante
-        && request.resource.data.ultimo_tipo_movimiento
-          == movimiento.tipo_movimiento
-        && request.resource.data.ultimo_personal_autoriza
-          == movimiento.personal_autoriza
-        && request.resource.data.ultimo_registrado_por
-          == movimiento.registrado_por_nombre
-        && request.resource.data.ultimo_registrado_por_uid
-          == request.auth.uid
-        && request.resource.data.ultimo_registrado_por_rol
-          == movimiento.registrado_por_rol
-        && request.resource.data.ultimo_movimiento_at is timestamp
-        && request.resource.data.activo == true;
+      let movimientoId = request.resource.data.ultimo_movimiento_id; let path = movimientoLineaPath(movimientoId); let movimiento = getAfter(path).data;
+      return movimientoId is string && movimientoId != '' && movimiento.id == movimientoId && movimiento.actor_uid == request.auth.uid && movimiento.registrado_por_uid == request.auth.uid && movimiento.registrado_por_rol == userData().rol && movimiento.cliente_id == clienteId && request.resource.data.cliente == movimiento.cliente && casiIguales(request.resource.data.limite_actual, movimiento.limite_nuevo) && casiIguales(request.resource.data.deuda_actual, movimiento.deuda_actual) && casiIguales(request.resource.data.credito_disponible_actual, movimiento.credito_disponible_resultante) && request.resource.data.estado_resultante == movimiento.estado_resultante && request.resource.data.ultimo_tipo_movimiento == movimiento.tipo_movimiento && request.resource.data.ultimo_personal_autoriza == movimiento.personal_autoriza && request.resource.data.ultimo_registrado_por == movimiento.registrado_por_nombre && request.resource.data.ultimo_registrado_por_uid == request.auth.uid && request.resource.data.ultimo_registrado_por_rol == movimiento.registrado_por_rol && request.resource.data.ultimo_movimiento_at is timestamp && request.resource.data.activo == true;
     }
-
     function solicitudAumentoAutorizadaValida(solicitudId) {
-      let movimientoId =
-        request.resource.data.movimiento_linea_credito_id;
-      let path = movimientoLineaPath(movimientoId);
-      let movimiento = getAfter(path).data;
-
-      return movimientoId is string
-        && movimientoId != ''
-        && movimiento.id == movimientoId
-        && movimiento.actor_uid == request.auth.uid
-        && movimiento.registrado_por_uid == request.auth.uid
-        && movimiento.registrado_por_rol == 'SU'
-        && movimiento.solicitud_id == solicitudId
-        && movimiento.origen == 'SOLICITUD_AUTORIZADA'
-        && movimiento.cliente_id == resource.data.cliente_id
-        && casiIguales(
-          movimiento.diferencia,
-          resource.data.monto_incremento
-        )
-        && casiIguales(
-          request.resource.data.limite_aplicado_anterior,
-          movimiento.limite_anterior
-        )
-        && casiIguales(
-          request.resource.data.limite_aplicado_nuevo,
-          movimiento.limite_nuevo
-        );
+      let movimientoId = request.resource.data.movimiento_linea_credito_id; let path = movimientoLineaPath(movimientoId); let movimiento = getAfter(path).data;
+      return movimientoId is string && movimientoId != '' && movimiento.id == movimientoId && movimiento.actor_uid == request.auth.uid && movimiento.registrado_por_uid == request.auth.uid && movimiento.registrado_por_rol == 'SU' && movimiento.solicitud_id == solicitudId && movimiento.origen == 'SOLICITUD_AUTORIZADA' && movimiento.cliente_id == resource.data.cliente_id && casiIguales(movimiento.diferencia, resource.data.monto_incremento) && casiIguales(request.resource.data.limite_aplicado_anterior, movimiento.limite_anterior) && casiIguales(request.resource.data.limite_aplicado_nuevo, movimiento.limite_nuevo);
     }
 
     // ==========================================
@@ -1621,197 +183,27 @@ service cloud.firestore {
     match /login_aliases/{aliasId} {
       allow get: if true;
       allow list: if false;
-
-      allow create: if isSU()
-        && aliasId.matches('^[a-z0-9._-]+$')
-        && request.resource.data.keys().hasOnly(['correo_auth', 'activo', 'createdAt', 'updatedAt'])
-        && request.resource.data.correo_auth is string
-        && request.resource.data.correo_auth.matches('^[^ @]+@[^ @]+[.][^ @]+$')
-        && !(request.resource.data.correo_auth.matches('.*@mlh[.]local$'))
-        && request.resource.data.activo == true
-        && request.resource.data.createdAt is timestamp
-        && request.resource.data.updatedAt is timestamp;
-
-      allow update: if isSU()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'updatedAt'])
-        && request.resource.data.activo is bool
-        && request.resource.data.updatedAt is timestamp;
-
+      allow create: if isSU() && aliasId.matches('^[a-z0-9._-]+$') && request.resource.data.keys().hasOnly(['correo_auth', 'activo', 'createdAt', 'updatedAt']) && request.resource.data.correo_auth is string && request.resource.data.correo_auth.matches('^[^ @]+@[^ @]+[.][^ @]+$') && !(request.resource.data.correo_auth.matches('.*@mlh[.]local$')) && request.resource.data.activo == true && request.resource.data.createdAt is timestamp && request.resource.data.updatedAt is timestamp;
+      allow update: if isSU() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'updatedAt']) && request.resource.data.activo is bool && request.resource.data.updatedAt is timestamp;
       allow delete: if false;
     }
 
     match /usuarios/{userId} {
       allow read: if (isAuthenticated() && request.auth.uid == userId) || isSU();
-
-      allow create: if isSU()
-        && userId != request.auth.uid
-        && request.resource.data.keys().hasOnly([
-          'nombre', 'correo', 'correo_auth', 'usuario_alias', 'rol', 'activo', 
-          'proveedor_acceso', 'requiere_reset_password', 'fecha_creacion', 
-          'fecha_actualizacion', 'ultima_entrada', 'creado_por', 'creado_por_uid'
-        ])
-        && request.resource.data.nombre is string
-        && request.resource.data.nombre != ''
-        && request.resource.data.correo is string
-        && request.resource.data.correo.matches('^[^ @]+@[^ @]+[.][^ @]+$')
-        && !(request.resource.data.correo.matches('.*@mlh[.]local$'))
-        && request.resource.data.correo_auth == request.resource.data.correo
-        && request.resource.data.usuario_alias is string
-        && request.resource.data.usuario_alias.matches('^[a-z0-9._-]+$')
-        && request.resource.data.rol == 'ADMIN'
-        && request.resource.data.activo == true
-        && request.resource.data.proveedor_acceso == 'EMAIL_REAL_ALIAS'
-        && request.resource.data.requiere_reset_password is bool
-        && request.resource.data.fecha_creacion is timestamp
-        && request.resource.data.fecha_actualizacion is timestamp
-        && request.resource.data.creado_por is string
-        && request.resource.data.creado_por_uid == request.auth.uid
-        && existsAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias))
-        && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.correo_auth == request.resource.data.correo
-        && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.activo == true;
-
-      // Un usuario solo puede actualizar su propio último login
-      allow update: if isAuthenticated()
-        && request.auth.uid == userId
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ultima_entrada', 'ultimoLogin', 'fecha_actualizacion'])
-        && request.resource.data.ultima_entrada is timestamp
-        && request.resource.data.ultimoLogin is timestamp
-        && request.resource.data.fecha_actualizacion is timestamp;
-
-      // SU gestionando a los ADMIN (Suspender/Reactivar)
-      allow update: if isSU()
-        && userId != request.auth.uid
-        && resource.data.rol == 'ADMIN'
-        && request.resource.data.rol == resource.data.rol
-        && request.resource.data.activo is bool
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'fecha_actualizacion', 'updatedAt']);
-
+      allow create: if isSU() && userId != request.auth.uid && request.resource.data.keys().hasOnly(['nombre', 'correo', 'correo_auth', 'usuario_alias', 'rol', 'activo', 'proveedor_acceso', 'requiere_reset_password', 'fecha_creacion', 'fecha_actualizacion', 'ultima_entrada', 'creado_por', 'creado_por_uid']) && request.resource.data.nombre is string && request.resource.data.nombre != '' && request.resource.data.correo is string && request.resource.data.correo.matches('^[^ @]+@[^ @]+[.][^ @]+$') && !(request.resource.data.correo.matches('.*@mlh[.]local$')) && request.resource.data.correo_auth == request.resource.data.correo && request.resource.data.usuario_alias is string && request.resource.data.usuario_alias.matches('^[a-z0-9._-]+$') && request.resource.data.rol == 'ADMIN' && request.resource.data.activo == true && request.resource.data.proveedor_acceso == 'EMAIL_REAL_ALIAS' && request.resource.data.requiere_reset_password is bool && request.resource.data.fecha_creacion is timestamp && request.resource.data.fecha_actualizacion is timestamp && request.resource.data.creado_por is string && request.resource.data.creado_por_uid == request.auth.uid && existsAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)) && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.correo_auth == request.resource.data.correo && getAfter(/databases/$(database)/documents/login_aliases/$(request.resource.data.usuario_alias)).data.activo == true;
+      allow update: if isAuthenticated() && request.auth.uid == userId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ultima_entrada', 'ultimoLogin', 'fecha_actualizacion']) && request.resource.data.ultima_entrada is timestamp && request.resource.data.ultimoLogin is timestamp && request.resource.data.fecha_actualizacion is timestamp;
+      allow update: if isSU() && userId != request.auth.uid && resource.data.rol == 'ADMIN' && request.resource.data.rol == resource.data.rol && request.resource.data.activo is bool && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'fecha_actualizacion', 'updatedAt']);
       allow delete: if false;
     }
 
     match /clientes/{clienteId} {
       allow read: if isStaff();
-
-      allow create: if isStaff()
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.nombre is string
-        && request.resource.data.nombre != ''
-        && request.resource.data.numero_cliente is string
-        && request.resource.data.numero_cliente != ''
-        && request.resource.data.rfc is string
-        && request.resource.data.rfc != ''
-        && request.resource.data.telefono is string
-        && request.resource.data.telefono != ''
-        && request.resource.data.direccion is string
-        && request.resource.data.direccion != ''
-        && request.resource.data.pagare_inicial is bool
-        && request.resource.data.limite_credito is number
-        && request.resource.data.limite_credito >= 0
-        && request.resource.data.credito_disponible == request.resource.data.limite_credito
-        && request.resource.data.deuda_actual is number
-        && request.resource.data.deuda_actual == 0
-        && request.resource.data.activo == true
-        && request.resource.data.estatus == 'Activo'
-        && request.resource.data.linea_credito_estado in ['Sin línea', 'Activa', 'Excedida']
-        && request.resource.data.linea_credito_autorizado_por is string
-        && request.resource.data.linea_credito_autorizado_por != ''
-        && request.resource.data.linea_credito_ultimo_movimiento is string
-        && request.resource.data.linea_credito_actualizada_en is timestamp
-        && request.resource.data.linea_credito_actualizada_por is string
-        && request.resource.data.linea_credito_actualizada_por != ''
-        && request.resource.data.linea_credito_actualizada_por_uid == request.auth.uid
-        && movimientoLineaCreditoValido(clienteId);
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'nombre', 'numero_cliente', 'rfc', 'telefono', 'correo', 'direccion', 
-            'grupo', 'segmentacion', 'dias_mensaje', 'pagare_inicial', 'pagare_monto', 
-            'pagare_fecha', 'notas_internas', 'updatedAt'
-          ]);
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'deuda_actual', 'credito_disponible', 'monto_ultimo_pago', 'fecha_ultimo_pago', 
-            'metodo_ultimo_pago', 'ultimo_deposito_monto', 'ultimo_deposito_fecha', 
-            'ultimo_deposito_metodo', 'ultimo_abono_id', 'ultimo_abono_factura_id', 'updatedAt', 
-            'linea_credito_estado', 'ultima_accion' 
-          ])
-        && campoNoCambia('limite_credito')
-        && campoNoCambia('activo')
-        && request.resource.data.deuda_actual is number
-        && request.resource.data.deuda_actual >= 0
-        && request.resource.data.credito_disponible is number
-        && request.resource.data.credito_disponible >= 0
-        && request.resource.data.credito_disponible <= limiteCreditoClienteNuevo();
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'limite_credito', 'credito_disponible', 'linea_credito_estado', 
-            'linea_credito_autorizado_por', 'linea_credito_ultimo_movimiento', 
-            'linea_credito_actualizada_en', 'linea_credito_actualizada_por', 
-            'linea_credito_actualizada_por_uid', 'updatedAt'
-          ])
-        && request.resource.data.limite_credito is number
-        && request.resource.data.limite_credito >= 0
-        && request.resource.data.credito_disponible is number
-        && request.resource.data.credito_disponible >= 0
-        && casiIguales(
-          request.resource.data.credito_disponible,
-          request.resource.data.limite_credito - request.resource.data.deuda_actual
-        )
-        && request.resource.data.deuda_actual == resource.data.deuda_actual
-        && request.resource.data.activo == resource.data.activo
-        && request.resource.data.estatus == resource.data.estatus
-        && (
-          (
-            request.resource.data.limite_credito == 0
-            && request.resource.data.deuda_actual == 0
-            && request.resource.data.linea_credito_estado == 'Sin línea'
-          )
-          ||
-          (
-            request.resource.data.limite_credito > 0
-            && request.resource.data.deuda_actual <= request.resource.data.limite_credito
-            && request.resource.data.linea_credito_estado == 'Activa'
-          )
-        )
-        && request.resource.data.linea_credito_autorizado_por is string
-        && request.resource.data.linea_credito_autorizado_por != ''
-        && request.resource.data.linea_credito_actualizada_en is timestamp
-        && request.resource.data.linea_credito_actualizada_por is string
-        && request.resource.data.linea_credito_actualizada_por_uid == request.auth.uid
-        && movimientoLineaCreditoValido(clienteId);
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'activo', 'estatus', 'inactivo_motivo', 'inactivo_por', 
-            'inactivo_por_uid', 'inactivo_at',
-            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
-          ])
-        && resource.data.activo == true
-        && request.resource.data.activo == false
-        && request.resource.data.estatus == 'Inactivo'
-        && request.resource.data.inactivo_motivo is string
-        && request.resource.data.inactivo_motivo != ''
-        && request.resource.data.inactivo_por is string
-        && request.resource.data.inactivo_por_uid == request.auth.uid
-        && request.resource.data.inactivo_at is timestamp;
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'activo', 'estatus', 'reactivado_motivo', 'reactivado_por', 
-            'reactivado_por_uid', 'reactivado_at',
-            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
-          ])
-        && resource.data.activo == false
-        && request.resource.data.activo == true
-        && request.resource.data.estatus == 'Activo'
-        && request.resource.data.reactivado_motivo is string
-        && request.resource.data.reactivado_motivo != ''
-        && request.resource.data.reactivado_por is string
-        && request.resource.data.reactivado_por_uid == request.auth.uid
-        && request.resource.data.reactivado_at is timestamp;
-
+      allow create: if isStaff() && request.resource.data.cliente_id == clienteId && request.resource.data.nombre is string && request.resource.data.nombre != '' && request.resource.data.numero_cliente is string && request.resource.data.numero_cliente != '' && request.resource.data.rfc is string && request.resource.data.rfc != '' && request.resource.data.telefono is string && request.resource.data.telefono != '' && request.resource.data.direccion is string && request.resource.data.direccion != '' && request.resource.data.pagare_inicial is bool && request.resource.data.limite_credito is number && request.resource.data.limite_credito >= 0 && request.resource.data.credito_disponible == request.resource.data.limite_credito && request.resource.data.deuda_actual is number && request.resource.data.deuda_actual == 0 && request.resource.data.activo == true && request.resource.data.estatus == 'Activo' && request.resource.data.linea_credito_estado in ['Sin línea', 'Activa', 'Excedida'] && request.resource.data.linea_credito_autorizado_por is string && request.resource.data.linea_credito_autorizado_por != '' && request.resource.data.linea_credito_ultimo_movimiento is string && request.resource.data.linea_credito_actualizada_en is timestamp && request.resource.data.linea_credito_actualizada_por is string && request.resource.data.linea_credito_actualizada_por != '' && request.resource.data.linea_credito_actualizada_por_uid == request.auth.uid && movimientoLineaCreditoValido(clienteId);
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nombre', 'numero_cliente', 'rfc', 'telefono', 'correo', 'direccion', 'grupo', 'segmentacion', 'dias_mensaje', 'pagare_inicial', 'pagare_monto', 'pagare_fecha', 'notas_internas', 'updatedAt']);
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deuda_actual', 'credito_disponible', 'monto_ultimo_pago', 'fecha_ultimo_pago', 'metodo_ultimo_pago', 'ultimo_deposito_monto', 'ultimo_deposito_fecha', 'ultimo_deposito_metodo', 'ultimo_abono_id', 'ultimo_abono_factura_id', 'updatedAt', 'linea_credito_estado', 'ultima_accion']) && campoNoCambia('limite_credito') && campoNoCambia('activo') && request.resource.data.deuda_actual is number && request.resource.data.deuda_actual >= 0 && request.resource.data.credito_disponible is number && request.resource.data.credito_disponible >= 0 && request.resource.data.credito_disponible <= limiteCreditoClienteNuevo();
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['limite_credito', 'credito_disponible', 'linea_credito_estado', 'linea_credito_autorizado_por', 'linea_credito_ultimo_movimiento', 'linea_credito_actualizada_en', 'linea_credito_actualizada_por', 'linea_credito_actualizada_por_uid', 'updatedAt']) && request.resource.data.limite_credito is number && request.resource.data.limite_credito >= 0 && request.resource.data.credito_disponible is number && request.resource.data.credito_disponible >= 0 && casiIguales(request.resource.data.credito_disponible, request.resource.data.limite_credito - request.resource.data.deuda_actual) && request.resource.data.deuda_actual == resource.data.deuda_actual && request.resource.data.activo == resource.data.activo && request.resource.data.estatus == resource.data.estatus && ((request.resource.data.limite_credito == 0 && request.resource.data.deuda_actual == 0 && request.resource.data.linea_credito_estado == 'Sin línea') || (request.resource.data.limite_credito > 0 && request.resource.data.deuda_actual <= request.resource.data.limite_credito && request.resource.data.linea_credito_estado == 'Activa')) && request.resource.data.linea_credito_autorizado_por is string && request.resource.data.linea_credito_autorizado_por != '' && request.resource.data.linea_credito_actualizada_en is timestamp && request.resource.data.linea_credito_actualizada_por is string && request.resource.data.linea_credito_actualizada_por_uid == request.auth.uid && movimientoLineaCreditoValido(clienteId);
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'estatus', 'inactivo_motivo', 'inactivo_por', 'inactivo_por_uid', 'inactivo_at', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt']) && resource.data.activo == true && request.resource.data.activo == false && request.resource.data.estatus == 'Inactivo' && request.resource.data.inactivo_motivo is string && request.resource.data.inactivo_motivo != '' && request.resource.data.inactivo_por is string && request.resource.data.inactivo_por_uid == request.auth.uid && request.resource.data.inactivo_at is timestamp;
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activo', 'estatus', 'reactivado_motivo', 'reactivado_por', 'reactivado_por_uid', 'reactivado_at', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt']) && resource.data.activo == false && request.resource.data.activo == true && request.resource.data.estatus == 'Activo' && request.resource.data.reactivado_motivo is string && request.resource.data.reactivado_motivo != '' && request.resource.data.reactivado_por is string && request.resource.data.reactivado_por_uid == request.auth.uid && request.resource.data.reactivado_at is timestamp;
       allow delete: if false;
     }
 
@@ -1819,753 +211,117 @@ service cloud.firestore {
       allow read: if isStaff();
 
       allow create: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'grupo', 'folio', 'monto_total',
-          'monto_pagado', 'saldo_pendiente', 'moneda', 'emision',
-          'vencimiento', 'observaciones', 'estatus', 'abonos',
-          'notas_credito', 'total_notas_credito', 'creacion_audit_id',
-          'creacion_actor_uid', 'creacion_at', 'metricas_movimiento_id',
-          'createdAt'
-        ])
-        && request.resource.data.id == facturaId
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente is string
-        && request.resource.data.cliente != ''
-        && request.resource.data.grupo is string
-        && request.resource.data.grupo != ''
-        && request.resource.data.folio is string
-        && request.resource.data.folio != ''
-        && request.resource.data.monto_total is number
-        && request.resource.data.monto_total > 0
-        && request.resource.data.monto_pagado is number
-        && request.resource.data.monto_pagado == 0
-        && request.resource.data.saldo_pendiente is number
-        && casiIguales(
-          request.resource.data.saldo_pendiente,
-          request.resource.data.monto_total
-        )
-        && request.resource.data.moneda == 'MXN'
-        && request.resource.data.estatus in ['Pendiente', 'Vencida']
-        && request.resource.data.abonos is list
-        && request.resource.data.abonos.size() == 0
-        && request.resource.data.notas_credito is list
-        && request.resource.data.notas_credito.size() == 0
-        && request.resource.data.total_notas_credito == 0
-        && request.resource.data.emision is timestamp
-        && request.resource.data.vencimiento is timestamp
-        && request.resource.data.vencimiento >= request.resource.data.emision
-        && request.resource.data.observaciones is string
-        && request.resource.data.createdAt is timestamp
-        && clienteCreacionFacturaValido()
-        && request.resource.data.metricas_movimiento_id is string
-        && request.resource.data.metricas_movimiento_id != ''
-        && auditoriaCreacionFacturaValida(facturaId);
+        && request.resource.data.keys().hasOnly(['id', 'cliente_id', 'cliente', 'grupo', 'folio', 'monto_total', 'monto_pagado', 'saldo_pendiente', 'moneda', 'emision', 'vencimiento', 'observaciones', 'estatus', 'abonos', 'notas_credito', 'total_notas_credito', 'creacion_audit_id', 'creacion_actor_uid', 'creacion_at', 'metricas_movimiento_id', 'createdAt'])
+        && request.resource.data.id == facturaId && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.cliente is string && request.resource.data.cliente != '' && request.resource.data.grupo is string && request.resource.data.grupo != '' && request.resource.data.folio is string && request.resource.data.folio != '' && request.resource.data.monto_total is number && request.resource.data.monto_total > 0 && request.resource.data.monto_pagado is number && request.resource.data.monto_pagado == 0 && request.resource.data.saldo_pendiente is number && casiIguales(request.resource.data.saldo_pendiente, request.resource.data.monto_total) && request.resource.data.moneda == 'MXN' && request.resource.data.estatus in ['Pendiente', 'Vencida'] && request.resource.data.abonos is list && request.resource.data.abonos.size() == 0 && request.resource.data.notas_credito is list && request.resource.data.notas_credito.size() == 0 && request.resource.data.total_notas_credito == 0 && request.resource.data.emision is timestamp && request.resource.data.vencimiento is timestamp && request.resource.data.vencimiento >= request.resource.data.emision && request.resource.data.observaciones is string && request.resource.data.createdAt is timestamp && clienteCreacionFacturaValido() && request.resource.data.metricas_movimiento_id is string && request.resource.data.metricas_movimiento_id != '' && auditoriaCreacionFacturaValida(facturaId);
 
-      // Registrar abono: SU y ADMIN
       allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'saldo_pendiente',
-            'monto_pagado',
-            'estatus',
-            'abonos',
-            'ultima_accion',
-            'updatedAt',
-            'ultima_edicion_audit_id',
-            'ultima_edicion_actor_uid',
-            'ultima_edicion_at',
-            'ultimo_metricas_movimiento_id',
-            'ultimo_metricas_tipo',
-            'abonos_cancelados'
-          ])
-        && campoNoCambia('id')
-        && campoNoCambia('createdAt')
-        && campoNoCambia('monto_total')
-        && campoNoCambia('cliente_id')
-        && request.resource.data.saldo_pendiente is number
-        && request.resource.data.saldo_pendiente >= 0
-        && request.resource.data.saldo_pendiente <= resource.data.monto_total
-        && request.resource.data.monto_pagado is number
-        && request.resource.data.monto_pagado >= 0
-        && request.resource.data.monto_pagado <= resource.data.monto_total
-        && totalNotasCreditoNuevo() == totalNotasCreditoActual()
-        && montosFacturaCuadran()
-        && request.resource.data.abonos is list
-        && resource.data.abonos is list
-        && request.resource.data.abonos.size() == resource.data.abonos.size() + 1
-        && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Reprogramado', 'Pagada']
-        && (
-          (request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') ||
-          (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
-        );
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saldo_pendiente', 'monto_pagado', 'estatus', 'abonos', 'ultima_accion', 'updatedAt', 'ultima_edicion_audit_id', 'ultima_edicion_actor_uid', 'ultima_edicion_at', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'abonos_cancelados'])
+        && campoNoCambia('id') && campoNoCambia('createdAt') && campoNoCambia('monto_total') && campoNoCambia('cliente_id')
+        && request.resource.data.saldo_pendiente is number && request.resource.data.saldo_pendiente >= 0 && request.resource.data.saldo_pendiente <= resource.data.monto_total && request.resource.data.monto_pagado is number && request.resource.data.monto_pagado >= 0 && request.resource.data.monto_pagado <= resource.data.monto_total && totalNotasCreditoNuevo() == totalNotasCreditoActual() && montosFacturaCuadran() && request.resource.data.abonos is list && resource.data.abonos is list && request.resource.data.abonos.size() == resource.data.abonos.size() + 1 && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Reprogramado', 'Pagada'] && ((request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada'));
 
-      // Anular abono: solo SU
+      allow update: if isSU()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saldo_pendiente', 'monto_pagado', 'estatus', 'abonos', 'ultima_accion', 'updatedAt', 'ultima_edicion_audit_id', 'ultima_edicion_actor_uid', 'ultima_edicion_at', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'abonos_cancelados'])
+        && campoNoCambia('id') && campoNoCambia('createdAt') && campoNoCambia('monto_total') && campoNoCambia('cliente_id')
+        && request.resource.data.saldo_pendiente is number && request.resource.data.saldo_pendiente >= 0 && request.resource.data.saldo_pendiente <= resource.data.monto_total && request.resource.data.monto_pagado is number && request.resource.data.monto_pagado >= 0 && request.resource.data.monto_pagado <= resource.data.monto_total && totalNotasCreditoNuevo() == totalNotasCreditoActual() && montosFacturaCuadran() && request.resource.data.abonos is list && resource.data.abonos is list && request.resource.data.abonos.size() == resource.data.abonos.size() - 1 && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Reprogramado', 'Pagada'] && ((request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada'));
+
+      allow update: if isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cliente_id', 'cliente', 'grupo', 'folio', 'monto_total', 'moneda', 'emision', 'vencimiento', 'observaciones', 'monto_pagado', 'saldo_pendiente', 'estatus', 'ultima_edicion_audit_id', 'ultima_edicion_actor_uid', 'ultima_edicion_at', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'])
+        && campoNoCambia('id') && campoNoCambia('createdAt') && request.resource.data.abonos == resource.data.abonos && request.resource.data.monto_pagado == resource.data.monto_pagado && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.cliente == get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data.nombre && request.resource.data.grupo == grupoClienteDocumento(get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data) && request.resource.data.folio is string && request.resource.data.folio != '' && request.resource.data.monto_total is number && request.resource.data.monto_total > 0 && totalNotasCreditoNuevo() == totalNotasCreditoActual() && request.resource.data.notas_credito == resource.data.notas_credito && request.resource.data.monto_total >= request.resource.data.monto_pagado + totalNotasCreditoNuevo() && request.resource.data.saldo_pendiente is number && request.resource.data.saldo_pendiente >= 0 && saldoFacturaEditadaCuadra() && request.resource.data.emision is timestamp && request.resource.data.vencimiento is timestamp && request.resource.data.vencimiento >= request.resource.data.emision && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Pagada'] && ((request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')) && cambioClienteFacturaPermitido() && clientesEdicionFacturaValidos() && auditoriaEdicionFacturaValida(facturaId);
+
+      allow update: if isSU()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saldo_pendiente', 'estatus', 'notas_credito', 'total_notas_credito', 'ultima_accion', 'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'])
+        && campoNoCambia('id') && campoNoCambia('createdAt') && campoNoCambia('cliente_id') && request.resource.data.cliente == resource.data.cliente && request.resource.data.folio == resource.data.folio && campoNoCambia('monto_total') && request.resource.data.monto_pagado == resource.data.monto_pagado && request.resource.data.abonos == resource.data.abonos && request.resource.data.saldo_pendiente is number && request.resource.data.saldo_pendiente >= 0 && request.resource.data.saldo_pendiente <= request.resource.data.monto_total && request.resource.data.total_notas_credito is number && request.resource.data.total_notas_credito >= 0 && request.resource.data.notas_credito is list && montosFacturaCuadran() && ((totalNotasCreditoNuevo() > totalNotasCreditoActual() && request.resource.data.notas_credito.size() == resource.data.get('notas_credito', []).size() + 1) || (totalNotasCreditoNuevo() < totalNotasCreditoActual() && request.resource.data.notas_credito.size() == resource.data.get('notas_credito', []).size())) && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Pagada'] && (request.resource.data.saldo_pendiente != resource.data.saldo_pendiente || request.resource.data.total_notas_credito != resource.data.total_notas_credito) && ((request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada'));
+
+      // PASO 7D: Cancelación Lógica (Archivado) de Factura
       allow update: if isSU()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'saldo_pendiente',
-            'monto_pagado',
-            'estatus',
-            'abonos',
-            'ultima_accion',
-            'updatedAt',
-            'ultima_edicion_audit_id',
-            'ultima_edicion_actor_uid',
-            'ultima_edicion_at',
-            'ultimo_metricas_movimiento_id',
-            'ultimo_metricas_tipo',
-            'abonos_cancelados'
-          ])
-        && campoNoCambia('id')
-        && campoNoCambia('createdAt')
-        && campoNoCambia('monto_total')
-        && campoNoCambia('cliente_id')
-        && request.resource.data.saldo_pendiente is number
-        && request.resource.data.saldo_pendiente >= 0
-        && request.resource.data.saldo_pendiente <= resource.data.monto_total
-        && request.resource.data.monto_pagado is number
-        && request.resource.data.monto_pagado >= 0
-        && request.resource.data.monto_pagado <= resource.data.monto_total
-        && totalNotasCreditoNuevo() == totalNotasCreditoActual()
-        && montosFacturaCuadran()
-        && request.resource.data.abonos is list
-        && resource.data.abonos is list
-        && request.resource.data.abonos.size() == resource.data.abonos.size() - 1
-        && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Reprogramado', 'Pagada']
-        && (
-          (request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') ||
-          (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
-        );
-
-      // Edición general de factura
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'cliente_id', 'cliente', 'grupo', 'folio', 'monto_total', 'moneda', 
-            'emision', 'vencimiento', 'observaciones', 'monto_pagado', 
-            'saldo_pendiente', 'estatus', 'ultima_edicion_audit_id', 
-            'ultima_edicion_actor_uid', 'ultima_edicion_at',
-            'ultimo_metricas_movimiento_id', 'ultimo_metricas_tipo', 'updatedAt'
-          ])
-        && campoNoCambia('id')
-        && campoNoCambia('createdAt')
-        && request.resource.data.abonos == resource.data.abonos
-        && request.resource.data.monto_pagado == resource.data.monto_pagado
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente == get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data.nombre
-        && request.resource.data.grupo
-          == grupoClienteDocumento(
-            get(/databases/$(database)/documents/clientes/$(request.resource.data.cliente_id)).data
-          )
-        && request.resource.data.folio is string
-        && request.resource.data.folio != ''
-        && request.resource.data.monto_total is number
-        && request.resource.data.monto_total > 0
-        && totalNotasCreditoNuevo() == totalNotasCreditoActual()
-        && request.resource.data.notas_credito == resource.data.notas_credito
-        && request.resource.data.monto_total
-          >= request.resource.data.monto_pagado + totalNotasCreditoNuevo()
-        && request.resource.data.saldo_pendiente is number
-        && request.resource.data.saldo_pendiente >= 0
-        && saldoFacturaEditadaCuadra()
-        && request.resource.data.emision is timestamp
-        && request.resource.data.vencimiento is timestamp
-        && request.resource.data.vencimiento >= request.resource.data.emision
-        && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Pagada']
-        && (
-          (request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || 
-          (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
-        )
-        && cambioClienteFacturaPermitido()
-        && clientesEdicionFacturaValidos()
-        && auditoriaEdicionFacturaValida(facturaId);
-
-      // SOLO el SU puede aplicar notas de crédito
-      allow update: if isSU()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'saldo_pendiente', 'estatus', 'notas_credito', 'total_notas_credito', 
-            'ultima_accion', 'ultimo_metricas_movimiento_id',
+            'estatus', 'cancelada_at', 'cancelada_por_uid', 'cancelada_por',
+            'ultima_edicion_audit_id', 'ultimo_metricas_movimiento_id',
             'ultimo_metricas_tipo', 'updatedAt'
           ])
-        && campoNoCambia('id')
-        && campoNoCambia('createdAt')
-        && campoNoCambia('cliente_id')
-        && request.resource.data.cliente == resource.data.cliente
-        && request.resource.data.folio == resource.data.folio
-        && campoNoCambia('monto_total')
-        && request.resource.data.monto_pagado == resource.data.monto_pagado
-        && request.resource.data.abonos == resource.data.abonos
-        && request.resource.data.saldo_pendiente is number
-        && request.resource.data.saldo_pendiente >= 0
-        && request.resource.data.saldo_pendiente <= request.resource.data.monto_total
-        && request.resource.data.total_notas_credito is number
-        && request.resource.data.total_notas_credito >= 0
-        && request.resource.data.notas_credito is list
-        && montosFacturaCuadran()
-        && (
-          (
-            totalNotasCreditoNuevo() > totalNotasCreditoActual()
-            && request.resource.data.notas_credito.size()
-              == resource.data.get('notas_credito', []).size() + 1
-          )
-          ||
-          (
-            totalNotasCreditoNuevo() < totalNotasCreditoActual()
-            && request.resource.data.notas_credito.size()
-              == resource.data.get('notas_credito', []).size()
-          )
-        )
-        && request.resource.data.estatus in ['Pendiente', 'Vencida', 'Pagada']
-        && (
-          request.resource.data.saldo_pendiente != resource.data.saldo_pendiente
-          || request.resource.data.total_notas_credito != resource.data.total_notas_credito
-        )
-        && (
-          (request.resource.data.saldo_pendiente == 0 && request.resource.data.estatus == 'Pagada') || 
-          (request.resource.data.saldo_pendiente > 0 && request.resource.data.estatus != 'Pagada')
-        );
-
-      allow delete: if isSU()
         && resource.data.get('abonos', []) is list
         && resource.data.get('abonos', []).size() == 0
         && resource.data.get('monto_pagado', 0) == 0
-        && resource.data.get('total_notas_credito', 0) == 0;
-    }
+        && resource.data.get('total_notas_credito', 0) == 0
+        && request.resource.data.estatus == 'Cancelada'
+        && request.resource.data.cancelada_at is timestamp
+        && request.resource.data.cancelada_por_uid == request.auth.uid
+        && request.resource.data.cancelada_por is string;
 
+      // Bloqueo total de borrado físico en el sistema
+      allow delete: if false; 
+    }
 
     match /solicitudes/{solicitudId} {
       allow read: if isStaff();
-
-      allow create: if isADMIN()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'monto_incremento', 'limite_anterior',
-          'nuevo_limite_propuesto', 'motivo', 'estatus', 'solicitado_por_uid',
-          'solicitado_por_nombre', 'createdAt'
-        ])
-        && request.resource.data.id == solicitudId
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && exists(clienteLineaPath(request.resource.data.cliente_id))
-        && get(clienteLineaPath(request.resource.data.cliente_id)).data.activo == true
-        && get(clienteLineaPath(request.resource.data.cliente_id)).data.estatus == 'Activo'
-        && request.resource.data.cliente
-          == get(clienteLineaPath(request.resource.data.cliente_id)).data.nombre
-        && request.resource.data.monto_incremento is number
-        && request.resource.data.monto_incremento > 0
-        && request.resource.data.limite_anterior is number
-        && request.resource.data.limite_anterior >= 0
-        && casiIguales(
-          request.resource.data.limite_anterior,
-          get(clienteLineaPath(request.resource.data.cliente_id)).data.limite_credito
-        )
-        && request.resource.data.nuevo_limite_propuesto is number
-        && casiIguales(
-          request.resource.data.nuevo_limite_propuesto,
-          request.resource.data.limite_anterior
-            + request.resource.data.monto_incremento
-        )
-        && request.resource.data.motivo is string
-        && request.resource.data.motivo != ''
-        && request.resource.data.estatus == 'Pendiente'
-        && request.resource.data.solicitado_por_uid == request.auth.uid
-        && request.resource.data.solicitado_por_nombre is string
-        && request.resource.data.solicitado_por_nombre != ''
-        && request.resource.data.createdAt is timestamp;
-
-      allow update: if isSU()
-        && resource.data.estatus == 'Pendiente'
-        && (
-          (
-            request.resource.data.estatus == 'Rechazado'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid'
-            ])
-            && request.resource.data.resolvedAt is timestamp
-            && request.resource.data.resolvedBy is string
-            && request.resource.data.resolvedBy != ''
-            && request.resource.data.resolvedByUid == request.auth.uid
-          )
-          ||
-          (
-            request.resource.data.estatus == 'Autorizado'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid',
-              'movimiento_linea_credito_id', 'limite_aplicado_anterior',
-              'limite_aplicado_nuevo'
-            ])
-            && request.resource.data.resolvedAt is timestamp
-            && request.resource.data.resolvedBy is string
-            && request.resource.data.resolvedBy != ''
-            && request.resource.data.resolvedByUid == request.auth.uid
-            && request.resource.data.limite_aplicado_anterior is number
-            && request.resource.data.limite_aplicado_nuevo is number
-            && solicitudAumentoAutorizadaValida(solicitudId)
-          )
-        );
-
+      allow create: if isADMIN() && request.resource.data.keys().hasOnly(['id', 'cliente_id', 'cliente', 'monto_incremento', 'limite_anterior', 'nuevo_limite_propuesto', 'motivo', 'estatus', 'solicitado_por_uid', 'solicitado_por_nombre', 'createdAt']) && request.resource.data.id == solicitudId && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && exists(clienteLineaPath(request.resource.data.cliente_id)) && get(clienteLineaPath(request.resource.data.cliente_id)).data.activo == true && get(clienteLineaPath(request.resource.data.cliente_id)).data.estatus == 'Activo' && request.resource.data.cliente == get(clienteLineaPath(request.resource.data.cliente_id)).data.nombre && request.resource.data.monto_incremento is number && request.resource.data.monto_incremento > 0 && request.resource.data.limite_anterior is number && request.resource.data.limite_anterior >= 0 && casiIguales(request.resource.data.limite_anterior, get(clienteLineaPath(request.resource.data.cliente_id)).data.limite_credito) && request.resource.data.nuevo_limite_propuesto is number && casiIguales(request.resource.data.nuevo_limite_propuesto, request.resource.data.limite_anterior + request.resource.data.monto_incremento) && request.resource.data.motivo is string && request.resource.data.motivo != '' && request.resource.data.estatus == 'Pendiente' && request.resource.data.solicitado_por_uid == request.auth.uid && request.resource.data.solicitado_por_nombre is string && request.resource.data.solicitado_por_nombre != '' && request.resource.data.createdAt is timestamp;
+      allow update: if isSU() && resource.data.estatus == 'Pendiente' && ((request.resource.data.estatus == 'Rechazado' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid']) && request.resource.data.resolvedAt is timestamp && request.resource.data.resolvedBy is string && request.resource.data.resolvedBy != '' && request.resource.data.resolvedByUid == request.auth.uid) || (request.resource.data.estatus == 'Autorizado' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estatus', 'resolvedAt', 'resolvedBy', 'resolvedByUid', 'movimiento_linea_credito_id', 'limite_aplicado_anterior', 'limite_aplicado_nuevo']) && request.resource.data.resolvedAt is timestamp && request.resource.data.resolvedBy is string && request.resource.data.resolvedBy != '' && request.resource.data.resolvedByUid == request.auth.uid && request.resource.data.limite_aplicado_anterior is number && request.resource.data.limite_aplicado_nuevo is number && solicitudAumentoAutorizadaValida(solicitudId)));
       allow delete: if false;
     }
 
     match /solicitudes_notas_credito/{solicitudId} {
       allow read: if isStaff();
-
-      allow create: if isADMIN()
-        && request.resource.data.id == solicitudId
-        && request.resource.data.tipo_solicitud == 'NOTA_CREDITO'
-        && request.resource.data.factura_id is string
-        && request.resource.data.factura_id != ''
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.monto_nota is number
-        && request.resource.data.monto_nota > 0
-        && request.resource.data.saldo_actual is number
-        && request.resource.data.monto_nota <= request.resource.data.saldo_actual
-        && request.resource.data.get('motivo', '') is string
-        && request.resource.data.estatus == 'Pendiente'
-        && request.resource.data.solicitado_por_uid == request.auth.uid;
-
-      allow update: if isSU()
-        && (
-          (
-            resource.data.estatus == 'Pendiente'
-            && request.resource.data.estatus in ['Autorizado', 'Rechazado']
-            && request.resource.data.resolvedAt is timestamp
-            && request.resource.data.resolvedByUid == request.auth.uid
-            && (
-              (request.resource.data.estatus == 'Autorizado' && resumenNotaAutorizadaValido())
-              ||
-              (request.resource.data.estatus == 'Rechazado' && resumenNotaRechazadaValido())
-            )
-          )
-          ||
-          (
-            resource.data.estatus in ['Autorizado', 'Aprobado']
-            && request.resource.data.estatus == 'Anulada'
-            && request.resource.data.nota_anulada == true
-            && request.resource.data.anuladaAt is timestamp
-            && request.resource.data.anuladaByUid == request.auth.uid
-            && resumenNotaAnuladaValido()
-          )
-        );
-
+      allow create: if isADMIN() && request.resource.data.id == solicitudId && request.resource.data.tipo_solicitud == 'NOTA_CREDITO' && request.resource.data.factura_id is string && request.resource.data.factura_id != '' && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.monto_nota is number && request.resource.data.monto_nota > 0 && request.resource.data.saldo_actual is number && request.resource.data.monto_nota <= request.resource.data.saldo_actual && request.resource.data.get('motivo', '') is string && request.resource.data.estatus == 'Pendiente' && request.resource.data.solicitado_por_uid == request.auth.uid;
+      allow update: if isSU() && ((resource.data.estatus == 'Pendiente' && request.resource.data.estatus in ['Autorizado', 'Rechazado'] && request.resource.data.resolvedAt is timestamp && request.resource.data.resolvedByUid == request.auth.uid && ((request.resource.data.estatus == 'Autorizado' && resumenNotaAutorizadaValido()) || (request.resource.data.estatus == 'Rechazado' && resumenNotaRechazadaValido()))) || (resource.data.estatus in ['Autorizado', 'Aprobado'] && request.resource.data.estatus == 'Anulada' && request.resource.data.nota_anulada == true && request.resource.data.anuladaAt is timestamp && request.resource.data.anuladaByUid == request.auth.uid && resumenNotaAnuladaValido()));
       allow delete: if false;
     }
 
     match /notas_credito_resumen_clientes/{clienteId} {
-      // Permitimos lectura para que la transacción del ADMIN pueda verificar el estado previo
       allow read: if isStaff(); 
-
-      allow create: if isStaff()
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.get('autorizadas', 0) == 0
-        && request.resource.data.get('rechazadas', 0) == 0
-        && request.resource.data.get('anuladas', 0) == 0
-        && request.resource.data.ultimo_estado == 'Pendiente';
-
-      allow update: if isStaff()
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && (
-          isSU() || (
-            // Blindaje: El ADMIN puede sumar a 'pendientes' y 'monto_total_notas',
-            // PERO NUNCA puede alterar los acumulados de dinero autorizado, rechazado o anulado.
-            request.resource.data.get('autorizadas', 0) == resource.data.get('autorizadas', 0)
-            && request.resource.data.get('rechazadas', 0) == resource.data.get('rechazadas', 0)
-            && request.resource.data.get('anuladas', 0) == resource.data.get('anuladas', 0)
-            && request.resource.data.ultimo_estado == 'Pendiente'
-          )
-        );
-
-      allow delete: if false;
-    }
-    match /notas_credito_resumen_clientes/{clienteId} {
-      allow read: if isSU();
-
-      // ✅ FIX 7C: Separación de permisos para evitar que ADMIN altere datos históricos
-      allow create: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'total_solicitudes', 'pendientes', 
-          'autorizadas', 'rechazadas', 'anuladas', 'monto_total_notas', 
-          'ultimo_estado', 'ultimo_monto_nota', 'ultimo_folio', 
-          'ultimo_movimiento_at', 'ultimo_solicitado_por', 'ultimo_resuelto_por', 'activo'
-        ])
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.cliente is string
-        && request.resource.data.cliente != ''
-        && (!request.resource.data.keys().hasAny(['total_solicitudes']) || (request.resource.data.total_solicitudes is number && request.resource.data.total_solicitudes >= 0))
-        && (!request.resource.data.keys().hasAny(['pendientes']) || (request.resource.data.pendientes is number && request.resource.data.pendientes >= 0))
-        && (!request.resource.data.keys().hasAny(['autorizadas']) || request.resource.data.autorizadas == 0)
-        && (!request.resource.data.keys().hasAny(['rechazadas']) || request.resource.data.rechazadas == 0)
-        && (!request.resource.data.keys().hasAny(['anuladas']) || request.resource.data.anuladas == 0)
-        && (!request.resource.data.keys().hasAny(['monto_total_notas']) || request.resource.data.monto_total_notas == 0)
-        && request.resource.data.ultimo_estado == 'Pendiente'
-        && (!request.resource.data.keys().hasAny(['ultimo_monto_nota']) || request.resource.data.ultimo_monto_nota is number)
-        && (!request.resource.data.keys().hasAny(['ultimo_folio']) || request.resource.data.ultimo_folio is string)
-        && request.resource.data.ultimo_movimiento_at is timestamp
-        && (!request.resource.data.keys().hasAny(['ultimo_solicitado_por']) || request.resource.data.ultimo_solicitado_por is string)
-        && (!request.resource.data.keys().hasAny(['ultimo_resuelto_por']) || request.resource.data.ultimo_resuelto_por == '')
-        && request.resource.data.activo is bool;
-
-      allow update: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'total_solicitudes', 'pendientes', 
-          'autorizadas', 'rechazadas', 'anuladas', 'monto_total_notas', 
-          'ultimo_estado', 'ultimo_monto_nota', 'ultimo_folio', 
-          'ultimo_movimiento_at', 'ultimo_solicitado_por', 'ultimo_resuelto_por', 'activo'
-        ])
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.cliente is string
-        && request.resource.data.cliente != ''
-        && (!request.resource.data.keys().hasAny(['total_solicitudes']) || (request.resource.data.total_solicitudes is number && request.resource.data.total_solicitudes >= 0))
-        && (!request.resource.data.keys().hasAny(['pendientes']) || (request.resource.data.pendientes is number && request.resource.data.pendientes >= 0))
-        && (!request.resource.data.keys().hasAny(['autorizadas']) || (request.resource.data.autorizadas is number && request.resource.data.autorizadas >= 0))
-        && (!request.resource.data.keys().hasAny(['rechazadas']) || (request.resource.data.rechazadas is number && request.resource.data.rechazadas >= 0))
-        && (!request.resource.data.keys().hasAny(['anuladas']) || (request.resource.data.anuladas is number && request.resource.data.anuladas >= 0))
-        && (!request.resource.data.keys().hasAny(['monto_total_notas']) || (request.resource.data.monto_total_notas is number && request.resource.data.monto_total_notas >= 0))
-        && request.resource.data.ultimo_estado in ['Pendiente', 'Autorizado', 'Aprobado', 'Rechazado', 'Anulada']
-        && (!request.resource.data.keys().hasAny(['ultimo_monto_nota']) || request.resource.data.ultimo_monto_nota is number)
-        && (!request.resource.data.keys().hasAny(['ultimo_folio']) || request.resource.data.ultimo_folio is string)
-        && request.resource.data.ultimo_movimiento_at is timestamp
-        && (!request.resource.data.keys().hasAny(['ultimo_solicitado_por']) || request.resource.data.ultimo_solicitado_por is string)
-        && (!request.resource.data.keys().hasAny(['ultimo_resuelto_por']) || request.resource.data.ultimo_resuelto_por is string)
-        && request.resource.data.activo is bool
-        && (
-          isSU() || (
-            request.resource.data.get('autorizadas', 0) == resource.data.get('autorizadas', 0)
-            && request.resource.data.get('rechazadas', 0) == resource.data.get('rechazadas', 0)
-            && request.resource.data.get('anuladas', 0) == resource.data.get('anuladas', 0)
-            && request.resource.data.get('monto_total_notas', 0) == resource.data.get('monto_total_notas', 0)
-            && request.resource.data.ultimo_estado == 'Pendiente'
-          )
-        );
-
+      allow create: if isStaff() && request.resource.data.id == clienteId && request.resource.data.cliente_id == clienteId && request.resource.data.get('autorizadas', 0) == 0 && request.resource.data.get('rechazadas', 0) == 0 && request.resource.data.get('anuladas', 0) == 0 && request.resource.data.ultimo_estado == 'Pendiente';
+      allow update: if isStaff() && request.resource.data.id == clienteId && request.resource.data.cliente_id == clienteId && (isSU() || (request.resource.data.get('autorizadas', 0) == resource.data.get('autorizadas', 0) && request.resource.data.get('rechazadas', 0) == resource.data.get('rechazadas', 0) && request.resource.data.get('anuladas', 0) == resource.data.get('anuladas', 0) && request.resource.data.ultimo_estado == 'Pendiente'));
       allow delete: if false;
     }
 
     match /compromisos/{compromisoId} {
       allow read: if isStaff();
-      allow create: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'tipo_vinculo', 'titulo', 'motivo', 'cliente_id', 'cliente_nombre', 
-          'factura_id', 'folio_factura', 'tipo_evento', 'monto', 'telefono', 
-          'fecha_compromiso', 'mes_anio', 'estatus', 'ultima_accion', 
-          'historial_acciones', 'creado_por', 'creado_por_uid', 'createdAt', 'updatedAt'
-        ])
-        && request.resource.data.tipo_vinculo in ['GENERAL', 'CLIENTE', 'FACTURA']
-        && request.resource.data.titulo is string
-        && request.resource.data.titulo != ''
-        && request.resource.data.motivo is string
-        && request.resource.data.motivo != ''
-        && request.resource.data.tipo_evento in ['Recordatorio', 'Seguimiento', 'Promesa']
-        && request.resource.data.cliente_nombre is string
-        && request.resource.data.folio_factura is string
-        && request.resource.data.telefono is string
-        && request.resource.data.monto is number
-        && request.resource.data.monto >= 0
-        && request.resource.data.fecha_compromiso is timestamp
-        && request.resource.data.mes_anio is string
-        && request.resource.data.estatus == 'Pendiente'
-        && request.resource.data.ultima_accion is map
-        && request.resource.data.historial_acciones is list
-        && request.resource.data.creado_por is string
-        && request.resource.data.creado_por_uid == request.auth.uid
-        && request.resource.data.createdAt is timestamp
-        && request.resource.data.updatedAt is timestamp
-        && (
-          (request.resource.data.tipo_vinculo == 'GENERAL' && request.resource.data.cliente_id == null && request.resource.data.factura_id == null && request.resource.data.cliente_nombre == '' && request.resource.data.folio_factura == '' && request.resource.data.telefono == '' && request.resource.data.monto == 0)
-          ||
-          (request.resource.data.tipo_vinculo == 'CLIENTE' && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.factura_id == null && request.resource.data.cliente_nombre != '' && request.resource.data.folio_factura == '' && request.resource.data.monto == 0)
-          ||
-          (request.resource.data.tipo_vinculo == 'FACTURA' && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.factura_id is string && request.resource.data.factura_id != '' && request.resource.data.cliente_nombre != '' && request.resource.data.folio_factura != '')
-        );
-
-      allow update: if isStaff()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'fecha_compromiso', 'mes_anio', 'estatus', 'ultima_accion', 
-            'historial_acciones', 'fecha_completado', 'completado_por', 
-            'completado_por_uid', 'updatedAt'
-          ])
-        && request.resource.data.estatus in ['Pendiente', 'Completado', 'Reprogramado', 'Cancelado']
-        && (
-          (resource.data.estatus in ['Completado', 'Cancelado'] && request.resource.data.estatus == resource.data.estatus)
-          ||
-          (resource.data.estatus in ['Pendiente', 'Reprogramado'] && (request.resource.data.estatus == resource.data.estatus || request.resource.data.estatus in ['Reprogramado', 'Completado', 'Cancelado']))
-        )
-        && request.resource.data.ultima_accion is map
-        && request.resource.data.historial_acciones is list
-        && request.resource.data.updatedAt is timestamp
-        && (
-          request.resource.data.estatus != 'Completado'
-          || resource.data.estatus == 'Completado'
-          || (request.resource.data.fecha_completado is timestamp && request.resource.data.completado_por is string && request.resource.data.completado_por_uid == request.auth.uid)
-        );
-
+      allow create: if isStaff() && request.resource.data.keys().hasOnly(['tipo_vinculo', 'titulo', 'motivo', 'cliente_id', 'cliente_nombre', 'factura_id', 'folio_factura', 'tipo_evento', 'monto', 'telefono', 'fecha_compromiso', 'mes_anio', 'estatus', 'ultima_accion', 'historial_acciones', 'creado_por', 'creado_por_uid', 'createdAt', 'updatedAt']) && request.resource.data.tipo_vinculo in ['GENERAL', 'CLIENTE', 'FACTURA'] && request.resource.data.titulo is string && request.resource.data.titulo != '' && request.resource.data.motivo is string && request.resource.data.motivo != '' && request.resource.data.tipo_evento in ['Recordatorio', 'Seguimiento', 'Promesa'] && request.resource.data.cliente_nombre is string && request.resource.data.folio_factura is string && request.resource.data.telefono is string && request.resource.data.monto is number && request.resource.data.monto >= 0 && request.resource.data.fecha_compromiso is timestamp && request.resource.data.mes_anio is string && request.resource.data.estatus == 'Pendiente' && request.resource.data.ultima_accion is map && request.resource.data.historial_acciones is list && request.resource.data.creado_por is string && request.resource.data.creado_por_uid == request.auth.uid && request.resource.data.createdAt is timestamp && request.resource.data.updatedAt is timestamp && ((request.resource.data.tipo_vinculo == 'GENERAL' && request.resource.data.cliente_id == null && request.resource.data.factura_id == null && request.resource.data.cliente_nombre == '' && request.resource.data.folio_factura == '' && request.resource.data.telefono == '' && request.resource.data.monto == 0) || (request.resource.data.tipo_vinculo == 'CLIENTE' && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.factura_id == null && request.resource.data.cliente_nombre != '' && request.resource.data.folio_factura == '' && request.resource.data.monto == 0) || (request.resource.data.tipo_vinculo == 'FACTURA' && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.factura_id is string && request.resource.data.factura_id != '' && request.resource.data.cliente_nombre != '' && request.resource.data.folio_factura != ''));
+      allow update: if isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fecha_compromiso', 'mes_anio', 'estatus', 'ultima_accion', 'historial_acciones', 'fecha_completado', 'completado_por', 'completado_por_uid', 'updatedAt']) && request.resource.data.estatus in ['Pendiente', 'Completado', 'Reprogramado', 'Cancelado'] && ((resource.data.estatus in ['Completado', 'Cancelado'] && request.resource.data.estatus == resource.data.estatus) || (resource.data.estatus in ['Pendiente', 'Reprogramado'] && (request.resource.data.estatus == resource.data.estatus || request.resource.data.estatus in ['Reprogramado', 'Completado', 'Cancelado']))) && request.resource.data.ultima_accion is map && request.resource.data.historial_acciones is list && request.resource.data.updatedAt is timestamp && (request.resource.data.estatus != 'Completado' || resource.data.estatus == 'Completado' || (request.resource.data.fecha_completado is timestamp && request.resource.data.completado_por is string && request.resource.data.completado_por_uid == request.auth.uid));
       allow delete: if isSU();
     }
 
-
     match /lineas_credito_movimientos/{movimientoId} {
       allow read: if isStaff();
-
-      allow create: if isStaff()
-        && actorValido()
-        && request.resource.data.keys().hasOnly([
-          'id', 'actor_uid', 'cliente_id', 'cliente', 'tipo_movimiento',
-          'limite_anterior', 'limite_nuevo', 'diferencia', 'deuda_actual',
-          'credito_disponible_resultante', 'estado_resultante',
-          'personal_autoriza', 'motivo', 'registrado_por_uid',
-          'registrado_por_nombre', 'registrado_por_rol', 'origen',
-          'solicitud_id', 'actividad_id', 'createdAt'
-        ])
-        && bundleMovimientoLineaValido(request.resource.data, movimientoId);
-
+      allow create: if isStaff() && actorValido() && request.resource.data.keys().hasOnly(['id', 'actor_uid', 'cliente_id', 'cliente', 'tipo_movimiento', 'limite_anterior', 'limite_nuevo', 'diferencia', 'deuda_actual', 'credito_disponible_resultante', 'estado_resultante', 'personal_autoriza', 'motivo', 'registrado_por_uid', 'registrado_por_nombre', 'registrado_por_rol', 'origen', 'solicitud_id', 'actividad_id', 'createdAt']) && bundleMovimientoLineaValido(request.resource.data, movimientoId);
       allow update, delete: if false;
     }
 
     match /lineas_credito_resumen_clientes/{clienteId} {
       allow read: if isStaff();
-
-      allow create: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual',
-          'credito_disponible_actual', 'estado_resultante',
-          'ultimo_tipo_movimiento', 'ultimo_personal_autoriza',
-          'ultimo_registrado_por', 'ultimo_registrado_por_uid',
-          'ultimo_registrado_por_rol', 'ultimo_movimiento_id',
-          'ultimo_movimiento_at', 'total_movimientos', 'activo'
-        ])
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && request.resource.data.total_movimientos == 1
-        && resumenLineaCreditoCoincideMovimiento(clienteId);
-
-      allow update: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual',
-          'credito_disponible_actual', 'estado_resultante',
-          'ultimo_tipo_movimiento', 'ultimo_personal_autoriza',
-          'ultimo_registrado_por', 'ultimo_registrado_por_uid',
-          'ultimo_registrado_por_rol', 'ultimo_movimiento_id',
-          'ultimo_movimiento_at', 'total_movimientos', 'activo'
-        ])
-        && request.resource.data.id == clienteId
-        && request.resource.data.cliente_id == clienteId
-        && resource.data.total_movimientos is number
-        && request.resource.data.total_movimientos
-          == resource.data.total_movimientos + 1
-        && resumenLineaCreditoCoincideMovimiento(clienteId);
-
+      allow create: if isStaff() && request.resource.data.keys().hasOnly(['id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual', 'credito_disponible_actual', 'estado_resultante', 'ultimo_tipo_movimiento', 'ultimo_personal_autoriza', 'ultimo_registrado_por', 'ultimo_registrado_por_uid', 'ultimo_registrado_por_rol', 'ultimo_movimiento_id', 'ultimo_movimiento_at', 'total_movimientos', 'activo']) && request.resource.data.id == clienteId && request.resource.data.cliente_id == clienteId && request.resource.data.total_movimientos == 1 && resumenLineaCreditoCoincideMovimiento(clienteId);
+      allow update: if isStaff() && request.resource.data.keys().hasOnly(['id', 'cliente_id', 'cliente', 'limite_actual', 'deuda_actual', 'credito_disponible_actual', 'estado_resultante', 'ultimo_tipo_movimiento', 'ultimo_personal_autoriza', 'ultimo_registrado_por', 'ultimo_registrado_por_uid', 'ultimo_registrado_por_rol', 'ultimo_movimiento_id', 'ultimo_movimiento_at', 'total_movimientos', 'activo']) && request.resource.data.id == clienteId && request.resource.data.cliente_id == clienteId && resource.data.total_movimientos is number && request.resource.data.total_movimientos == resource.data.total_movimientos + 1 && resumenLineaCreditoCoincideMovimiento(clienteId);
       allow delete: if false;
     }
 
     match /abonos_index/{abonoIndexId} {
       allow read: if isSU();
-
-      allow create: if isStaff()
-        && request.resource.data.keys().hasOnly([
-          'id', 'id_abono', 'factura_id', 'folio', 'cliente_id', 'cliente',
-          'fecha', 'monto', 'metodo', 'registrado_por', 'registrado_por_uid',
-          'estado', 'activo', 'origen', 'saldo_anterior', 'saldo_restante',
-          'indexado_por_uid', 'cancelado_at', 'cancelado_por_uid', 'cancelado_por',
-          'createdAt', 'updatedAt'
-        ])
-        && request.resource.data.id == abonoIndexId
-        && request.resource.data.id_abono is string
-        && request.resource.data.id_abono != ''
-        && request.resource.data.factura_id is string
-        && request.resource.data.factura_id != ''
-        && request.resource.data.folio is string
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente is string
-        && request.resource.data.fecha is timestamp
-        && request.resource.data.monto is number
-        && request.resource.data.monto >= 0
-        && request.resource.data.metodo is string
-        && request.resource.data.registrado_por is string
-        && request.resource.data.registrado_por_uid is string
-        && request.resource.data.estado == 'ACTIVO'
-        && request.resource.data.activo == true
-        && request.resource.data.origen is string
-        && request.resource.data.indexado_por_uid == request.auth.uid
-        && request.resource.data.updatedAt is timestamp;
-
-      allow update: if isSU()
-        // Permitimos que el frontend de React envíe el objeto completo, 
-        // pero exigimos que la transición de estado sea válida:
-        && resource.data.estado == 'ACTIVO'
-        && request.resource.data.estado == 'CANCELADO'
-        && request.resource.data.activo == false
-        && request.resource.data.cancelado_at is timestamp
-        && request.resource.data.cancelado_por_uid == request.auth.uid
-        && request.resource.data.cancelado_por is string
-        && request.resource.data.updatedAt is timestamp
-        // Blindaje financiero: los datos base del abono NO pueden cambiar en la anulación
-        && campoNoCambia('monto')
-        && campoNoCambia('factura_id')
-        && campoNoCambia('cliente_id')
-        && campoNoCambia('id_abono')
-        && campoNoCambia('fecha');
-
+      allow create: if isStaff() && request.resource.data.keys().hasOnly(['id', 'id_abono', 'factura_id', 'folio', 'cliente_id', 'cliente', 'fecha', 'monto', 'metodo', 'registrado_por', 'registrado_por_uid', 'estado', 'activo', 'origen', 'saldo_anterior', 'saldo_restante', 'indexado_por_uid', 'cancelado_at', 'cancelado_por_uid', 'cancelado_por', 'createdAt', 'updatedAt']) && request.resource.data.id == abonoIndexId && request.resource.data.id_abono is string && request.resource.data.id_abono != '' && request.resource.data.factura_id is string && request.resource.data.factura_id != '' && request.resource.data.folio is string && request.resource.data.cliente_id is string && request.resource.data.cliente is string && request.resource.data.fecha is timestamp && request.resource.data.monto is number && request.resource.data.monto >= 0 && request.resource.data.metodo is string && request.resource.data.registrado_por is string && request.resource.data.registrado_por_uid is string && request.resource.data.estado == 'ACTIVO' && request.resource.data.activo == true && request.resource.data.origen is string && request.resource.data.indexado_por_uid == request.auth.uid && request.resource.data.updatedAt is timestamp;
+      allow update: if isSU() && resource.data.estado == 'ACTIVO' && request.resource.data.estado == 'CANCELADO' && request.resource.data.activo == false && request.resource.data.cancelado_at is timestamp && request.resource.data.cancelado_por_uid == request.auth.uid && request.resource.data.cancelado_por is string && request.resource.data.updatedAt is timestamp && campoNoCambia('monto') && campoNoCambia('factura_id') && campoNoCambia('cliente_id') && campoNoCambia('id_abono') && campoNoCambia('fecha');
       allow delete: if false;
     }
 
     match /notificaciones_operativas/{notificacionId} {
       allow read: if isStaff();
-
-      allow create: if isSU()
-        && actorValido()
-        && request.resource.data.keys().hasOnly([
-          'actor_uid', 'actor_nombre', 'tipo', 'titulo', 'descripcion',
-          'factura_id', 'folio', 'cliente_id', 'cliente', 'monto',
-          'activo', 'serverTime'
-        ])
-        && request.resource.data.actor_nombre is string
-        && request.resource.data.actor_nombre != ''
-        && request.resource.data.tipo == 'PAGO_ANULADO'
-        && request.resource.data.titulo == 'Pago anulado'
-        && request.resource.data.descripcion is string
-        && request.resource.data.descripcion != ''
-        && request.resource.data.factura_id is string
-        && request.resource.data.factura_id != ''
-        && request.resource.data.folio is string
-        && request.resource.data.cliente_id is string
-        && request.resource.data.cliente_id != ''
-        && request.resource.data.cliente is string
-        && request.resource.data.cliente != ''
-        && request.resource.data.monto is number
-        && request.resource.data.monto > 0
-        && request.resource.data.activo == true
-        && request.resource.data.serverTime is timestamp;
-
+      allow create: if isSU() && actorValido() && request.resource.data.keys().hasOnly(['actor_uid', 'actor_nombre', 'tipo', 'titulo', 'descripcion', 'factura_id', 'folio', 'cliente_id', 'cliente', 'monto', 'activo', 'serverTime']) && request.resource.data.actor_nombre is string && request.resource.data.actor_nombre != '' && request.resource.data.tipo == 'PAGO_ANULADO' && request.resource.data.titulo == 'Pago anulado' && request.resource.data.descripcion is string && request.resource.data.descripcion != '' && request.resource.data.factura_id is string && request.resource.data.factura_id != '' && request.resource.data.folio is string && request.resource.data.cliente_id is string && request.resource.data.cliente_id != '' && request.resource.data.cliente is string && request.resource.data.cliente != '' && request.resource.data.monto is number && request.resource.data.monto > 0 && request.resource.data.activo == true && request.resource.data.serverTime is timestamp;
       allow update, delete: if false;
     }
 
     match /actividad/{actividadId} {
-      // El Súper Usuario es el único que puede leer la auditoría
       allow read: if isSU();
-
-      allow create: if isStaff()
-        && actorValido()
-        && request.resource.data.usuario is string
-        && request.resource.data.modulo is string
-        && request.resource.data.tipo is string
-        && request.resource.data.detalle is string
-        && request.resource.data.serverTime is timestamp;
-
-      // La auditoría es inmutable, nadie puede borrar ni editar.
+      allow create: if isStaff() && actorValido() && request.resource.data.usuario is string && request.resource.data.modulo is string && request.resource.data.tipo is string && request.resource.data.detalle is string && request.resource.data.serverTime is timestamp;
       allow update, delete: if false;
     }
 
-    // ============================================================
-    // PASO 7B SPARK SIMPLE
-    // Las métricas son un resumen reconstruible del Dashboard.
-    // SU y ADMIN activos pueden registrar operaciones normales.
-    // Solo SU puede crear el resumen inicial y reconciliarlo.
-    // ============================================================
     match /metricas_movimientos/{movimientoId} {
       allow read: if isSU();
-
-      allow create: if isStaff()
-        && actorValido()
-        && request.resource.data.keys().hasOnly([
-          'id', 'actor_uid', 'actor_nombre', 'tipo', 'entidad_tipo',
-          'entidad_id', 'factura_id', 'cliente_id', 'abono_id',
-          'nota_id', 'actividad_id', 'deltas_fuente',
-          'deltas_aplicados', 'periodo_mes_anterior',
-          'periodo_mes_nuevo', 'periodo_semana_anterior',
-          'periodo_semana_nuevo', 'reinicio_mes', 'reinicio_semana',
-          'origen', 'reconstruccion_id', 'createdAt'
-        ])
-        && request.resource.data.id == movimientoId
-        && request.resource.data.actor_nombre is string
-        && request.resource.data.actor_nombre != ''
-        && request.resource.data.tipo in [
-          'FACTURA_CREADA', 'ABONO_REGISTRADO', 'ABONO_ANULADO',
-          'FACTURA_EDITADA', 'NOTA_CREDITO_APLICADA',
-          'NOTA_CREDITO_ANULADA', 'FACTURA_ELIMINADA',
-          'CLIENTE_CREADO', 'CLIENTE_INACTIVADO',
-          'CLIENTE_REACTIVADO', 'RECONSTRUCCION_METRICAS'
-        ]
-        && request.resource.data.entidad_tipo in [
-          'FACTURA', 'CLIENTE', 'METRICAS'
-        ]
-        && request.resource.data.entidad_id is string
-        && request.resource.data.entidad_id != ''
-        && request.resource.data.factura_id is string
-        && request.resource.data.cliente_id is string
-        && request.resource.data.abono_id is string
-        && request.resource.data.nota_id is string
-        && request.resource.data.actividad_id is string
-        && request.resource.data.origen is string
-        && request.resource.data.origen != ''
-        && request.resource.data.deltas_fuente is map
-        && request.resource.data.deltas_aplicados is map
-        && request.resource.data.periodo_mes_anterior is string
-        && request.resource.data.periodo_mes_nuevo is string
-        && request.resource.data.periodo_semana_anterior is string
-        && request.resource.data.periodo_semana_nuevo is string
-        && request.resource.data.reinicio_mes is bool
-        && request.resource.data.reinicio_semana is bool
-        && request.resource.data.createdAt is timestamp
-        && (
-          request.resource.data.tipo != 'RECONSTRUCCION_METRICAS'
-          || (
-            isSU()
-            && request.resource.data.reconstruccion_id is string
-            && request.resource.data.reconstruccion_id != ''
-          )
-        );
-
+      allow create: if isStaff() && actorValido() && request.resource.data.keys().hasOnly(['id', 'actor_uid', 'actor_nombre', 'tipo', 'entidad_tipo', 'entidad_id', 'factura_id', 'cliente_id', 'abono_id', 'nota_id', 'actividad_id', 'deltas_fuente', 'deltas_aplicados', 'periodo_mes_anterior', 'periodo_mes_nuevo', 'periodo_semana_anterior', 'periodo_semana_nuevo', 'reinicio_mes', 'reinicio_semana', 'origen', 'reconstruccion_id', 'createdAt']) && request.resource.data.id == movimientoId && request.resource.data.actor_nombre is string && request.resource.data.actor_nombre != '' && request.resource.data.tipo in ['FACTURA_CREADA', 'ABONO_REGISTRADO', 'ABONO_ANULADO', 'FACTURA_EDITADA', 'NOTA_CREDITO_APLICADA', 'NOTA_CREDITO_ANULADA', 'FACTURA_ELIMINADA', 'CLIENTE_CREADO', 'CLIENTE_INACTIVADO', 'CLIENTE_REACTIVADO', 'RECONSTRUCCION_METRICAS'] && request.resource.data.entidad_tipo in ['FACTURA', 'CLIENTE', 'METRICAS'] && request.resource.data.entidad_id is string && request.resource.data.entidad_id != '' && request.resource.data.factura_id is string && request.resource.data.cliente_id is string && request.resource.data.abono_id is string && request.resource.data.nota_id is string && request.resource.data.actividad_id is string && request.resource.data.origen is string && request.resource.data.origen != '' && request.resource.data.deltas_fuente is map && request.resource.data.deltas_aplicados is map && request.resource.data.periodo_mes_anterior is string && request.resource.data.periodo_mes_nuevo is string && request.resource.data.periodo_semana_anterior is string && request.resource.data.periodo_semana_nuevo is string && request.resource.data.reinicio_mes is bool && request.resource.data.reinicio_semana is bool && request.resource.data.createdAt is timestamp && (request.resource.data.tipo != 'RECONSTRUCCION_METRICAS' || (isSU() && request.resource.data.reconstruccion_id is string && request.resource.data.reconstruccion_id != ''));
       allow update, delete: if false;
     }
 
     match /metricas_globales/{documentoId} {
       allow read: if isStaff();
-
-      allow create: if isSU()
-        && documentoId == 'stats_actuales'
-        && request.resource.data.keys().hasOnly([
-          'cartera_total', 'cartera_vencida', 'ingresos_mes',
-          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
-          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
-          'total_facturado', 'total_liquidado', 'cobrado_historico',
-          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
-          'total_notas_credito', 'periodo_mes', 'periodo_semana',
-          'ultimo_movimiento_id', 'ultima_reconciliacion',
-          'ultima_actualizacion'
-        ])
-        && metricasNoNegativas(request.resource.data)
-        && request.resource.data.periodo_mes is string
-        && request.resource.data.periodo_semana is string
-        && request.resource.data.ultimo_movimiento_id is string
-        && request.resource.data.ultima_actualizacion is timestamp;
-
-      allow update: if isStaff()
-        && documentoId == 'stats_actuales'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'cartera_total', 'cartera_vencida', 'ingresos_mes',
-          'ingresos_semana', 'clientes_activos', 'facturas_vencidas',
-          'facturas_pendientes', 'facturas_pagadas', 'facturas_total',
-          'total_facturado', 'total_liquidado', 'cobrado_historico',
-          'abonos_registrados', 'abonos_cantidad', 'monto_recuperado',
-          'total_notas_credito', 'periodo_mes', 'periodo_semana',
-          'ultimo_movimiento_id', 'ultima_reconciliacion',
-          'ultima_actualizacion'
-        ])
-        && metricasNoNegativas(request.resource.data)
-        && request.resource.data.periodo_mes is string
-        && request.resource.data.periodo_semana is string
-        && request.resource.data.ultimo_movimiento_id is string
-        && request.resource.data.ultimo_movimiento_id != ''
-        && request.resource.data.ultima_actualizacion is timestamp
-        && (
-          !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['ultima_reconciliacion'])
-          || isSU()
-        );
-
+      allow create: if isSU() && documentoId == 'stats_actuales' && request.resource.data.keys().hasOnly(['cartera_total', 'cartera_vencida', 'ingresos_mes', 'ingresos_semana', 'clientes_activos', 'facturas_vencidas', 'facturas_pendientes', 'facturas_pagadas', 'facturas_total', 'total_facturado', 'total_liquidado', 'cobrado_historico', 'abonos_registrados', 'abonos_cantidad', 'monto_recuperado', 'total_notas_credito', 'periodo_mes', 'periodo_semana', 'ultimo_movimiento_id', 'ultima_reconciliacion', 'ultima_actualizacion']) && metricasNoNegativas(request.resource.data) && request.resource.data.periodo_mes is string && request.resource.data.periodo_semana is string && request.resource.data.ultimo_movimiento_id is string && request.resource.data.ultima_actualizacion is timestamp;
+      allow update: if isStaff() && documentoId == 'stats_actuales' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['cartera_total', 'cartera_vencida', 'ingresos_mes', 'ingresos_semana', 'clientes_activos', 'facturas_vencidas', 'facturas_pendientes', 'facturas_pagadas', 'facturas_total', 'total_facturado', 'total_liquidado', 'cobrado_historico', 'abonos_registrados', 'abonos_cantidad', 'monto_recuperado', 'total_notas_credito', 'periodo_mes', 'periodo_semana', 'ultimo_movimiento_id', 'ultima_reconciliacion', 'ultima_actualizacion']) && metricasNoNegativas(request.resource.data) && request.resource.data.periodo_mes is string && request.resource.data.periodo_semana is string && request.resource.data.ultimo_movimiento_id is string && request.resource.data.ultimo_movimiento_id != '' && request.resource.data.ultima_actualizacion is timestamp && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['ultima_reconciliacion']) || isSU());
       allow delete: if false;
     }
   }

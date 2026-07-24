@@ -9,6 +9,16 @@ import {
   where,
 } from "firebase/firestore";
 
+import {
+  ESTADOS_FACTURA,
+} from "../constants/facturaConstants";
+
+import {
+  esFacturaCancelada,
+  esFacturaPagada,
+  esFacturaVencida,
+} from "../utils/estadosFactura";
+
 import { db } from "../config/firebase";
 import { normalizarFacturaSnapshot } from "../utils/normalizarFactura";
 
@@ -43,8 +53,30 @@ const coincideFiltrosLocales = (
   factura,
   { filtroEstatus, fechaInicio, fechaFin },
 ) => {
-  if (filtroEstatus !== "Todas" && factura.estatus !== filtroEstatus) {
-    return false;
+  if (filtroEstatus === "Todas") {
+    if (esFacturaCancelada(factura)) {
+      return false;
+    }
+  } else if (filtroEstatus === "Cancelada") {
+    if (!esFacturaCancelada(factura)) {
+      return false;
+    }
+  } else if (filtroEstatus === "Pagada") {
+    if (!esFacturaPagada(factura)) {
+      return false;
+    }
+  } else if (filtroEstatus === "Vencida") {
+    if (!esFacturaVencida(factura)) {
+      return false;
+    }
+  } else if (filtroEstatus === "Pendiente") {
+    if (
+      esFacturaCancelada(factura) ||
+      esFacturaPagada(factura) ||
+      esFacturaVencida(factura)
+    ) {
+      return false;
+    }
   }
 
   if (fechaInicio && factura.emision < fechaInicio) {
@@ -234,8 +266,7 @@ const crearRestriccionesEstado = ({
     restricciones.push(where("emision", "<=", hasta));
   }
 
-  if (filtroEstatus === "Vencida") {
-    restricciones.push(where("vencimiento", "<", hoy));
+if (filtroEstatus === ESTADOS_FACTURA.VENCIDA) {    restricciones.push(where("vencimiento", "<", hoy));
     restricciones.push(where("saldo_pendiente", ">", 0));
 
     if (usaRangoEmision) {
@@ -244,8 +275,7 @@ const crearRestriccionesEstado = ({
 
     restricciones.push(orderBy("vencimiento", "desc"));
     restricciones.push(orderBy("saldo_pendiente", "desc"));
-  } else if (filtroEstatus === "Pendiente") {
-    restricciones.push(where("vencimiento", ">=", hoy));
+} else if (filtroEstatus === ESTADOS_FACTURA.PENDIENTE) {    restricciones.push(where("vencimiento", ">=", hoy));
     restricciones.push(where("saldo_pendiente", ">", 0));
 
     if (usaRangoEmision) {
@@ -254,12 +284,24 @@ const crearRestriccionesEstado = ({
 
     restricciones.push(orderBy("vencimiento", "asc"));
     restricciones.push(orderBy("saldo_pendiente", "desc"));
-  } else if (filtroEstatus === "Pagada") {
+} else if (filtroEstatus === ESTADOS_FACTURA.PAGADA) {
     restricciones.push(where("saldo_pendiente", "==", 0));
     restricciones.push(orderBy("emision", "desc"));
-  } else {
+} else if (filtroEstatus === ESTADOS_FACTURA.CANCELADA) {
+    restricciones.push(where("estatus", "==", "Cancelada"));
     restricciones.push(orderBy("emision", "desc"));
-  }
+  } else {
+  // Para "Todas", solo traer estados operativos
+  restricciones.push(
+    where("estatus", "in", [
+      ESTADOS_FACTURA.PENDIENTE,
+      ESTADOS_FACTURA.VENCIDA,
+      ESTADOS_FACTURA.PAGADA,
+    ])
+  );
+
+  restricciones.push(orderBy("emision", "desc"));
+}
 
   if (cursor) {
     restricciones.push(startAfter(cursor));
@@ -290,12 +332,23 @@ const consultarEstadoGlobal = async ({
   );
 
   const snapshot = await getDocs(consulta);
-  const documentosVisibles = snapshot.docs.slice(0, pageSize);
+
+  const facturasFiltradas = snapshot.docs
+    .map(normalizarFacturaSnapshot)
+    .filter((factura) =>
+      coincideFiltrosLocales(factura, {
+        filtroEstatus,
+        fechaInicio,
+        fechaFin,
+      }),
+    );
 
   return {
-    facturas: documentosVisibles.map(normalizarFacturaSnapshot),
+    facturas: facturasFiltradas.slice(0, pageSize),
     cursorSiguiente:
-      documentosVisibles[documentosVisibles.length - 1] || null,
+      snapshot.docs.length > 0
+        ? snapshot.docs[Math.min(pageSize - 1, snapshot.docs.length - 1)]
+        : null,
     haySiguiente: snapshot.docs.length > pageSize,
     mensaje: "",
   };
