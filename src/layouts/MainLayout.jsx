@@ -9,6 +9,7 @@ import {
   Menu,
   Shield,
   Users,
+  BarChart3,
   X,
 } from "lucide-react";
 
@@ -79,6 +80,11 @@ export default function MainLayout() {
       name: "Calendario",
       path: "/calendario",
       icon: Calendar,
+    },
+    {
+    name: "Reportes",
+    path: "/reportes",
+    icon: BarChart3,
     },
     ...(esSU
       ? [

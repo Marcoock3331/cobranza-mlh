@@ -102,9 +102,50 @@ export const esFacturaPagada = (factura) => {
 
 /**
  * Es factura vencida.
+ *
+ * Regla oficial del sistema:
+ * - Debe tener saldo pendiente.
+ * - Si existe fecha de vencimiento, se evalúa contra la fecha actual.
+ * - Si no existe fecha válida, se utiliza el estatus como respaldo.
  */
-export const esFacturaVencida = (factura) => {
-  return obtenerEstadoFactura(factura) === ESTADOS_FACTURA.VENCIDA;
+export const esFacturaVencida = (factura = {}) => {
+  const saldo =
+    Math.round((Number(factura?.saldo_pendiente) || 0) * 100) / 100;
+
+  // Una factura liquidada nunca se considera vencida.
+  if (saldo <= 0) {
+    return false;
+  }
+
+  let vencimiento = null;
+
+  if (factura?.vencimiento) {
+    if (
+      typeof factura.vencimiento?.toDate === "function"
+    ) {
+      vencimiento = factura.vencimiento.toDate();
+    } else {
+      vencimiento = new Date(factura.vencimiento);
+    }
+  }
+
+  // Si no existe una fecha válida, usar el estatus como respaldo.
+  if (
+    !(vencimiento instanceof Date) ||
+    Number.isNaN(vencimiento.getTime())
+  ) {
+    return (
+      obtenerEstadoFactura(factura) ===
+      ESTADOS_FACTURA.VENCIDA
+    );
+  }
+
+  const hoy = new Date();
+
+  hoy.setHours(0, 0, 0, 0);
+  vencimiento.setHours(0, 0, 0, 0);
+
+  return vencimiento < hoy;
 };
 
 /**

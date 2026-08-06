@@ -5,6 +5,7 @@ import { AuthProvider } from "./context/AuthProvider";
 import { GlobalProvider } from "./context/GlobalProvider";
 import MainLayout from "./layouts/MainLayout";
 import Calendario from "./pages/Calendario";
+import Reportes from "./pages/Reportes";
 import Clientes from "./pages/Clientes";
 import Dashboard from "./pages/Dashboard";
 import ExpedienteCliente from "./pages/ExpedienteCliente";
@@ -43,6 +44,7 @@ function App() {
 
               <Route path="calendario" element={<Calendario />} />
               <Route path="facturas" element={<Facturacion />} />
+              <Route path="reportes" element={<Reportes />} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

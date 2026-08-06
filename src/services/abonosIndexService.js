@@ -14,6 +14,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 
+
 import { auth, db } from "../config/firebase";
 import {
   METRICAS_COLLECTION,
@@ -21,6 +22,7 @@ import {
   METRICAS_MOVIMIENTOS_COLLECTION,
   prepararReconciliacionMetricas,
 } from "./metricasService";
+import { esFacturaCancelada } from "../utils/estadosFactura";
 
 const FACTURAS_COLLECTION = "facturas";
 const ABONOS_INDEX_COLLECTION = "abonos_index";
@@ -384,6 +386,7 @@ export const abonosIndexService = {
 
       let abonosIndexados = 0;
       let facturasConAbonos = 0;
+      let facturasProcesadas = 0;
 
       for (const documento of facturasSnap.docs) {
         const factura = {
@@ -391,13 +394,27 @@ export const abonosIndexService = {
           ...documento.data(),
         };
 
+        if (esFacturaCancelada(factura)) {
+          continue;
+        }
+
+        facturasProcesadas += 1;
+
         const montoTotal = redondearMoneda(factura.monto_total);
         const saldoPendiente = redondearMoneda(
           factura.saldo_pendiente,
         );
-        const totalNotasCredito = redondearMoneda(
-          factura.total_notas_credito,
-        );
+        
+        let sumaNotasActivas = 0;
+        if (Array.isArray(factura.notas_credito)) {
+          factura.notas_credito.forEach((nota) => {
+            if (nota.cancelada !== true) {
+              sumaNotasActivas += Number(nota.monto || 0);
+            }
+          });
+        }
+        const totalNotasCredito = redondearMoneda(sumaNotasActivas);
+
         const abonos = Array.isArray(factura.abonos)
           ? factura.abonos
           : [];
@@ -486,6 +503,7 @@ export const abonosIndexService = {
       );
       const reconstruccionId = `rebuild-${Date.now()}-${movimientoRef.id}`;
 
+
       await runTransaction(db, async (transaction) => {
         const statsActualSnapshot = await transaction.get(statsRef);
 
@@ -516,49 +534,51 @@ export const abonosIndexService = {
             reconstruccionId,
           });
 
-        transaction.set(movimientoRef, movimientoPayload);
-        transaction.update(statsRef, statsPayload);
-        transaction.set(actividadRef, {
-          actor_uid: actorUid,
-          metricas_movimiento_id: movimientoRef.id,
-          usuario: userName || "SU",
-          modulo: "Métricas",
-          tipo: "Reconstrucción",
-          reconstruccion_id: reconstruccionId,
-          facturas_revisadas: facturasSnap.size,
-          clientes_revisados: clientesSnap.size,
-          abonos_indexados: abonosIndexados,
-          detalle: reconstruirIndice
-            ? "Se reconstruyeron el índice de abonos y las métricas globales desde los documentos operativos."
-            : "Se verificaron y reconciliaron automáticamente las métricas globales desde los documentos operativos.",
-          serverTime: serverTimestamp(),
-        });
-      });
+transaction.set(movimientoRef, movimientoPayload);
 
-      return {
-        success: true,
-        data: {
-          facturasRevisadas: facturasSnap.size,
-          clientesRevisados: clientesSnap.size,
-          facturasConAbonos,
-          abonosIndexados,
-          indiceReconstruido: reconstruirIndice,
-          montoRecuperado: redondearMoneda(
-            metricas.monto_recuperado,
-          ),
-          movimientoMetricasId: movimientoRef.id,
-          commits: estadoBatch.commits + 1,
-        },
-      };
-    } catch (error) {
-      console.error("Error reconciliando métricas:", error);
+transaction.update(statsRef, statsPayload);
 
-      return {
-        success: false,
-        error:
-          error?.message ||
-          "No se pudieron reconciliar las métricas.",
-      };
-    }
+transaction.set(actividadRef, {
+  actor_uid: actorUid,
+  metricas_movimiento_id: movimientoRef.id,
+  usuario: userName || "SU",
+  modulo: "Métricas",
+  tipo: "Reconstrucción",
+  reconstruccion_id: reconstruccionId,
+  facturas_revisadas: facturasProcesadas,
+  clientes_revisados: clientesSnap.size,
+  abonos_indexados: abonosIndexados,
+  detalle: reconstruirIndice
+    ? "Se reconstruyeron el índice de abonos y las métricas globales desde los documentos operativos."
+    : "Se verificaron y reconciliaron automáticamente las métricas globales desde los documentos operativos.",
+  serverTime: serverTimestamp(),
+});
+});
+
+return {
+  success: true,
+  data: {
+    facturasRevisadas: facturasProcesadas,
+    clientesRevisados: clientesSnap.size,
+    facturasConAbonos,
+    abonosIndexados,
+    indiceReconstruido: reconstruirIndice,
+    montoRecuperado: redondearMoneda(
+      metricas.monto_recuperado,
+    ),
+    movimientoMetricasId: movimientoRef.id,
+    commits: estadoBatch.commits + 1,
   },
+};
+} catch (error) {
+  console.error("Error reconciliando métricas:", error);
+
+  return {
+    success: false,
+    error:
+      error?.message ||
+      "No se pudieron reconciliar las métricas.",
+  };
+}
+},
 };
